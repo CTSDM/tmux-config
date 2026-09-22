@@ -14,6 +14,6 @@ trap 'tmux kill-session -t "$peek" 2>/dev/null' EXIT HUP TERM
 # leaves the client blank).
 [[ $(readlink /proc/$$/fd/0) == /dev/tty && -t 1 ]] && exec 0<&1
 # A nested client needs TMUX unset, which also drops the server: name it.
-TMUX= tmux -S "$socket" new-session -t "$sess" -s "$peek" \; \
+TMUX= tmux -S "$socket" new-session -t "=$sess" -s "$peek" \; \
   select-window -t "$peek:$win" \; \
   select-pane -t "$pane"
