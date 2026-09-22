@@ -11,7 +11,7 @@
 
 C_RESET=$'\e[0m' C_DIM=$'\e[38;2;108;112;134m' C_TEXT=$'\e[38;2;205;214;244m'
 C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;137;180;250m' C_NEEDS=$'\e[38;2;250;179;135m'
-C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;203;166;247m'
+C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;148;226;213m'
 
 FIELDS="#{pane_id}$US#{session_name}$US#{window_index}$US#{pane_index}$US#{window_name}$US#{pane_current_command}$US#{pane_title}$US#{pane_current_path}$US#{@agent}$US#{@agent_state}$US#{@agent_needs}$US#{@agent_since}$US#{@agent_tool}$US#{@agent_msg}$US#{@agent_subs}$US#{@agent_subtypes}$US#{@agent_profile}$US#{@agent_mode}$US#{@agent_model}"
 
@@ -133,7 +133,8 @@ trap 'kill $refresher 2>/dev/null; rm -f "$sock"' EXIT
 "$self" --list | fzf --ansi --listen="$sock" --delimiter=$'\t' --with-nth=2 --track --no-sort \
   --layout=reverse --info=inline-right --prompt='all> ' --pointer='▶' --gutter=' ' \
   --header='enter go · ctrl-o peek · ctrl-a agents/all · ctrl-r refresh · esc close' \
-  --color='header:#6c7086,pointer:#89dceb,prompt:#89dceb,hl:#89dceb,hl+:#89dceb,bg+:#313244,border:#45475a' \
+  --color='fg:#cdd6f4,bg:#1e1e2e,bg+:#313244,hl:#cba6f7,hl+:#cba6f7,header:#6c7086,info:#6c7086' \
+  --color='pointer:#cba6f7,prompt:#cba6f7,border:#45475a,preview-border:#313244,separator:#313244,scrollbar:#45475a' \
   --preview="$self --preview {1}" \
   --preview-window='right,55%,border-left,<150(down,55%,border-top)' \
   --bind="enter:become($AG_BIN/agent-jump {1} '$client')" \

@@ -35,8 +35,8 @@ that has agents, with totals on the right.
 | `◇` | an agent that is not reporting (started before the hooks) |
 | `+N` | running subagents |
 
-**Pane borders** take the state's color. In split windows they also show a
-label such as `claude:work · needs permission · Bash: git push`.
+**Pane borders** take the state's color. In split windows each pane's bottom
+border also shows a label such as `claude:work · needs permission · Bash: git push`.
 
 **Keys**
 
@@ -59,8 +59,9 @@ looking at the pane closes it.
 - `agents/bin/agent-hook` runs on the agents' lifecycle hooks and writes facts
   into pane options (`@agent_state`, `@agent_needs`, `@agent_subs`,
   `@agent_tool`, ...). It prints nothing and always exits 0.
-- `agents/agents.conf` turns those options into the status bar and borders
-  with tmux formats; nothing polls.
+- `agents/agents.conf` turns those options into glyphs, labels and counts with
+  tmux formats; nothing polls. `theme.conf` (Catppuccin Mocha) places them:
+  a solid two-line bar, state-colored borders, matching popups and menus.
 - Denying a permission or pressing Esc ends a turn without any hook, so
   `agent-reconcile` checks the agent's transcript when you leave a pane that
   still looks busy, and when mission control opens.
