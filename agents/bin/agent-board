@@ -10,7 +10,7 @@
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 
 C_RESET=$'\e[0m' C_DIM=$'\e[38;2;108;112;134m' C_TEXT=$'\e[38;2;205;214;244m'
-C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;137;180;250m' C_NEEDS=$'\e[38;2;250;179;135m'
+C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;249;226;175m' C_NEEDS=$'\e[38;2;250;179;135m'
 C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;148;226;213m'
 
 FIELDS="#{pane_id}$US#{session_name}$US#{window_index}$US#{pane_index}$US#{window_name}$US#{pane_current_command}$US#{pane_title}$US#{pane_current_path}$US#{@agent}$US#{@agent_state}$US#{@agent_needs}$US#{@agent_since}$US#{@agent_tool}$US#{@agent_msg}$US#{@agent_subs}$US#{@agent_subtypes}$US#{@agent_profile}$US#{@agent_mode}$US#{@agent_model}"
