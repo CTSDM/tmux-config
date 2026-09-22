@@ -12,9 +12,9 @@
 # (session option @space); "from folder" goes back to the detected one
 # (@space_auto). Sessions in no space see everything.
 #
-# Each session gets its own second status line (status-format[1]), built from
-# the @fleet-tpl template in theme.conf: only its space's sessions and totals,
-# plus a small chip per other space that has something going on.
+# Each session gets its own second status line in @fleet-line, built from the
+# @fleet-tpl template in theme.conf: only its space's sessions and totals, plus
+# a small chip per other space that has something going on.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 shopt -u patsub_replacement 2>/dev/null # bash 5.2: '&' in a \${x//a/b} replacement means the match
 
@@ -94,7 +94,8 @@ apply() { # <session> <space_auto>
   manual=$(tmux show -qv -t "=$sess:" @space)
   space=${manual:-$auto}
   tmux set -t "=$sess:" @space-color "$(color_of "$space")" \; \
-    set -t "=$sess:" 'status-format[1]' "$(fleet_format "$space")"
+    set -t "=$sess:" @fleet-line "$(fleet_format "$space")" \; \
+    set -qu -t "=$sess:" status-format # left by an older version; it blanked line 1
 }
 
 assign() { # [session...]
@@ -129,7 +130,7 @@ bind_menu() {
 read_rules
 case ${1:-} in
   load)
-    tmux set -g @spaces "${spaces[*]}" \; set -g 'status-format[1]' "$(fleet_format "")"
+    tmux set -g @spaces "${spaces[*]}" \; set -g @fleet-line "$(fleet_format "")"
     bind_menu
     assign
     ;;
