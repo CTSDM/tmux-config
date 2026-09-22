@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Refuse commits that would publish secrets or private data.
+#
+#  1. gitleaks on the staged changes (default rules + .gitleaks.toml).
+#  2. Words listed in .git/info/private-words, one per line: client and
+#     project names, hostnames, usernames. That file lives inside .git, so the
+#     list itself is never committed.
+#
+# Enabled per clone with: git config core.hooksPath .githooks (setup.sh does it).
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed, refusing to commit." >&2
+  exit 1
+fi
+
+gitleaks git --pre-commit --staged --redact --no-banner --log-level warn \
+  --config "$(git rev-parse --show-toplevel)/.gitleaks.toml"
+
+words_file="$(git rev-parse --git-dir)/info/private-words"
+if [[ -s $words_file ]]; then
+  patterns=$(sed -e '/^[[:space:]]*$/d' -e '/^#/d' "$words_file")
+  if [[ -n $patterns ]]; then
+    hits=$( { git diff --cached --name-only; git diff --cached -U0 --no-color | grep '^+' | grep -v '^+++'; } \
+      | grep -o -i -F -f <(printf '%s\n' "$patterns") | sort -u || true)
+    if [[ -n $hits ]]; then
+      echo "pre-commit: staged changes contain private words:" >&2
+      sed 's/^/  /' <<<"$hits" >&2
+      exit 1
+    fi
+  fi
+fi

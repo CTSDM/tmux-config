@@ -1,0 +1,21 @@
+# Secret scanning for this repo, run on every commit by .githooks/pre-commit.
+# Default gitleaks rules plus two guards against personal data.
+
+[extend]
+useDefault = true
+
+# The default allowlist ignores anything shaped like /home/..., so report only
+# the username part.
+[[rules]]
+id = "absolute-home-path"
+description = "Absolute home directory path (use ~ or $HOME instead)"
+regex = '''/home/([A-Za-z0-9._-]+)/'''
+secretGroup = 1
+
+[[rules]]
+id = "email-address"
+description = "Email address"
+regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+'''
+[[rules.allowlists]]
+description = "SSH remotes such as git@github.com:user/repo"
+regexes = ['''^git@''']

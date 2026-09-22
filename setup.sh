@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# Tmux + Tmuxifier setup script
+# Installs tmux config, TPM (plugin manager), and tmuxifier with layouts.
+#
+# Usage:
+#   ./setup.sh                  # install everything
+#   ./setup.sh --no-layouts     # skip copying tmuxifier layouts
+#
+# Assumes:
+#   - tmux is already installed
+#   - git is available
+#   - This script is run from the directory containing tmux.conf
+# =============================================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKIP_LAYOUTS=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-layouts) SKIP_LAYOUTS=true ;;
+        -h|--help)
+            echo "Usage: $0 [--no-layouts]"
+            echo "  --no-layouts  Skip copying tmuxifier session layouts"
+            exit 0
+            ;;
+        *) echo "Unknown option: $arg"; exit 1 ;;
+    esac
+done
+
+info()  { printf '\033[1;34m::\033[0m %s\n' "$*"; }
+ok()    { printf '\033[1;32m::\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33m::\033[0m %s\n' "$*"; }
+error() { printf '\033[1;31m::\033[0m %s\n' "$*"; }
+
+# --- Preflight checks -------------------------------------------------------
+
+if ! command -v tmux &>/dev/null; then
+    error "tmux is not installed. Install it first, then re-run this script."
+    exit 1
+fi
+
+if ! command -v git &>/dev/null; then
+    error "git is not installed. Install it first, then re-run this script."
+    exit 1
+fi
+
+# --- 1. Tmux configuration --------------------------------------------------
+
+TMUX_CONFIG_DIR="$HOME/.config/tmux"
+info "Setting up tmux config at $TMUX_CONFIG_DIR"
+
+mkdir -p "$TMUX_CONFIG_DIR"
+
+if [ -f "$TMUX_CONFIG_DIR/tmux.conf" ] && [ "$SCRIPT_DIR" != "$TMUX_CONFIG_DIR" ]; then
+    warn "Existing tmux.conf found — backing up to tmux.conf.bak"
+    cp "$TMUX_CONFIG_DIR/tmux.conf" "$TMUX_CONFIG_DIR/tmux.conf.bak"
+fi
+
+if [ "$SCRIPT_DIR" != "$TMUX_CONFIG_DIR" ]; then
+    cp "$SCRIPT_DIR/tmux.conf" "$TMUX_CONFIG_DIR/tmux.conf"
+    ok "Copied tmux.conf"
+else
+    ok "tmux.conf already in place"
+fi
+
+# --- 2. TPM (Tmux Plugin Manager) -------------------------------------------
+
+TPM_DIR="$HOME/.tmux/plugins/tpm"
+info "Installing TPM (Tmux Plugin Manager)"
+
+if [ -d "$TPM_DIR" ]; then
+    ok "TPM already installed at $TPM_DIR"
+else
+    git clone https://github.com/tmux-plugins/tpm "$TPM_DIR"
+    ok "TPM installed"
+fi
+
+# --- 3. Install tmux plugins via TPM ----------------------------------------
+
+info "Installing tmux plugins"
+if [ -f "$TPM_DIR/bin/install_plugins" ]; then
+    "$TPM_DIR/bin/install_plugins"
+    ok "Plugins installed"
+else
+    warn "Could not auto-install plugins. Open tmux and press prefix + I to install."
+fi
+
+# --- 4. Tmuxifier -----------------------------------------------------------
+
+TMUXIFIER_DIR="$HOME/.tmuxifier"
+info "Installing tmuxifier"
+
+if [ -d "$TMUXIFIER_DIR" ]; then
+    ok "Tmuxifier already installed at $TMUXIFIER_DIR"
+else
+    git clone https://github.com/jimeh/tmuxifier.git "$TMUXIFIER_DIR"
+    ok "Tmuxifier installed"
+fi
+
+# --- 5. Tmuxifier layouts ----------------------------------------------------
+
+LAYOUTS_SRC="$SCRIPT_DIR/layouts"
+LAYOUTS_DST="$TMUXIFIER_DIR/layouts"
+
+if [ "$SKIP_LAYOUTS" = true ]; then
+    info "Skipping layout copy (--no-layouts)"
+elif [ -d "$LAYOUTS_SRC" ]; then
+    info "Copying tmuxifier session layouts"
+    mkdir -p "$LAYOUTS_DST"
+    cp "$LAYOUTS_SRC"/*.session.sh "$LAYOUTS_DST/" 2>/dev/null || true
+    ok "Layouts copied to $LAYOUTS_DST"
+else
+    warn "No layouts directory found at $LAYOUTS_SRC — skipping"
+    warn "If your layouts are in ~/.tmuxifier/layouts, they are already in place."
+fi
+
+# --- 6. Shell integration ----------------------------------------------------
+
+info "Checking shell integration for tmuxifier"
+
+SHELL_RC=""
+case "$(basename "${SHELL:-bash}")" in
+    zsh)  SHELL_RC="$HOME/.zshrc" ;;
+    bash) SHELL_RC="$HOME/.bashrc" ;;
+    fish) SHELL_RC="$HOME/.config/fish/config.fish" ;;
+    *)    SHELL_RC="$HOME/.profile" ;;
+esac
+
+TMUXIFIER_INIT='eval "$(~/.tmuxifier/bin/tmuxifier init -)"'
+
+if [ -f "$SHELL_RC" ] && grep -qF 'tmuxifier init' "$SHELL_RC"; then
+    ok "Tmuxifier init already present in $SHELL_RC"
+else
+    info "Adding tmuxifier init to $SHELL_RC"
+    {
+        echo ""
+        echo "# Tmuxifier"
+        echo "$TMUXIFIER_INIT"
+    } >> "$SHELL_RC"
+    ok "Added tmuxifier init to $SHELL_RC"
+fi
+
+# --- Done --------------------------------------------------------------------
+
+echo ""
+ok "Setup complete!"
+echo ""
+echo "  Next steps:"
+echo "    1. Restart your shell or run: source $SHELL_RC"
+echo "    2. Open tmux. Plugins should already be installed."
+echo "       If not, press Alt+a then I to install them."
+echo "    3. Use tmuxifier: tmuxifier list-sessions"
+echo ""
