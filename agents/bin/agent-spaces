@@ -4,15 +4,20 @@
 #   agent-spaces load                 read spaces.conf, tag every session, bind prefix+S
 #   agent-spaces assign [session...]  re-detect sessions from their folder
 #   agent-spaces set <session> <space|auto>
+#   agent-spaces next|prev <client>   switch the client to the next/previous session
+#   agent-spaces go <client> <n>      switch the client to session number n
+# next, prev and go stay within the client's space; its sessions are numbered
+# in the order of the top bar (by name, like tmux itself).
 #
 # spaces.conf (next to tmux.conf, never committed) maps folders to spaces:
-#   personal ~/code/mine
 #   work     ~/code/acme          first match wins; a folder covers its subfolders
+#   personal *                    "*" catches every other folder
 # A session's space comes from its start folder. prefix+S overrides it by hand
 # (session option @space); "from folder" goes back to the detected one
-# (@space_auto). Sessions in no space see everything.
+# (@space_auto). Spaces are strict: a session in no space shows only in the
+# "all spaces" views, and while you are on one the top bar shows all spaces.
 #
-# Each session gets its own second status line in @fleet-line, built from the
+# Each session gets its own top status line in @fleet-line, built from the
 # @fleet-tpl template in theme.conf: only its space's sessions and totals, plus
 # a small chip per other space that has something going on.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
@@ -23,6 +28,7 @@ PALETTE=('#cba6f7' '#89b4fa' '#f5c2e7' '#74c7ec' '#f2cdcd')   # mauve, blue, pin
 UNASSIGNED_COLOR='#a6adc8'
 
 rules=() spaces=()
+declare -A fleet_cache=()
 read_rules() {
   local space dir
   [[ -r $RULES ]] || return 0
@@ -46,7 +52,7 @@ space_for_path() {
   local rule space dir
   for rule in "${rules[@]}"; do
     space=${rule%%$'\t'*} dir=${rule#*$'\t'}
-    if [[ $1 == "$dir" || $1 == "$dir"/* ]]; then printf '%s' "$space"; return; fi
+    if [[ $dir == '*' || $1 == "$dir" || $1 == "$dir"/* ]]; then printf '%s' "$space"; return; fi
   done
 }
 
@@ -63,7 +69,7 @@ C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{e|>:#{@agent_sub
 fleet_format() { # <space or empty for "all">
   local space=$1 filter label color others="" other n d w
   if [[ -n $space ]]; then
-    filter="#{||:#{==:$SPACE_OF,$space},#{==:$SPACE_OF,}}" label=$space color=$(color_of "$space")
+    filter="#{==:$SPACE_OF,$space}" label=$space color=$(color_of "$space")
     for other in "${spaces[@]}"; do
       [[ $other == "$space" ]] && continue
       local in="#{==:$SPACE_OF,$other}"
@@ -80,6 +86,8 @@ fleet_format() { # <space or empty for "all">
   tpl=${tpl//@@FILTER@@/$filter}
   tpl=${tpl//@@LABEL@@/$label}
   tpl=${tpl//@@COLOR@@/$color}
+  local index="#{@space-index-${space:-all}}"
+  tpl=${tpl//@@INDEX@@/$index}
   tpl=${tpl//@@OTHERS@@/$others}
   # The totals leave out the current session: the window line shows its own.
   local others_only="#{&&:$filter,#{!=:#{session_name},#{client_session}}}"
@@ -89,14 +97,56 @@ fleet_format() { # <space or empty for "all">
   printf '%s' "$tpl"
 }
 
+# The sessions shown for a space, in the top bar's order: tmux lists sessions
+# by name, as its #{S:} loop does. An empty space means all sessions.
+space_list() { # [space]
+  local sess sp
+  while IFS=$US read -r sess sp; do
+    [[ $sess == _peek-* ]] && continue
+    [[ -z ${1:-} || $sp == "$1" ]] && printf '%s\n' "$sess"
+  done < <(tmux list-sessions -F "#{session_name}$US#{?@space,#{@space},#{@space_auto}}")
+}
+
+# Numbers the sessions of every space (@space-index-<space>, and -all).
+number_sessions() {
+  local space sess i cmds
+  for space in "${spaces[@]}" ""; do
+    i=0 cmds=()
+    while IFS= read -r sess; do
+      cmds+=(set -t "=$sess:" "@space-index-${space:-all}" "$((++i))" \;)
+    done < <(space_list "$space")
+    ((${#cmds[@]})) && tmux "${cmds[@]}"
+  done
+}
+
+# Switches a client within its space: next, prev or go <n>.
+switch_in_space() { # <client> next|prev|go [n]
+  local client=$1 how=$2 n=${3:-} current space list=() i pos=-1 target
+  IFS=$US read -r current space < <(tmux display -p -c "$client" "#{session_name}$US#{?@space,#{@space},#{@space_auto}}")
+  [[ $current == _peek-* ]] && return
+  mapfile -t list < <(space_list "$space")
+  ((${#list[@]})) || return
+  for i in "${!list[@]}"; do [[ ${list[i]} == "$current" ]] && pos=$i; done
+  case $how in
+    next) target=${list[(pos + 1) % ${#list[@]}]} ;;
+    prev) target=${list[(pos - 1 + ${#list[@]}) % ${#list[@]}]} ;;
+    go)
+      if [[ $n =~ ^[0-9]+$ ]] && ((n >= 1 && n <= ${#list[@]})); then target=${list[n - 1]}
+      else tmux display-message -c "$client" "No session $n in ${space:-this space}"; return; fi ;;
+  esac
+  [[ $target == "$current" ]] || tmux switch-client -c "$client" -t "=$target:"
+}
+
 # Tags one session and gives it the second status line of its space.
 apply() { # <session> <space_auto>
   local sess=$1 auto=$2 manual space
   if [[ -n $auto ]]; then tmux set -t "=$sess:" @space_auto "$auto"; else tmux set -u -t "=$sess:" @space_auto; fi
   manual=$(tmux show -qv -t "=$sess:" @space)
   space=${manual:-$auto}
+  local key=${space:-all}
+  [[ -n ${fleet_cache[$key]+set} ]] || fleet_cache[$key]=$(fleet_format "$space")
   tmux set -t "=$sess:" @space-color "$(color_of "$space")" \; \
-    set -t "=$sess:" @fleet-line "$(fleet_format "$space")" \; \
+    set -t "=$sess:" @fleet-line "${fleet_cache[$key]}" \; \
     set -qu -t "=$sess:" status-format # left by an older version; it blanked line 1
 }
 
@@ -117,6 +167,7 @@ assign() { # [session...]
       apply "$sess" "${space_of[$sess]}"
     fi
   done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
+  number_sessions
 }
 
 bind_menu() {
@@ -137,11 +188,13 @@ case ${1:-} in
     assign
     ;;
   assign) shift; assign "$@" ;;
+  next | prev) switch_in_space "${2:?usage: agent-spaces next|prev <client>}" "$1" ;;
+  go) switch_in_space "${2:?usage: agent-spaces go <client> <n>}" go "${3:-}" ;;
   set)
     sess=${2:?usage: agent-spaces set <session> <space|auto>} space=${3:?}
     if [[ $space == auto ]]; then tmux set -u -t "=$sess:" @space; else tmux set -t "=$sess:" @space "$space"; fi
     assign "$sess"
     tmux display-message "$sess: ${space/auto/space from its folder}"
     ;;
-  *) sed -n '2,17p' "$0" >&2; exit 2 ;;
+  *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" >&2; exit 2 ;;
 esac

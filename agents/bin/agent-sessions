@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# agent-sessions [client]: find a session by typing, and switch this terminal
+# to it. Lists the sessions of the client's space (see agent-spaces), numbered
+# like the top bar, with their agents' states and a preview of their active pane.
+#
+#   enter   switch here        ctrl-s  this space / all spaces
+#
+# prefix+e runs `agent-sessions --popup <client>`, which opens it in a popup
+# on that client. Internal: --list <space|all>, --preview <session>.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+C_RESET=$'\e[0m' C_DIM=$'\e[38;2;108;112;134m' C_SUB=$'\e[38;2;166;173;200m' C_TEXT=$'\e[38;2;205;214;244m'
+C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;249;226;175m' C_NEEDS=$'\e[38;2;250;179;135m'
+C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;148;226;213m'
+C_IDLE=$'\e[38;2;127;132;156m'
+
+glyph() { # <state> <subs>: the pane's glyph, colored as on the bar
+  local state=$1 subs=${2:-0}
+  case $state in
+    needs) printf '%s▲' "$C_NEEDS" ;;
+    error) printf '%s✗' "$C_ERROR" ;;
+    working) printf '%s●' "$C_WORKING" ;;
+    compacting) printf '%s↻' "$C_COMPACT" ;;
+    *)
+      if ((subs > 0)); then printf '%s◐' "$C_WORKING"
+      elif [[ $state == done ]]; then printf '%s✓' "$C_DONE"
+      elif [[ -n $state ]]; then printf '%s○' "$C_IDLE"
+      fi ;;
+  esac
+}
+
+list() { # <space|all>
+  local want=$1 sess sp path windows idx current pane_sess state subs
+  local -A glyphs=()
+  while IFS=$US read -r pane_sess state subs; do
+    [[ -n $state ]] && glyphs[$pane_sess]+=$(glyph "$state" "$subs")
+  done < <(tmux list-panes -a -F "#{session_name}$US#{@agent_state}$US#{@agent_subs}")
+  current=$(tmux display -p -c "$client" '#{session_name}' 2>/dev/null)
+  while IFS=$US read -r sess sp path windows; do
+    [[ $sess == _peek-* ]] && continue
+    [[ $want != all && $sp != "$want" ]] && continue
+    idx=$(tmux show -qv -t "=$sess:" "@space-index-$want")
+    local mark=' ' name_color=$C_SUB
+    [[ $sess == "$current" ]] && mark='▶' name_color=$C_BOLD$C_TEXT
+    printf '%s\t%s%2s%s %s %s%-18s%s %s%s  %s%s%s%s\n' \
+      "$sess" "$C_DIM" "$idx" "$C_RESET" "$mark" "$name_color" "$sess" "$C_RESET" \
+      "${glyphs[$sess]:-}" "$C_RESET" "$C_DIM" "$windows win  ${path/#$HOME/\~}" \
+      "$([[ $want == all && -n $sp ]] && printf '  · %s' "$sp")" "$C_RESET"
+  done < <(tmux list-sessions -F "#{session_name}$US#{?@space,#{@space},#{@space_auto}}$US#{session_path}$US#{session_windows}")
+}
+
+preview() { # <session>
+  local lines=${FZF_PREVIEW_LINES:-40}
+  tmux display -p -t "=$1:" "$C_BOLD$C_TEXT#{session_name}$C_RESET$C_DIM  window #{window_index} of #{session_windows}: #{window_name}$C_RESET"
+  local rule
+  printf -v rule '%*s' "${FZF_PREVIEW_COLUMNS:-80}" ''
+  printf '%s%s%s\n' "$C_DIM" "${rule// /─}" "$C_RESET"
+  tmux capture-pane -ep -t "=$1:" |
+    awk '{ lines[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print lines[i] }' |
+    tail -n $((lines - 2))
+}
+
+case ${1:-} in
+  --list) client=${3:-}; list "${2:-all}"; exit ;;
+  --preview) preview "$2"; exit ;;
+  --popup) exec tmux display-popup -c "$2" -E -w 80% -h 70% -T ' sessions ' "'$AG_BIN/agent-sessions' '$2'" ;;
+esac
+
+client=${1:-}
+space=$(tmux display -p -c "$client" '#{?@space,#{@space},#{@space_auto}}' 2>/dev/null)
+space=${space:-all}
+self=$AG_BIN/agent-sessions
+
+pick=$("$self" --list "$space" "$client" | fzf --ansi --delimiter=$'\t' --with-nth=2 --no-sort \
+  --layout=reverse --info=inline-right --prompt="$space> " --pointer='▶' --gutter=' ' \
+  --header='enter switch here · ctrl-s this space/all · esc close' \
+  --color='fg:#cdd6f4,bg:#1e1e2e,bg+:#313244,hl:#cba6f7,hl+:#cba6f7,header:#6c7086,info:#6c7086' \
+  --color='pointer:#cba6f7,prompt:#cba6f7,border:#45475a,preview-border:#313244,separator:#313244,scrollbar:#45475a' \
+  --preview="$self --preview {1}" \
+  --preview-window='right,55%,border-left,<120(down,50%,border-top)' \
+  --bind="ctrl-s:transform:[ \"\$FZF_PROMPT\" = 'all> ' ] && echo 'change-prompt($space> )+reload($self --list $space $client)' || echo 'change-prompt(all> )+reload($self --list all $client)'" |
+  cut -f1)
+
+[[ -n $pick ]] && tmux switch-client -c "$client" -t "=$pick:"
+exit 0

@@ -7,7 +7,7 @@
 #   ctrl-r  refresh now
 #
 # It opens on the space of the client's session (see agent-spaces); sessions
-# in no space show everywhere. prefix+a runs `agent-board --popup <client>`,
+# in no space show only with all spaces. prefix+a runs `agent-board --popup <client>`,
 # which opens the board in a popup on that client.
 # Internal: --list, --preview <pane>, --toggle space|agents (read and update
 # the filter state in $BOARD_STATE).
@@ -79,7 +79,7 @@ list() {
   load_state
   while IFS=$US read -r pane sess win pidx wname cmd title path agent state needs since tool msg subs subtypes profile mode model pspace; do
     [[ $sess == _peek-* ]] && continue
-    [[ $want_space != all && -n $pspace && $pspace != "$want_space" ]] && continue
+    [[ $want_space != all && $pspace != "$want_space" ]] && continue
     describe
     ((agents_only)) && [[ $rank == 9 ]] && continue
     local name

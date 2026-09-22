@@ -19,10 +19,10 @@ notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
 
 ## What you get
 
-**Status bar** (two lines, top): your session's windows, each with the state
-of its agents and the agent's task as the window name; below it, every session
-of your space that has agents, with totals on the right and a small chip for
-each other space that has something going on.
+**Status bar** (two lines, top): first your space, every session numbered with
+its agents' states, their totals and a small chip per other space with
+something going on; below it, this session's windows (the agent's task as the
+window name) and this session's totals.
 
 | glyph | meaning |
 | --- | --- |
@@ -46,6 +46,10 @@ border also shows a label such as `claude:work · needs permission · Bash: git 
 | `prefix a` | mission control: every pane, agents first, live preview. `enter` go there, `ctrl-o` peek (work in it from the popup), `ctrl-a` agents only / all, `ctrl-r` refresh |
 | `prefix u` | jump to the agent that needs you most (your space first) |
 | `prefix S` | choose this session's space, or go back to the one from its folder |
+| `prefix (` / `prefix )` | previous / next session of your space, in the top bar's order (repeatable) |
+| `prefix g` then `1`-`9` | the session with that number on the top bar |
+| `prefix e` | search the sessions of your space and switch to one (`ctrl-s`: all spaces) |
+| `prefix L` | back to the previous session (tmux's own) |
 | `prefix Q` | mute or unmute the agent sounds |
 | `prefix a` inside a peek | close the peek |
 | `prefix R` | reload the config |
@@ -63,14 +67,15 @@ Personal and work sessions live in one tmux but never mix on screen. List your
 folders in `spaces.conf` (created from `spaces.example`, never committed):
 
 ```
-personal ~/repos/github.com/me
 work     ~/repos/github.com/employer
+personal *
 ```
 
-A session's space comes from its start folder; `prefix S` sets it by hand for
-anything else. The bar, mission control (`ctrl-s` shows all spaces) and
-`prefix u` follow the space of the session you are in, and the session pill
-takes the space's color. Sessions in no space show everywhere.
+A session's space comes from its start folder (`*` catches every other
+folder); `prefix S` sets it by hand. The bar, session switching, mission
+control (`ctrl-s` shows all spaces) and `prefix u` follow the space of the
+session you are in, and the session pill takes the space's color. Spaces are
+strict: a session in no space only shows in the "all spaces" views.
 
 ## Sounds
 
