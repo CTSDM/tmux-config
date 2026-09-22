@@ -65,6 +65,36 @@ count() { # <session filter> <pane condition> -> format counting matching agent 
 C_NEEDS='#{==:#{@agent_state},needs}'
 C_DONE='#{&&:#{==:#{@agent_state},done},#{e|<:#{@agent_subs},1}}'
 C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{e|>:#{@agent_subs},0}}'
+C_IDLE='#{&&:#{m/r:^(idle|ready)$,#{@agent_state}},#{e|<:#{@agent_subs},1}}'
+
+# What the panes of the sessions matching <filter> are doing, most urgent first,
+# only the states present: "1 needs you - 2 working - 3 idle" in words when it
+# fits (up to two states, or 120+ columns), else glyphs like "▲1 ✓1 ●2 ○3" so
+# nothing gets cut. Agents that are not reporting (◇) are not counted.
+summary() { # <session filter>
+  local filter=$1 words="" glyphs="" before="" present="" item n cond color label glyph
+  for item in needs done working idle; do
+    case $item in
+      needs) cond=$C_NEEDS color='#{@ac-needs}' glyph=▲ ;;
+      done) cond=$C_DONE color='#{@ac-done}' glyph=✓ ;;
+      working) cond=$C_WORKING color='#{@ac-working}' glyph=● ;;
+      idle) cond=$C_IDLE color='#{@thm-overlay1}' glyph=○ ;;
+    esac
+    n=$(count "$filter" "$cond")
+    case $item in
+      needs) label="#[bold]$n #{?#{==:$n,1},needs,need} you#[nobold]" ;;
+      *) label="$n $item" ;;
+    esac
+    local sep="" gap=""
+    [[ -n $before ]] && sep="#{?#{!=:$before,0},#[fg=#{@thm-overlay0}] - ,}" gap="#{?#{!=:$before,0}, ,}"
+    words+="#{?#{!=:$n,0},$sep#[fg=$color]$label,}"
+    glyphs+="#{?#{!=:$n,0},$gap#[fg=$color]$glyph$n,}"
+    if [[ -n $before ]]; then before="#{e|+:$before,$n}"; else before=$n; fi
+    local one="#{?#{!=:$n,0},1,0}"
+    if [[ -n $present ]]; then present="#{e|+:$present,$one}"; else present=$one; fi
+  done
+  printf '#{?#{||:#{e|>=:#{client_width},120},#{e|<=:%s,2}},%s,%s}' "$present" "$words" "$glyphs"
+}
 
 fleet_format() { # <space or empty for "all">
   local space=$1 filter label color others="" other n d w
@@ -89,11 +119,9 @@ fleet_format() { # <space or empty for "all">
   local index="#{@space-index-${space:-all}}"
   tpl=${tpl//@@INDEX@@/$index}
   tpl=${tpl//@@OTHERS@@/$others}
-  # The totals leave out the current session: the window line shows its own.
+  # What the other sessions are doing; the current one shows in its own tabs.
   local others_only="#{&&:$filter,#{!=:#{session_name},#{client_session}}}"
-  tpl=${tpl//@@NEEDS@@/$(count "$others_only" "$C_NEEDS")}
-  tpl=${tpl//@@DONE@@/$(count "$others_only" "$C_DONE")}
-  tpl=${tpl//@@WORKING@@/$(count "$others_only" "$C_WORKING")}
+  tpl=${tpl//@@SUMMARY@@/$(summary "$others_only")}
   printf '%s' "$tpl"
 }
 
