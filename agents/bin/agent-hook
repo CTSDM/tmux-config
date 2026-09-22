@@ -99,15 +99,7 @@ tool_label=$tool${detail:+: $detail}
 new_state= needs=
 case $ev in
   SessionStart)
-    set_opt @agent "$kind"
     [[ -n $model ]] && set_opt @agent_model "$model"
-    if [[ $kind == claude ]]; then
-      profile=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
-      profile=${profile%/}
-      profile=${profile##*/}
-      [[ $profile == .claude ]] && profile=default
-      set_opt @agent_profile "$profile"
-    fi
     # Compaction restarts the session mid-turn; everything else is a fresh one.
     if [[ $source != compact ]]; then
       new_state=ready
@@ -181,6 +173,13 @@ esac
 
 # Hooks may be installed while a session is already running: keep identity current.
 set_opt @agent "$kind"
+if [[ $kind == claude ]]; then
+  profile=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+  profile=${profile%/}
+  profile=${profile##*/}
+  [[ $profile == .claude ]] && profile=default
+  set_opt @agent_profile "$profile"
+fi
 [[ -n $sid ]] && set_opt @agent_session "$sid"
 [[ -n $transcript ]] && set_opt @agent_transcript "$transcript"
 [[ -n $mode ]] && set_opt @agent_mode "$mode"
