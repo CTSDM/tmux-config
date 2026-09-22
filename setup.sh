@@ -101,6 +101,17 @@ else
     warn "jq is not installed: skipped. Install it, then run agents/install."
 fi
 
+# --- 3c. Spaces and sounds -----------------------------------------------------
+
+if [ ! -f "$TMUX_CONFIG_DIR/spaces.conf" ]; then
+    cp "$TMUX_CONFIG_DIR/spaces.example" "$TMUX_CONFIG_DIR/spaces.conf"
+    warn "Created spaces.conf from the example: list your personal and work folders there."
+fi
+SOUNDS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agents/sounds"
+mkdir -p "$SOUNDS_DIR"
+ok "Agent sounds go in $SOUNDS_DIR (names in agents/bin/agent-sound)"
+command -v uv &>/dev/null || warn "uv is not installed: desktop notifications (agents/bin/agent-notify) need it."
+
 # --- 4. Tmuxifier -----------------------------------------------------------
 
 TMUXIFIER_DIR="$HOME/.tmuxifier"

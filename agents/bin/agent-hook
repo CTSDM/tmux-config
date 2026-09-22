@@ -12,6 +12,8 @@
 #   @agent_tool    last tool call, @agent_msg last reply or error
 #   plus @agent, @agent_session, @agent_profile, @agent_model, @agent_mode
 # "done" means finished but not seen yet; focusing the pane turns it "idle".
+# It also triggers the desktop notifications (agent-notify) and the sounds
+# (agent-sound, agent-remind).
 #
 # It never writes to stdout and always exits 0: agents add the stdout of some
 # hooks to the conversation, and exit code 2 would block the tool call.
@@ -39,8 +41,8 @@ eval "set -- $fields"
 ev=$1 sid=$2 agent_id=$3 agent_type=$4 tool=$5 tool_id=$6 detail=$7 ntype=$8
 last=$9 err=${10} mode=${11} source=${12} model=${13} transcript=${14}
 
-IFS=$US read -r pane_pid cur_state cur_sid cur_needs_id cur_prev cur_tool sess win_active pane_active title < <(
-  tmux display -p -t "$TMUX_PANE" "#{pane_pid}$US#{@agent_state}$US#{@agent_session}$US#{@agent_needs_id}$US#{@agent_prev}$US#{@agent_tool}$US#{session_name}$US#{window_active}$US#{pane_active}$US#{pane_title}"
+IFS=$US read -r pane_pid cur_state cur_sid cur_needs_id cur_prev cur_tool sess win_active pane_active title space tests_at < <(
+  tmux display -p -t "$TMUX_PANE" "#{pane_pid}$US#{@agent_state}$US#{@agent_session}$US#{@agent_needs_id}$US#{@agent_prev}$US#{@agent_tool}$US#{session_name}$US#{window_active}$US#{pane_active}$US#{pane_title}$US#{?@space,#{@space},#{@space_auto}}$US#{@agent_tests_sound_at}"
 ) || exit 0
 
 # Only the pane's own agent counts, not a `claude -p` or `codex exec` that
@@ -62,6 +64,29 @@ own_agent || exit 0
 cmds=()
 set_opt() { cmds+=(set -p -t "$TMUX_PANE" "$1" "$2" \;); }
 unset_opt() { cmds+=(set -pu -t "$TMUX_PANE" "$1" \;); }
+play() { setsid -f "$AG_BIN/agent-sound" "$1" </dev/null >/dev/null 2>&1; }
+
+# A round: the agents of a space that worked since the space was last quiet.
+# When the last busy one finishes and at least two took part, the round is won.
+server=${TMUX%%,*}
+round_file=$AG_RUN/round-${server##*/}-${space//[^A-Za-z0-9_-]/_}
+round_won() {
+  local busy members
+  busy=$(tmux list-panes -a -F "#{pane_id}$US#{@agent_state}$US#{@agent_subs}$US#{?@space,#{@space},#{@space_auto}}" |
+    awk -F"$US" -v me="$TMUX_PANE" -v sp="$space" \
+      '$1 != me && $4 == sp && ($2 ~ /^(working|needs|compacting)$/ || $3 > 0)' | wc -l)
+  ((busy == 0)) || return 1
+  members=$(sort -u "$round_file" 2>/dev/null | wc -l)
+  rm -f "$round_file"
+  ((members >= 2))
+}
+
+is_test_run() { # <command>: does a tool call run a test suite? (@agent_test_regex overrides)
+  local re
+  re=$(tmux show -gqv @agent_test_regex)
+  re=${re:-'(^|[[:space:];&|(])((npm|pnpm|yarn|bun)( run)? test|npx (vitest|jest)|vitest|jest|pytest|go test|cargo (test|nextest)|make (test|check)|mix test|dotnet test|rspec|phpunit|ctest|deno test|lake test|python3? -m (pytest|unittest))([[:space:];&|):]|$)'}
+  [[ $1 =~ $re ]]
+}
 
 subs_dir=$AG_RUN/${sid//[^A-Za-z0-9_-]/_}
 publish_subs() {
@@ -184,9 +209,22 @@ fi
 [[ -n $transcript ]] && set_opt @agent_transcript "$transcript"
 [[ -n $mode ]] && set_opt @agent_mode "$mode"
 
+case $ev in
+  UserPromptSubmit) mkdir -p "$AG_RUN" && echo "$TMUX_PANE" >>"$round_file" ;;
+  PostToolUse) [[ $tool == ExitPlanMode ]] && play lets-do-this ;; # you just accepted the plan
+  PreToolUse)
+    if [[ $tool == Bash ]] && is_test_run "$detail" && ((EPOCHSECONDS - ${tests_at:-0} >= 600)); then
+      play fight-like-a-man # at most every 10 minutes per pane: agents run tests a lot
+      set_opt @agent_tests_sound_at "$EPOCHSECONDS"
+    fi
+    ;;
+esac
+
 # Is the user looking at this pane? "session" means its session is on screen
 # but another pane or window is in front: the colored border is enough then.
-# Only when they are away does a desktop notification go out.
+# Sounds play unless the pane itself is in front; desktop notifications only
+# go out when the user is away. Errors, won rounds and accepted plans always
+# play.
 if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_state != needs) ]]; then
   vis=away
   if client=$(ag_focused_client) && [[ $(tmux display -p -c "$client" '#{client_session}') == "$sess" ]]; then
@@ -195,6 +233,22 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
   [[ $new_state == done && $vis == visible ]] && new_state=idle
 
   subs=$(find "$subs_dir" -type f 2>/dev/null | wc -l)
+  case $ev in
+    Stop)
+      if ((subs == 0)); then
+        if round_won; then play ct-win; elif [[ $vis != visible ]]; then play enemy-down; fi
+      fi
+      ;;
+    StopFailure) play oh-man ;;
+    *)
+      if [[ $new_state == needs ]]; then
+        if [[ $vis != visible ]]; then
+          case $needs in question) play report-in ;; plan) play wait-for-my-go ;; *) play need-backup ;; esac
+        fi
+        setsid -f "$AG_BIN/agent-remind" "$TMUX_PANE" "$EPOCHSECONDS" </dev/null >/dev/null 2>&1
+      fi
+      ;;
+  esac
   if [[ $vis == away && ! ($new_state == done && $subs -gt 0) ]]; then
     task=$(ag_title "$title")
     [[ $task == "$(hostname)" ]] && task=

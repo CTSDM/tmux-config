@@ -1,4 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["jeepney>=0.9"]
+# ///
+# pyright: strict
 """Desktop notifications for agent panes.
 
     agent-notify <pane> <urgency> <title> <body>
@@ -8,42 +13,49 @@
         Close the pane's notification, e.g. once the pane has been seen.
 
 This talks to org.freedesktop.Notifications directly because notify-send goes
-through the desktop portal, which drops click actions.
+through the desktop portal, which drops click actions. Run by uv; type-checked
+with pyright (see README).
 """
 
 import os
 import signal
 import subprocess
 import sys
+import time
 
-import gi
-
-gi.require_version("Gio", "2.0")
-from gi.repository import Gio, GLib  # noqa: E402
+from jeepney import DBusAddress, HeaderFields, MatchRule, Message, new_method_call
+from jeepney.bus_messages import message_bus
+from jeepney.io.blocking import DBusConnection, open_dbus_connection
+from jeepney.wrappers import DBusErrorResponse, unwrap_msg
 
 BIN = os.path.dirname(os.path.abspath(__file__))
+NOTIFICATIONS = DBusAddress(
+    "/org/freedesktop/Notifications",
+    bus_name="org.freedesktop.Notifications",
+    interface="org.freedesktop.Notifications",
+)
 URGENCY = {"low": 0, "normal": 1, "critical": 2}
-BUS_NAME = "org.freedesktop.Notifications"
-BUS_PATH = "/org/freedesktop/Notifications"
+WAIT_SECONDS = 6 * 3600
 
 
-def tmux(*args):
+def tmux(*args: str) -> str:
     result = subprocess.run(["tmux", *args], capture_output=True, text=True)
     return result.stdout.strip()
 
 
-def pane_opt(pane, name):
+def pane_opt(pane: str, name: str) -> str:
     return tmux("show", "-pqv", "-t", pane, name)
 
 
-def forget(pane):
+def forget(pane: str) -> None:
     tmux("set", "-pu", "-t", pane, "@agent_notify_id", ";",
          "set", "-pu", "-t", pane, "@agent_notify_pid")
 
 
-def stop_waiter(pane):
+def stop_waiter(pane: str) -> None:
     """Stop the process waiting on the pane's previous notification, so a
-    click on the replacement is not handled twice."""
+    click on the replacement is not handled twice. SIGTERM ends it at once,
+    without the cleanup at the end of show()."""
     pid = pane_opt(pane, "@agent_notify_pid")
     if not pid.isdigit() or int(pid) == os.getpid():
         return
@@ -56,73 +68,68 @@ def stop_waiter(pane):
         pass
 
 
-def proxy():
-    return Gio.DBusProxy.new_for_bus_sync(
-        Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
-        BUS_NAME, BUS_PATH, BUS_NAME, None)
+def call(conn: DBusConnection, method: str, signature: str, body: tuple[object, ...]) -> tuple[object, ...]:
+    reply = conn.send_and_get_reply(new_method_call(NOTIFICATIONS, method, signature, body), timeout=2)
+    return unwrap_msg(reply)
 
 
-def close(pane):
+def member(msg: Message) -> str:
+    return str(msg.header.fields.get(HeaderFields.member, ""))
+
+
+def close(pane: str) -> None:
     notification_id = pane_opt(pane, "@agent_notify_id")
     stop_waiter(pane)
     forget(pane)
     if notification_id.isdigit():
-        proxy().call_sync("CloseNotification",
-                          GLib.Variant("(u)", (int(notification_id),)),
-                          Gio.DBusCallFlags.NONE, 2000, None)
+        with open_dbus_connection(bus="SESSION") as conn:
+            call(conn, "CloseNotification", "u", (int(notification_id),))
 
 
-def show(pane, urgency, title, body):
+def show(pane: str, urgency: str, title: str, body: str) -> None:
     previous = pane_opt(pane, "@agent_notify_id")
     stop_waiter(pane)
-    notifications = proxy()
-    loop = GLib.MainLoop()
-    state = {"id": None}
+    with open_dbus_connection(bus="SESSION") as conn:
+        # Listen before sending, so a quick click is not missed.
+        rule = MatchRule(type="signal", interface=NOTIFICATIONS.interface,
+                         path=NOTIFICATIONS.object_path)
+        unwrap_msg(conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=2))
+        with conn.filter(rule) as signals:
+            hints = {"urgency": ("y", URGENCY.get(urgency, 1))}
+            (notification_id,) = call(conn, "Notify", "susssasa{sv}i", (
+                "tmux agents", int(previous) if previous.isdigit() else 0,
+                "utilities-terminal", title, body, ["default", "Open"], hints, -1))
+            tmux("set", "-p", "-t", pane, "@agent_notify_id", str(notification_id), ";",
+                 "set", "-p", "-t", pane, "@agent_notify_pid", str(os.getpid()))
 
-    def on_signal(_conn, _sender, _path, _iface, name, params, _data):
-        if name == "ActionInvoked":
-            notification_id, action = params.unpack()
-            if notification_id == state["id"] and action == "default":
-                subprocess.run([os.path.join(BIN, "agent-jump"), pane])
-                loop.quit()
-        elif name == "NotificationClosed":
-            if params.unpack()[0] == state["id"]:
-                loop.quit()
-
-    # Subscribe before sending so a quick click is not missed.
-    notifications.get_connection().signal_subscribe(
-        None, BUS_NAME, None, BUS_PATH, None,
-        Gio.DBusSignalFlags.NONE, on_signal, None)
-    hints = {"urgency": GLib.Variant("y", URGENCY.get(urgency, 1))}
-    reply = notifications.call_sync(
-        "Notify",
-        GLib.Variant("(susssasa{sv}i)", (
-            "tmux agents", int(previous) if previous.isdigit() else 0,
-            "utilities-terminal", title, body, ["default", "Open"], hints, -1)),
-        Gio.DBusCallFlags.NONE, 2000, None)
-    state["id"] = reply.unpack()[0]
-    tmux("set", "-p", "-t", pane, "@agent_notify_id", str(state["id"]), ";",
-         "set", "-p", "-t", pane, "@agent_notify_pid", str(os.getpid()))
-
-    # A replacement notification stops this waiter with SIGTERM; Python's
-    # default handling exits at once, without the cleanup below.
-    GLib.timeout_add_seconds(6 * 3600, loop.quit)
-    loop.run()
+            deadline = time.monotonic() + WAIT_SECONDS
+            while (left := deadline - time.monotonic()) > 0:
+                try:
+                    msg = conn.recv_until_filtered(signals, timeout=left)
+                except TimeoutError:
+                    break
+                if not msg.body or msg.body[0] != notification_id:
+                    continue
+                if member(msg) == "ActionInvoked" and msg.body[1] == "default":
+                    subprocess.run([os.path.join(BIN, "agent-jump"), pane])
+                    break
+                if member(msg) == "NotificationClosed":
+                    break
     if pane_opt(pane, "@agent_notify_pid") == str(os.getpid()):
         forget(pane)
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     try:
         if len(argv) == 3 and argv[1] == "--close":
             close(argv[2])
         elif len(argv) == 5:
-            show(*argv[1:])
+            show(argv[1], argv[2], argv[3], argv[4])
         else:
             print(__doc__, file=sys.stderr)
             return 2
-    except GLib.Error:
-        return 1  # no notification daemon
+    except (OSError, KeyError, DBusErrorResponse):
+        return 1  # no session bus or no notification daemon
     return 0
 
 

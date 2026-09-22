@@ -1,0 +1,4 @@
+# Copy to spaces.conf (never committed) and list your folders.
+# <space> <folder>: first match wins; a folder covers its subfolders.
+personal ~/code/mine
+work     ~/code/acme

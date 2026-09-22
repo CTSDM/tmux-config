@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
 # agent-next [client]: jump to the agent that most needs you. First the ones
 # waiting on you (longest wait first), then errors, then finished work you
-# have not seen yet.
+# have not seen yet. Agents in the client's space (see agent-spaces) come
+# before other spaces; sessions in no space count as yours.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 client=${1:-}
 
 "$AG_BIN/agent-reconcile"
-current=
-[[ -n $client ]] && current=$(tmux display -p -c "$client" '#{pane_id}')
+current= home=
+if [[ -n $client ]]; then
+  IFS=$US read -r current home < <(tmux display -p -c "$client" "#{pane_id}$US#{?@space,#{@space},#{@space_auto}}")
+fi
 
-pick=$(tmux list-panes -a -F "#{pane_id}$US#{@agent_state}$US#{@agent_since}$US#{session_name}" |
-  awk -F"$US" -v cur="$current" '
+pick=$(tmux list-panes -a -F "#{pane_id}$US#{@agent_state}$US#{@agent_since}$US#{session_name}$US#{?@space,#{@space},#{@space_auto}}" |
+  awk -F"$US" -v cur="$current" -v home="$home" '
     $1 == cur || $4 ~ /^_peek-/ { next }
     { rank = ($2 == "needs") ? 0 : ($2 == "error") ? 1 : ($2 == "done") ? 2 : -1 }
-    rank >= 0 { print rank, ($3 == "" ? 0 : $3), $1 }' |
-  sort -k1,1n -k2,2n | head -n1 | cut -d' ' -f3)
+    rank >= 0 { away = (home != "" && $5 != "" && $5 != home); print away, rank, ($3 == "" ? 0 : $3), $1 }' |
+  sort -k1,1n -k2,2n -k3,3n | head -n1 | cut -d' ' -f4)
 
 if [[ -n $pick ]]; then
   exec "$AG_BIN/agent-jump" "$pick" "$client"

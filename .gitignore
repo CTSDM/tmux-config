@@ -3,3 +3,6 @@ plugins/
 
 # Machine-local Claude Code permissions.
 .claude/settings.local.json
+
+# Which folders are personal and which are work names clients: keep it local.
+spaces.conf

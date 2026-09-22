@@ -1,0 +1,6 @@
+{
+  "include": ["agents/bin/agent-notify"],
+  "stubPath": "agents/typings",
+  "typeCheckingMode": "strict",
+  "pythonVersion": "3.12"
+}

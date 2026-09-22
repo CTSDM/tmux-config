@@ -14,14 +14,15 @@ git clone <this repo> ~/.config/tmux
 `setup.sh` installs TPM and the plugins, enables the commit leak guard and runs
 `agents/install`, which registers the agent hook with every Claude Code profile
 (`~/.claude`, `~/.config/claude/*/`) and with Codex (`~/.codex/hooks.json`).
-`agents/install --uninstall` removes it again. Needs `jq`, `fzf`, and for desktop
-notifications `python3-gi` with a notification daemon (mako, dunst, ...).
+`agents/install --uninstall` removes it again. Needs `jq`, `fzf`, `uv`, a
+notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
 
 ## What you get
 
 **Status bar** (two lines, top): your session's windows, each with the state
 of its agents and the agent's task as the window name; below it, every session
-that has agents, with totals on the right.
+of your space that has agents, with totals on the right and a small chip for
+each other space that has something going on.
 
 | glyph | meaning |
 | --- | --- |
@@ -43,7 +44,9 @@ border also shows a label such as `claude:work · needs permission · Bash: git 
 | key | action |
 | --- | --- |
 | `prefix a` | mission control: every pane, agents first, live preview. `enter` go there, `ctrl-o` peek (work in it from the popup), `ctrl-a` agents only / all, `ctrl-r` refresh |
-| `prefix u` | jump to the agent that needs you most |
+| `prefix u` | jump to the agent that needs you most (your space first) |
+| `prefix S` | choose this session's space, or go back to the one from its folder |
+| `prefix Q` | mute or unmute the agent sounds |
 | `prefix a` inside a peek | close the peek |
 | `prefix R` | reload the config |
 
@@ -53,6 +56,43 @@ window (Hyprland) instead of taking over the current one.
 **Desktop notifications** go out when an agent needs you, finishes or fails
 while you are not looking at its session. Clicking one jumps to the pane;
 looking at the pane closes it.
+
+## Spaces
+
+Personal and work sessions live in one tmux but never mix on screen. List your
+folders in `spaces.conf` (created from `spaces.example`, never committed):
+
+```
+personal ~/repos/github.com/me
+work     ~/repos/github.com/employer
+```
+
+A session's space comes from its start folder; `prefix S` sets it by hand for
+anything else. The bar, mission control (`ctrl-s` shows all spaces) and
+`prefix u` follow the space of the session you are in, and the session pill
+takes the space's color. Sessions in no space show everywhere.
+
+## Sounds
+
+`agents/bin/agent-sound` plays a file from `~/.local/share/tmux-agents/sounds/`
+(not in the repo) named after the moment, `.wav`, `.ogg` or `.mp3`:
+
+| file | when |
+| --- | --- |
+| `need-backup` | an agent needs your permission |
+| `report-in` | an agent has a question |
+| `wait-for-my-go` | a plan is ready for your review |
+| `lets-do-this` | you accepted a plan |
+| `enemy-down` | an agent finished |
+| `ct-win` | the last busy agent of a round finished (two or more took part) |
+| `oh-man` | an agent stopped on an error or a rate limit |
+| `come-to-papa` | an agent has waited for you for 15 minutes |
+| `fight-like-a-man` | an agent started a test run (at most every 10 minutes per pane) |
+
+Sounds stay quiet for the pane you are looking at (errors, won rounds and
+accepted plans always play), and a burst plays only its most important sound.
+Tune with `@agent_sound_volume` (0-1), `@agent_remind_after` (seconds) and
+`@agent_test_regex`.
 
 ## How it works
 
@@ -67,6 +107,16 @@ looking at the pane closes it.
   still looks busy, and when mission control opens.
 - `touch ~/.local/state/tmux-agents/debug` logs every hook event (including
   prompts) and script errors to that directory.
+
+## Development
+
+Shell scripts are plain bash. `agents/bin/agent-notify` is a uv script
+(dependencies declared inline) checked with pyright in strict mode, using the
+stubs in `agents/typings`:
+
+```sh
+uv run --no-project --with jeepney --with pyright pyright
+```
 
 ## Privacy guard
 

@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# agent-sound <name>: play one of the agent sounds.
+#
+# Sound files live outside the repo, in ${AG_SOUNDS:-~/.local/share/tmux-agents/sounds},
+# as <name>.wav (or .ogg, .oga, .mp3, .flac). A missing file stays silent.
+#   need-backup       an agent needs your permission
+#   report-in         an agent has a question
+#   wait-for-my-go    a plan is ready for your review
+#   lets-do-this      you accepted a plan
+#   enemy-down        an agent finished
+#   ct-win            the last busy agent of a round finished (2+ agents took part)
+#   oh-man            an agent stopped on an error or a rate limit
+#   come-to-papa      an agent has waited for you for 15 minutes
+#   fight-like-a-man  an agent started running tests
+#
+# prefix+Q mutes (server option @agent_sound off); @agent_sound_volume sets the
+# volume (0-1, default 0.8). Within 2.5 s of a sound only a more important one
+# plays, and it cuts the previous one off.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+name=${1:?usage: agent-sound <name>}
+
+[[ $(tmux show -gqv @agent_sound) == off ]] && exit 0
+dir=${AG_SOUNDS:-${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agents/sounds}
+file=
+for ext in wav ogg oga mp3 flac; do
+  [[ -r $dir/$name.$ext ]] && { file=$dir/$name.$ext; break; }
+done
+[[ -n $file ]] || exit 0
+
+case $name in
+  need-backup | report-in | wait-for-my-go | oh-man | come-to-papa) priority=4 ;;
+  ct-win) priority=3 ;;
+  enemy-down | lets-do-this) priority=2 ;;
+  *) priority=1 ;;
+esac
+volume=$(tmux show -gqv @agent_sound_volume)
+volume=${volume:-0.8}
+
+if [[ -n ${AG_SOUND_PLAYER:-} ]]; then
+  player=("$AG_SOUND_PLAYER" "$file")
+elif command -v pw-play >/dev/null; then
+  player=(pw-play --volume "$volume" "$file")
+elif command -v ffplay >/dev/null; then
+  player=(ffplay -nodisp -autoexit -loglevel quiet -volume "$(awk -v v="$volume" 'BEGIN { printf "%d", v * 100 }')" "$file")
+elif command -v mpv >/dev/null; then
+  player=(mpv --no-video --really-quiet --volume="$(awk -v v="$volume" 'BEGIN { printf "%d", v * 100 }')" "$file")
+else
+  player=(aplay -q "$file")
+fi
+
+mkdir -p "$AG_RUN"
+exec 9>"$AG_RUN/sound.lock"
+flock -w 2 9 || exit 0
+now=${EPOCHREALTIME//[!0-9]/} # microseconds (the separator follows the locale)
+read -r last_us last_priority last_pid <"$AG_RUN/sound.last" 2>/dev/null
+if [[ ${last_us:-} =~ ^[0-9]+$ ]] && ((now - last_us < 2500000)); then
+  ((priority > last_priority)) || exit 0
+  kill "$last_pid" 2>/dev/null
+fi
+"${player[@]}" </dev/null >/dev/null 2>&1 9>&- &
+echo "$now $priority $!" >"$AG_RUN/sound.last"

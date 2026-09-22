@@ -10,7 +10,7 @@ US=$'\x1f'   # field separator for tmux output: unlike a tab, empty fields survi
 # Every pane option agent-hook writes. SessionEnd and agent-reconcile clear them all.
 AG_OPTS=(@agent @agent_session @agent_profile @agent_model @agent_mode @agent_state
   @agent_needs @agent_needs_id @agent_since @agent_prev @agent_tool @agent_msg
-  @agent_subs @agent_subtypes @agent_transcript)
+  @agent_subs @agent_subtypes @agent_transcript @agent_tests_sound_at)
 
 # Parent pid of a process.
 ag_ppid() {
@@ -60,6 +60,19 @@ ag_focused_client() {
     fi
   done <<<"$clients"
   return 1
+}
+
+# Prints whether the user sees a pane: "visible", "session" (its session is on
+# screen but another pane or window is in front) or "away".
+ag_visibility() { # <pane>
+  local sess win_active pane_active client
+  IFS=$US read -r sess win_active pane_active < <(
+    tmux display -p -t "$1" "#{session_name}$US#{window_active}$US#{pane_active}") || { echo away; return; }
+  if client=$(ag_focused_client) && [[ $(tmux display -p -c "$client" '#{client_session}') == "$sess" ]]; then
+    [[ $win_active == 1 && $pane_active == 1 ]] && echo visible || echo session
+  else
+    echo away
+  fi
 }
 
 # Focuses the terminal window that hosts a tmux client (Hyprland only).

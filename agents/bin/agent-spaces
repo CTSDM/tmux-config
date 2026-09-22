@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# agent-spaces: keep personal and work sessions apart in one tmux server.
+#
+#   agent-spaces load                 read spaces.conf, tag every session, bind prefix+S
+#   agent-spaces assign [session...]  re-detect sessions from their folder
+#   agent-spaces set <session> <space|auto>
+#
+# spaces.conf (next to tmux.conf, never committed) maps folders to spaces:
+#   personal ~/code/mine
+#   work     ~/code/acme          first match wins; a folder covers its subfolders
+# A session's space comes from its start folder. prefix+S overrides it by hand
+# (session option @space); "from folder" goes back to the detected one
+# (@space_auto). Sessions in no space see everything.
+#
+# Each session gets its own second status line (status-format[1]), built from
+# the @fleet-tpl template in theme.conf: only its space's sessions and totals,
+# plus a small chip per other space that has something going on.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+shopt -u patsub_replacement 2>/dev/null # bash 5.2: '&' in a \${x//a/b} replacement means the match
+
+RULES=${AG_SPACES_FILE:-$HOME/.config/tmux/spaces.conf}
+PALETTE=('#cba6f7' '#89b4fa' '#f5c2e7' '#74c7ec' '#f2cdcd')   # mauve, blue, pink, sapphire, flamingo
+UNASSIGNED_COLOR='#a6adc8'
+
+rules=() spaces=()
+read_rules() {
+  local space dir
+  [[ -r $RULES ]] || return 0
+  while read -r space dir _; do
+    [[ -z $space || $space == \#* || -z $dir ]] && continue
+    dir=${dir/#\~/$HOME}
+    rules+=("$space"$'\t'"${dir%/}")
+    [[ " ${spaces[*]} " == *" $space "* ]] || spaces+=("$space")
+  done <"$RULES"
+}
+
+color_of() {
+  local i
+  for i in "${!spaces[@]}"; do
+    [[ ${spaces[i]} == "$1" ]] && { printf '%s' "${PALETTE[i % ${#PALETTE[@]}]}"; return; }
+  done
+  printf '%s' "$UNASSIGNED_COLOR"
+}
+
+space_for_path() {
+  local rule space dir
+  for rule in "${rules[@]}"; do
+    space=${rule%%$'\t'*} dir=${rule#*$'\t'}
+    if [[ $1 == "$dir" || $1 == "$dir"/* ]]; then printf '%s' "$space"; return; fi
+  done
+}
+
+# Formats, evaluated per session inside #{S:} loops.
+SPACE_OF='#{?@space,#{@space},#{@space_auto}}'
+not_peek() { printf '#{!=:#{m:_peek-*,#{session_name}},1}'; }
+count() { # <session filter> <pane condition> -> format counting matching agent panes
+  printf '#{n:#{S:#{?#{&&:%s,%s},#{W:#{P:#{?%s,x,}}},}}}' "$(not_peek)" "$1" "$2"
+}
+C_NEEDS='#{==:#{@agent_state},needs}'
+C_DONE='#{&&:#{==:#{@agent_state},done},#{e|<:#{@agent_subs},1}}'
+C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{e|>:#{@agent_subs},0}}'
+
+fleet_format() { # <space or empty for "all">
+  local space=$1 filter label color others="" other n d w
+  if [[ -n $space ]]; then
+    filter="#{||:#{==:$SPACE_OF,$space},#{==:$SPACE_OF,}}" label=$space color=$(color_of "$space")
+    for other in "${spaces[@]}"; do
+      [[ $other == "$space" ]] && continue
+      local in="#{==:$SPACE_OF,$other}"
+      n=$(count "$in" "$C_NEEDS") d=$(count "$in" "$C_DONE") w=$(count "$in" "$C_WORKING")
+      others+="#{?#{!=:#{e|+:#{e|+:$n,$d},$w},0},#[fg=$(color_of "$other")]$other"
+      others+="#{?#{!=:$n,0},#[fg=#{@ac-needs}] ▲$n,}#{?#{!=:$d,0},#[fg=#{@ac-done}] ✓$d,}#{?#{!=:$w,0},#[fg=#{@ac-working}] ●$w,}"
+      others+="#[fg=#{@thm-surface1}]  │  ,}"
+    done
+  else
+    filter=1 label=all color=$UNASSIGNED_COLOR
+  fi
+  local tpl
+  tpl=$(tmux show -gv @fleet-tpl)
+  tpl=${tpl//@@FILTER@@/$filter}
+  tpl=${tpl//@@LABEL@@/$label}
+  tpl=${tpl//@@COLOR@@/$color}
+  tpl=${tpl//@@OTHERS@@/$others}
+  tpl=${tpl//@@NEEDS@@/$(count "$filter" "$C_NEEDS")}
+  tpl=${tpl//@@DONE@@/$(count "$filter" "$C_DONE")}
+  tpl=${tpl//@@WORKING@@/$(count "$filter" "$C_WORKING")}
+  printf '%s' "$tpl"
+}
+
+# Tags one session and gives it the second status line of its space.
+apply() { # <session> <space_auto>
+  local sess=$1 auto=$2 manual space
+  if [[ -n $auto ]]; then tmux set -t "=$sess:" @space_auto "$auto"; else tmux set -u -t "=$sess:" @space_auto; fi
+  manual=$(tmux show -qv -t "=$sess:" @space)
+  space=${manual:-$auto}
+  tmux set -t "=$sess:" @space-color "$(color_of "$space")" \; \
+    set -t "=$sess:" 'status-format[1]' "$(fleet_format "$space")"
+}
+
+assign() { # [session...]
+  local sess path group line
+  local -A space_of=()
+  while IFS=$US read -r sess path group; do
+    space_of[$sess]=$(space_for_path "$path")
+  done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
+  while IFS=$US read -r sess path group; do
+    (($#)) && [[ " $* " != *" $sess "* ]] && continue
+    if [[ $sess == _peek-* ]]; then
+      # A peek session shows the world of the session it peeks into.
+      local src; src=$(tmux show -qv -t "=$group:" @space)
+      tmux set -t "=$sess:" @space "${src:-${space_of[$group]}}"
+      apply "$sess" "${space_of[$group]}"
+    else
+      apply "$sess" "${space_of[$sess]}"
+    fi
+  done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
+}
+
+bind_menu() {
+  local args=(display-menu -T "#[align=centre] space of #{session_name} " -x C -y C) i=1 space
+  for space in "${spaces[@]}"; do
+    args+=("#[fg=$(color_of "$space")]●#[default] $space" "$i" "run-shell -b \"$AG_BIN/agent-spaces set '#{session_name}' $space\"")
+    ((i++))
+  done
+  args+=("" "" "" "from its folder" a "run-shell -b \"$AG_BIN/agent-spaces set '#{session_name}' auto\"")
+  tmux bind S "${args[@]}"
+}
+
+read_rules
+case ${1:-} in
+  load)
+    tmux set -g @spaces "${spaces[*]}" \; set -g 'status-format[1]' "$(fleet_format "")"
+    bind_menu
+    assign
+    ;;
+  assign) shift; assign "$@" ;;
+  set)
+    sess=${2:?usage: agent-spaces set <session> <space|auto>} space=${3:?}
+    if [[ $space == auto ]]; then tmux set -u -t "=$sess:" @space; else tmux set -t "=$sess:" @space "$space"; fi
+    assign "$sess"
+    tmux display-message "$sess: ${space/auto/space from its folder}"
+    ;;
+  *) sed -n '2,17p' "$0" >&2; exit 2 ;;
+esac
