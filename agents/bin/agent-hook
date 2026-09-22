@@ -64,7 +64,8 @@ own_agent || exit 0
 cmds=()
 set_opt() { cmds+=(set -p -t "$TMUX_PANE" "$1" "$2" \;); }
 unset_opt() { cmds+=(set -pu -t "$TMUX_PANE" "$1" \;); }
-play() { setsid -f "$AG_BIN/agent-sound" "$1" </dev/null >/dev/null 2>&1; }
+muted=$(ag_space_muted "$space" && echo 1) # prefix+Q muted this pane's space
+play() { [[ -z $muted ]] && setsid -f "$AG_BIN/agent-sound" "$1" </dev/null >/dev/null 2>&1; }
 
 # A round: the agents of a space that worked since the space was last quiet.
 # When the last busy one finishes and at least two took part, the round is won.
@@ -249,7 +250,7 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
       fi
       ;;
   esac
-  if [[ $vis == away && ! ($new_state == done && $subs -gt 0) ]]; then
+  if [[ $vis == away && -z $muted && ! ($new_state == done && $subs -gt 0) ]]; then
     task=$(ag_title "$title")
     [[ $task == "$(hostname)" ]] && task=
     case $new_state in

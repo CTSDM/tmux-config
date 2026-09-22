@@ -91,6 +91,12 @@ ag_raise_client() {
   return 1
 }
 
+# Succeeds when the space's alerts are muted (prefix+Q, server option
+# @agent_mute_<space> set to on): no notifications or sounds from its agents.
+ag_space_muted() { # <space>
+  [[ -n $1 && $(tmux show -gqv "@agent_mute_${1//[^A-Za-z0-9_-]/_}") == on ]]
+}
+
 # Task name from a pane title: Claude sets "✳ topic", Codex "topic | project".
 ag_title() {
   local t=${1#✳ }

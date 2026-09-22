@@ -4,16 +4,17 @@
 # agent-hook starts this when a pane starts needing you. After
 # @agent_remind_after seconds (default 900) it checks that the pane is still
 # waiting since <since> and that you are not looking at it, then plays
-# "come-to-papa" and sends the notification again.
+# "come-to-papa" and sends the notification again (unless its space is muted).
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 pane=${1:?usage: agent-remind <pane> <since>} since=${2:?}
 
 delay=$(tmux show -gqv @agent_remind_after)
 sleep "${delay:-900}"
 
-IFS=$US read -r state now_since sess title < <(
-  tmux display -p -t "$pane" "#{@agent_state}$US#{@agent_since}$US#{session_name}$US#{pane_title}") || exit 0
+IFS=$US read -r state now_since sess title space < <(
+  tmux display -p -t "$pane" "#{@agent_state}$US#{@agent_since}$US#{session_name}$US#{pane_title}$US#{?@space,#{@space},#{@space_auto}}") || exit 0
 [[ $state == needs && $now_since == "$since" ]] || exit 0
+ag_space_muted "$space" && exit 0
 [[ $(ag_visibility "$pane") == visible ]] && exit 0
 
 "$AG_BIN/agent-sound" come-to-papa

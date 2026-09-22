@@ -2,6 +2,7 @@
 # agent-spaces: keep personal and work sessions apart in one tmux server.
 #
 #   agent-spaces load                 read spaces.conf, tag every session, bind prefix+S
+#                                     (space of a session) and prefix+Q (alerts menu)
 #   agent-spaces assign [session...]  re-detect sessions from their folder
 #   agent-spaces set <session> <space|auto>
 #   agent-spaces next|prev <client>   switch the client to the next/previous session
@@ -111,6 +112,9 @@ fleet_format() { # <space or empty for "all">
   tpl=${tpl//@@FILTER@@/$filter}
   tpl=${tpl//@@LABEL@@/$label}
   tpl=${tpl//@@COLOR@@/$color}
+  local muted=""
+  [[ -n $space ]] && muted="#{?#{==:#{@agent_mute_${space//[^A-Za-z0-9_-]/_}},on},#[fg=#{@thm-overlay1}]muted  ,}"
+  tpl=${tpl//@@MUTED@@/$muted}
   local index="#{@space-index-${space:-all}}"
   tpl=${tpl//@@INDEX@@/$index}
   # What the other sessions are doing; the current one shows in its own tabs.
@@ -200,6 +204,20 @@ bind_menu() {
   done
   args+=("" "" "" "from its folder" a "run-shell -b \"$AG_BIN/agent-spaces set '#{session_name}' auto\"")
   tmux bind S "${args[@]}"
+
+  # prefix+Q: all sounds on/off, and mute one space (its notifications and sounds).
+  args=(display-menu -T "#[align=centre] agent alerts " -x C -y C
+    "#{?#{==:#{@agent_sound},off},Turn sounds on,Turn sounds off}" s
+    "set -gF @agent_sound '#{?#{==:#{@agent_sound},off},on,off}'")
+  ((${#spaces[@]})) && args+=("")
+  i=1
+  for space in "${spaces[@]}"; do
+    local opt="@agent_mute_${space//[^A-Za-z0-9_-]/_}"
+    args+=("#{?#{==:#{$opt},on},Unmute,Mute} #[fg=$(color_of "$space")]$space#[default] (notifications and sounds)" "$i"
+      "set -gF $opt '#{?#{==:#{$opt},on},off,on}'")
+    ((i++))
+  done
+  tmux bind Q "${args[@]}"
 }
 
 read_rules
