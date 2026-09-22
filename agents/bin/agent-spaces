@@ -81,9 +81,11 @@ fleet_format() { # <space or empty for "all">
   tpl=${tpl//@@LABEL@@/$label}
   tpl=${tpl//@@COLOR@@/$color}
   tpl=${tpl//@@OTHERS@@/$others}
-  tpl=${tpl//@@NEEDS@@/$(count "$filter" "$C_NEEDS")}
-  tpl=${tpl//@@DONE@@/$(count "$filter" "$C_DONE")}
-  tpl=${tpl//@@WORKING@@/$(count "$filter" "$C_WORKING")}
+  # The totals leave out the current session: the window line shows its own.
+  local others_only="#{&&:$filter,#{!=:#{session_name},#{client_session}}}"
+  tpl=${tpl//@@NEEDS@@/$(count "$others_only" "$C_NEEDS")}
+  tpl=${tpl//@@DONE@@/$(count "$others_only" "$C_DONE")}
+  tpl=${tpl//@@WORKING@@/$(count "$others_only" "$C_WORKING")}
   printf '%s' "$tpl"
 }
 
