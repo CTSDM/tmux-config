@@ -20,8 +20,7 @@ notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
 ## What you get
 
 **Status bar** (two lines, top): first your space, every session numbered with
-its agents' states, their totals and a small chip per other space with
-something going on; below it, this session's windows (the agent's task as the
+its agents' states and what the other sessions are doing; below it, this session's windows (the agent's task as the
 window name) and this session's totals.
 
 | glyph | meaning |
@@ -44,7 +43,7 @@ border also shows a label such as `claude:work · needs permission · Bash: git 
 | key | action |
 | --- | --- |
 | `prefix a` | mission control: every pane, agents first, live preview. `enter` go there, `ctrl-o` peek (work in it from the popup), `ctrl-a` agents only / all, `ctrl-r` refresh |
-| `prefix u` | jump to the agent that needs you most (your space first) |
+| `prefix u` | jump to the agent of your space that needs you most |
 | `prefix S` | choose this session's space, or go back to the one from its folder |
 | `prefix (` / `prefix )` | previous / next session of your space, in the top bar's order (repeatable) |
 | `prefix g` then `1`-`9` | the session with that number on the top bar |

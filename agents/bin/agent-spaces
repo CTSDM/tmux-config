@@ -18,8 +18,8 @@
 # "all spaces" views, and while you are on one the top bar shows all spaces.
 #
 # Each session gets its own top status line in @fleet-line, built from the
-# @fleet-tpl template in theme.conf: only its space's sessions and totals, plus
-# a small chip per other space that has something going on.
+# @fleet-tpl template in theme.conf: only its space's sessions and what they
+# are doing. Nothing from other spaces ever shows there.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 shopt -u patsub_replacement 2>/dev/null # bash 5.2: '&' in a \${x//a/b} replacement means the match
 
@@ -97,17 +97,9 @@ summary() { # <session filter>
 }
 
 fleet_format() { # <space or empty for "all">
-  local space=$1 filter label color others="" other n d w
+  local space=$1 filter label color
   if [[ -n $space ]]; then
     filter="#{==:$SPACE_OF,$space}" label=$space color=$(color_of "$space")
-    for other in "${spaces[@]}"; do
-      [[ $other == "$space" ]] && continue
-      local in="#{==:$SPACE_OF,$other}"
-      n=$(count "$in" "$C_NEEDS") d=$(count "$in" "$C_DONE") w=$(count "$in" "$C_WORKING")
-      others+="#{?#{!=:#{e|+:#{e|+:$n,$d},$w},0},#[fg=$(color_of "$other")]$other"
-      others+="#{?#{!=:$n,0},#[fg=#{@ac-needs}] ▲$n,}#{?#{!=:$d,0},#[fg=#{@ac-done}] ✓$d,}#{?#{!=:$w,0},#[fg=#{@ac-working}] ●$w,}"
-      others+="#[fg=#{@thm-surface1}]  │  ,}"
-    done
   else
     filter=1 label=all color=$UNASSIGNED_COLOR
   fi
@@ -118,7 +110,6 @@ fleet_format() { # <space or empty for "all">
   tpl=${tpl//@@COLOR@@/$color}
   local index="#{@space-index-${space:-all}}"
   tpl=${tpl//@@INDEX@@/$index}
-  tpl=${tpl//@@OTHERS@@/$others}
   # What the other sessions are doing; the current one shows in its own tabs.
   local others_only="#{&&:$filter,#{!=:#{session_name},#{client_session}}}"
   tpl=${tpl//@@SUMMARY@@/$(summary "$others_only")}
