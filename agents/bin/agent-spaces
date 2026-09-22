@@ -66,19 +66,22 @@ C_NEEDS='#{==:#{@agent_state},needs}'
 C_DONE='#{&&:#{==:#{@agent_state},done},#{e|<:#{@agent_subs},1}}'
 C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{e|>:#{@agent_subs},0}}'
 C_IDLE='#{&&:#{m/r:^(idle|ready)$,#{@agent_state}},#{e|<:#{@agent_subs},1}}'
+C_UNTRACKED='#{&&:#{==:#{@agent},},#{m/r:^(claude|codex)$,#{pane_current_command}}}'
 
 # What the panes of the sessions matching <filter> are doing, most urgent first,
 # only the states present: "1 needs you - 2 working - 3 idle" in words when it
 # fits (up to two states, or 120+ columns), else glyphs like "▲1 ✓1 ●2 ○3" so
-# nothing gets cut. Agents that are not reporting (◇) are not counted.
+# nothing gets cut. Agents that are not reporting (◇, e.g. started before the
+# hooks) come last as "untracked".
 summary() { # <session filter>
   local filter=$1 words="" glyphs="" before="" present="" item n cond color label glyph
-  for item in needs done working idle; do
+  for item in needs done working idle untracked; do
     case $item in
       needs) cond=$C_NEEDS color='#{@ac-needs}' glyph=▲ ;;
       done) cond=$C_DONE color='#{@ac-done}' glyph=✓ ;;
       working) cond=$C_WORKING color='#{@ac-working}' glyph=● ;;
       idle) cond=$C_IDLE color='#{@thm-overlay1}' glyph=○ ;;
+      untracked) cond=$C_UNTRACKED color='#{@thm-overlay0}' glyph=◇ ;;
     esac
     n=$(count "$filter" "$cond")
     case $item in
