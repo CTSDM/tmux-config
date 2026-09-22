@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# agent-reconcile [pane...]: repair agent states that no hook reported.
+#
+# Denying a permission or pressing Esc ends a turn without any hook, and an
+# agent that gets killed never sends SessionEnd. For the given panes (default:
+# every agent pane), clear the state if the agent is gone, and mark a pane idle
+# when it still claims to be busy but the agent's transcript says the turn
+# is over.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+# Prints "over" when the transcript's last turn has ended, "busy" otherwise.
+turn_status() { # <kind> <transcript>
+  [[ -r $2 ]] || { echo busy; return; }
+  if [[ $1 == codex ]]; then
+    tail -n 300 "$2" | jq -Rrn '
+      [inputs | fromjson? // empty | select(.type == "event_msg") | .payload.type
+        | select(. == "task_started" or . == "task_complete" or . == "turn_aborted")]
+      | if (last // "task_started") == "task_started" then "busy" else "over" end'
+  else
+    # Claude ends every turn with a system/turn_duration entry, except when
+    # interrupted: then the last message is "[Request interrupted by user...]".
+    tail -n 80 "$2" | jq -Rrn '
+      [inputs | fromjson? // empty
+        | select(.type == "user" or .type == "assistant"
+                 or (.type == "system" and .subtype == "turn_duration"))]
+      | last // {}
+      | if .type == "system" then "over"
+        elif .type == "user" and ((.message.content
+               | if type == "string" then . else map(.text? // "") | join(" ") end)
+               | startswith("[Request interrupted by user")) then "over"
+        else "busy" end'
+  fi
+}
+
+agent_running() { # <pane_pid>: is claude or codex the pane's process or its child?
+  local comm
+  read -r comm <"/proc/$1/comm" 2>/dev/null
+  [[ $comm == claude || $comm == codex ]] || pgrep -P "$1" -x 'claude|codex' >/dev/null
+}
+
+if (($#)); then
+  panes=$(for p in "$@"; do
+    tmux display -p -t "$p" "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}"
+  done)
+else
+  panes=$(tmux list-panes -a -F "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}")
+fi
+
+while IFS=$US read -r pane pid kind state transcript; do
+  [[ -n $kind ]] || continue
+  if ! agent_running "$pid"; then
+    cmds=()
+    for o in "${AG_OPTS[@]}"; do cmds+=(set -pu -t "$pane" "$o" \;); done
+    tmux "${cmds[@]}"
+  elif [[ $state == working || $state == needs || $state == compacting ]] &&
+    [[ $(turn_status "$kind" "$transcript") == over ]]; then
+    tmux set -p -t "$pane" @agent_state idle \; set -p -t "$pane" @agent_since "$EPOCHSECONDS" \; \
+      set -pu -t "$pane" @agent_needs \; set -pu -t "$pane" @agent_needs_id \; set -pu -t "$pane" @agent_tool
+  fi
+done <<<"$panes"
+exit 0

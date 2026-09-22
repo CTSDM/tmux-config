@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+# agent-hook: publish a coding agent's state into its tmux pane.
+#
+# Claude Code and Codex run this from their lifecycle hooks (agents/install
+# registers it) with the event as JSON on stdin:   agent-hook claude|codex
+#
+# It only records facts in pane options; agents.conf decides how they look.
+#   @agent_state   ready | working | needs | compacting | done | idle | error
+#   @agent_needs   permission | question | plan        (while state is needs)
+#   @agent_since   when the state last changed (epoch seconds)
+#   @agent_subs    running subagents, @agent_subtypes e.g. "2 Explore, 1 Plan"
+#   @agent_tool    last tool call, @agent_msg last reply or error
+#   plus @agent, @agent_session, @agent_profile, @agent_model, @agent_mode
+# "done" means finished but not seen yet; focusing the pane turns it "idle".
+#
+# It never writes to stdout and always exits 0: agents add the stdout of some
+# hooks to the conversation, and exit code 2 would block the tool call.
+
+kind=${1:-}
+[[ ($kind == claude || $kind == codex) && -n ${TMUX:-} && -n ${TMUX_PANE:-} ]] || exit 0
+payload=$(cat)
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 0
+if [[ -e $AG_STATE/debug ]]; then
+  exec >/dev/null 2>>"$AG_STATE/errors.log"
+  printf '%(%FT%T)T %s %s %s\n' -1 "$kind" "$TMUX_PANE" "$payload" >>"$AG_STATE/events.log"
+else
+  exec >/dev/null 2>&1
+fi
+
+fields=$(jq -r '
+  def line: tostring | gsub("\\s+"; " ") | .[0:300];
+  [ .hook_event_name, .session_id, .agent_id, .agent_type, .tool_name, .tool_use_id,
+    ((.tool_input // {}) | if type == "object" then
+      (.command // .file_path // .path // .pattern // .url // .query // .description // "") else . end),
+    .notification_type, .last_assistant_message, .error, .permission_mode, .source,
+    .model, .transcript_path
+  ] | map(. // "" | line) | @sh' <<<"$payload") || exit 0
+eval "set -- $fields"
+ev=$1 sid=$2 agent_id=$3 agent_type=$4 tool=$5 tool_id=$6 detail=$7 ntype=$8
+last=$9 err=${10} mode=${11} source=${12} model=${13} transcript=${14}
+
+IFS=$US read -r pane_pid cur_state cur_sid cur_needs_id cur_prev cur_tool sess win_active pane_active title < <(
+  tmux display -p -t "$TMUX_PANE" "#{pane_pid}$US#{@agent_state}$US#{@agent_session}$US#{@agent_needs_id}$US#{@agent_prev}$US#{@agent_tool}$US#{session_name}$US#{window_active}$US#{pane_active}$US#{pane_title}"
+) || exit 0
+
+# Only the pane's own agent counts, not a `claude -p` or `codex exec` that
+# another agent started from a tool call inside this pane.
+own_agent() {
+  local pid=$PPID comm agents=0
+  for _ in {1..12}; do
+    read -r comm <"/proc/$pid/comm" 2>/dev/null || return 1
+    [[ $comm == claude || $comm == codex ]] && ((agents++))
+    ((agents > 1)) && return 1
+    [[ $pid == "$pane_pid" ]] && break
+    pid=$(ag_ppid "$pid") || return 1
+    ((pid > 1)) || return 1
+  done
+  [[ $pid == "$pane_pid" ]] && ((agents == 1))
+}
+own_agent || exit 0
+
+cmds=()
+set_opt() { cmds+=(set -p -t "$TMUX_PANE" "$1" "$2" \;); }
+unset_opt() { cmds+=(set -pu -t "$TMUX_PANE" "$1" \;); }
+
+subs_dir=$AG_RUN/${sid//[^A-Za-z0-9_-]/_}
+publish_subs() {
+  local f t types=() subs=0
+  for f in "$subs_dir"/*; do
+    [[ -e $f ]] || continue
+    ((subs++))
+    read -r t <"$f"
+    [[ -z $t || $t == default ]] && t=agent
+    types+=("$t")
+  done
+  set_opt @agent_subs "$subs"
+  if ((subs)); then
+    set_opt @agent_subtypes "$(printf '%s\n' "${types[@]}" | sort | uniq -c |
+      awk '{printf "%s%d %s", sep, $1, $2; sep = ", "}')"
+  else
+    unset_opt @agent_subtypes
+  fi
+}
+
+# A subagent's own events carry its agent_id; they never change the main state.
+if [[ -n $agent_id ]]; then
+  file=$subs_dir/${agent_id//[^A-Za-z0-9_-]/_}
+  case $ev in
+    SubagentStart) mkdir -p "$subs_dir" && printf '%s\n' "$agent_type" >"$file" ;;
+    SubagentStop) rm -f "$file" ;;
+    *) exit 0 ;;
+  esac
+  publish_subs
+  tmux "${cmds[@]}"
+  exit 0
+fi
+
+tool_label=$tool${detail:+: $detail}
+new_state= needs=
+case $ev in
+  SessionStart)
+    set_opt @agent "$kind"
+    [[ -n $model ]] && set_opt @agent_model "$model"
+    if [[ $kind == claude ]]; then
+      profile=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+      profile=${profile%/}
+      profile=${profile##*/}
+      [[ $profile == .claude ]] && profile=default
+      set_opt @agent_profile "$profile"
+    fi
+    # Compaction restarts the session mid-turn; everything else is a fresh one.
+    if [[ $source != compact ]]; then
+      new_state=ready
+      [[ -n $cur_sid ]] && rm -rf "$AG_RUN/${cur_sid//[^A-Za-z0-9_-]/_}"
+      rm -rf "$subs_dir"
+      publish_subs
+      unset_opt @agent_tool
+      unset_opt @agent_msg
+    fi
+    ;;
+  UserPromptSubmit)
+    new_state=working
+    unset_opt @agent_tool
+    unset_opt @agent_msg
+    ;;
+  PreToolUse)
+    [[ $cur_state == needs ]] || new_state=working
+    set_opt @agent_tool "${tool_label//#/##}"
+    ;;
+  PermissionRequest)
+    new_state=needs
+    case $tool in
+      AskUserQuestion) needs=question ;;
+      ExitPlanMode) needs=plan ;;
+      *) needs=permission ;;
+    esac
+    set_opt @agent_needs_id "$tool_id"
+    set_opt @agent_tool "${tool_label//#/##}"
+    ;;
+  PostToolUse | PostToolUseFailure)
+    # With parallel tool calls, only the call that asked for permission ends the wait.
+    if [[ $cur_state != needs || -z $cur_needs_id || $tool_id == "$cur_needs_id" ]]; then
+      new_state=working
+    fi
+    ;;
+  Notification)
+    case $ntype in
+      permission_prompt) [[ $cur_state == needs ]] || { new_state=needs needs=permission; } ;;
+      elicitation_dialog | elicitation_url_dialog | agent_needs_input) new_state=needs needs=question ;;
+      *) exit 0 ;;
+    esac
+    ;;
+  Elicitation) new_state=needs needs=question ;;
+  ElicitationResult) [[ $cur_state == needs ]] && new_state=working ;;
+  PreCompact)
+    [[ $cur_state == compacting ]] || set_opt @agent_prev "$cur_state"
+    new_state=compacting
+    ;;
+  PostCompact)
+    new_state=${cur_prev:-idle}
+    [[ $new_state == compacting ]] && new_state=idle
+    ;;
+  Stop)
+    new_state=done
+    set_opt @agent_msg "${last//#/##}"
+    unset_opt @agent_tool
+    ;;
+  StopFailure)
+    new_state=error
+    set_opt @agent_msg "${err:-${last:-unknown error}}"
+    ;;
+  SessionEnd)
+    rm -rf "$subs_dir"
+    [[ -n $(tmux show -pqv -t "$TMUX_PANE" @agent_notify_id) ]] && "$AG_BIN/agent-notify" --close "$TMUX_PANE"
+    for o in "${AG_OPTS[@]}"; do unset_opt "$o"; done
+    tmux "${cmds[@]}"
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+
+# Hooks may be installed while a session is already running: keep identity current.
+set_opt @agent "$kind"
+[[ -n $sid ]] && set_opt @agent_session "$sid"
+[[ -n $transcript ]] && set_opt @agent_transcript "$transcript"
+[[ -n $mode ]] && set_opt @agent_mode "$mode"
+
+# Is the user looking at this pane? "session" means its session is on screen
+# but another pane or window is in front: the colored border is enough then.
+# Only when they are away does a desktop notification go out.
+if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_state != needs) ]]; then
+  vis=away
+  if client=$(ag_focused_client) && [[ $(tmux display -p -c "$client" '#{client_session}') == "$sess" ]]; then
+    [[ $win_active == 1 && $pane_active == 1 ]] && vis=visible || vis=session
+  fi
+  [[ $new_state == done && $vis == visible ]] && new_state=idle
+
+  subs=$(find "$subs_dir" -type f 2>/dev/null | wc -l)
+  if [[ $vis == away && ! ($new_state == done && $subs -gt 0) ]]; then
+    task=$(ag_title "$title")
+    [[ $task == "$(hostname)" ]] && task=
+    case $new_state in
+      needs)
+        urgency=critical
+        case $needs in
+          question) body="Has a question for you" ;;
+          plan) body="Plan ready for your review" ;;
+          *) [[ $ev == PermissionRequest ]] || tool_label=${cur_tool//##/#}
+             body="Needs permission${tool_label:+: $tool_label}" ;;
+        esac
+        ;;
+      done) urgency=normal body=${last:-Finished} ;;
+      error) urgency=critical body="Stopped: ${err:-error}" ;;
+    esac
+    setsid -f "$AG_BIN/agent-notify" "$TMUX_PANE" "$urgency" "$sess${task:+ · $task}" "$body" \
+      </dev/null >/dev/null 2>&1
+  fi
+fi
+
+if [[ -n $new_state ]]; then
+  [[ $new_state != "$cur_state" ]] && set_opt @agent_since "$EPOCHSECONDS"
+  set_opt @agent_state "$new_state"
+  if [[ $new_state == needs ]]; then
+    [[ -n $needs ]] && set_opt @agent_needs "$needs"
+  else
+    unset_opt @agent_needs
+    unset_opt @agent_needs_id
+  fi
+fi
+tmux "${cmds[@]}"
+exit 0

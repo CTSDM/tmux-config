@@ -3,7 +3,8 @@ set -euo pipefail
 
 # =============================================================================
 # Tmux + Tmuxifier setup script
-# Installs tmux config, TPM (plugin manager), and tmuxifier with layouts.
+# Installs tmux config, TPM (plugin manager), the Claude Code / Codex agent
+# hooks, and tmuxifier with layouts.
 #
 # Usage:
 #   ./setup.sh                  # install everything
@@ -12,7 +13,8 @@ set -euo pipefail
 # Assumes:
 #   - tmux is already installed
 #   - git is available
-#   - This script is run from the directory containing tmux.conf
+#   - This repo is cloned to ~/.config/tmux (or gets linked there)
+#   - jq is available (for the agent hooks)
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,23 +54,25 @@ fi
 TMUX_CONFIG_DIR="$HOME/.config/tmux"
 info "Setting up tmux config at $TMUX_CONFIG_DIR"
 
-mkdir -p "$TMUX_CONFIG_DIR"
-
-if [ -f "$TMUX_CONFIG_DIR/tmux.conf" ] && [ "$SCRIPT_DIR" != "$TMUX_CONFIG_DIR" ]; then
-    warn "Existing tmux.conf found — backing up to tmux.conf.bak"
-    cp "$TMUX_CONFIG_DIR/tmux.conf" "$TMUX_CONFIG_DIR/tmux.conf.bak"
-fi
-
-if [ "$SCRIPT_DIR" != "$TMUX_CONFIG_DIR" ]; then
-    cp "$SCRIPT_DIR/tmux.conf" "$TMUX_CONFIG_DIR/tmux.conf"
-    ok "Copied tmux.conf"
+# The config is more than tmux.conf now (agents/), so the repo itself lives there.
+if [ "$SCRIPT_DIR" = "$TMUX_CONFIG_DIR" ]; then
+    ok "Config already in place"
+elif [ -e "$TMUX_CONFIG_DIR" ]; then
+    error "$TMUX_CONFIG_DIR already exists. Clone this repo there, or move it away and re-run."
+    exit 1
 else
-    ok "tmux.conf already in place"
+    mkdir -p "$(dirname "$TMUX_CONFIG_DIR")"
+    ln -s "$SCRIPT_DIR" "$TMUX_CONFIG_DIR"
+    ok "Linked $TMUX_CONFIG_DIR -> $SCRIPT_DIR"
 fi
+
+# Leak guard for commits (gitleaks + .git/info/private-words), see .githooks/
+git -C "$SCRIPT_DIR" config core.hooksPath .githooks
+command -v gitleaks &>/dev/null || warn "gitleaks is not installed: commits will be refused until it is."
 
 # --- 2. TPM (Tmux Plugin Manager) -------------------------------------------
 
-TPM_DIR="$HOME/.tmux/plugins/tpm"
+TPM_DIR="$TMUX_CONFIG_DIR/plugins/tpm"
 info "Installing TPM (Tmux Plugin Manager)"
 
 if [ -d "$TPM_DIR" ]; then
@@ -86,6 +90,15 @@ if [ -f "$TPM_DIR/bin/install_plugins" ]; then
     ok "Plugins installed"
 else
     warn "Could not auto-install plugins. Open tmux and press prefix + I to install."
+fi
+
+# --- 3b. Agent hooks (Claude Code, Codex) ------------------------------------
+
+info "Registering the agent hooks with Claude Code and Codex"
+if command -v jq &>/dev/null; then
+    "$TMUX_CONFIG_DIR/agents/install"
+else
+    warn "jq is not installed: skipped. Install it, then run agents/install."
 fi
 
 # --- 4. Tmuxifier -----------------------------------------------------------

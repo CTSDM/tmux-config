@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# agent-peek <pane>: work in another session from inside a popup, without
+# leaving yours. Attaches to a throwaway session grouped with the pane's
+# session; detaching (prefix+d, or prefix+a again) closes the popup and
+# discards it. While you peek, that window takes the popup's size.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+pane=${1:?usage: agent-peek <pane>}
+
+IFS=$US read -r sess win socket < <(tmux display -p -t "$pane" "#{session_name}$US#{window_id}$US#{socket_path}") || exit 1
+peek=_peek-$$
+trap 'tmux kill-session -t "$peek" 2>/dev/null' EXIT HUP TERM
+# fzf hands its children the generic /dev/tty as stdin, which tmux refuses.
+# Use a copy of stdout, the popup's terminal (reopening the device instead
+# leaves the client blank).
+[[ $(readlink /proc/$$/fd/0) == /dev/tty && -t 1 ]] && exec 0<&1
+# A nested client needs TMUX unset, which also drops the server: name it.
+TMUX= tmux -S "$socket" new-session -t "$sess" -s "$peek" \; \
+  select-window -t "$peek:$win" \; \
+  select-pane -t "$pane"

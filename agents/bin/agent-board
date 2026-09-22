@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# agent-board [client]: mission control. Every pane on the server in one
+# list, agents first (whoever needs you on top), with a live preview.
+#
+#   enter   go there (agent-jump)       ctrl-o  peek: work in it right here
+#   ctrl-a  agents only / all panes     ctrl-r  refresh now
+#
+# prefix+a runs `agent-board --popup <client>`, which opens the board in a
+# popup on that client. Internal: --list [--agents], --preview <pane>.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+C_RESET=$'\e[0m' C_DIM=$'\e[38;2;108;112;134m' C_TEXT=$'\e[38;2;205;214;244m'
+C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;137;180;250m' C_NEEDS=$'\e[38;2;250;179;135m'
+C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;203;166;247m'
+
+FIELDS="#{pane_id}$US#{session_name}$US#{window_index}$US#{pane_index}$US#{window_name}$US#{pane_current_command}$US#{pane_title}$US#{pane_current_path}$US#{@agent}$US#{@agent_state}$US#{@agent_needs}$US#{@agent_since}$US#{@agent_tool}$US#{@agent_msg}$US#{@agent_subs}$US#{@agent_subtypes}$US#{@agent_profile}$US#{@agent_mode}$US#{@agent_model}"
+
+fit() { # <width> <text>: truncate or pad to a width in characters (printf counts bytes)
+  local w=$1 s=$2
+  ((${#s} > w)) && s="${s:0:w-1}…"
+  printf '%s%*s' "$s" $((w - ${#s})) ''
+}
+
+ago() { # <epoch> -> "45s", "12m", "3h", "2d"
+  local s=$((EPOCHSECONDS - ${1:-$EPOCHSECONDS}))
+  if ((s < 60)); then echo "${s}s"; elif ((s < 3600)); then echo "$((s / 60))m"
+  elif ((s < 86400)); then echo "$((s / 3600))h"; else echo "$((s / 86400))d"; fi
+}
+
+# Sets glyph, color, rank and summary for one pane from its fields.
+describe() {
+  local subs_note=
+  ((subs > 0)) && subs_note=" · $subs subagent$( ((subs > 1)) && echo s)${subtypes:+ ($subtypes)}"
+  if [[ -z $agent ]]; then
+    if [[ $cmd == claude || $cmd == codex ]]; then
+      glyph=◇ color=$C_DIM rank=6 summary="$cmd, not reporting yet (started before the hooks)"
+    else
+      glyph=' ' color=$C_DIM rank=9 summary=${path/#$HOME/\~}
+    fi
+    return
+  fi
+  local tool_now=${tool//##/#} msg_now=${msg//##/#}
+  case $state in
+    needs) glyph=▲ color=$C_NEEDS rank=0
+      case $needs in
+        question) summary="has a question" ;;
+        plan) summary="plan ready for review" ;;
+        *) summary="needs permission${tool_now:+ · $tool_now}" ;;
+      esac ;;
+    error) glyph=✗ color=$C_ERROR rank=1 summary="error · $msg_now" ;;
+    done) glyph=✓ color=$C_DONE rank=2 summary=$msg_now ;;
+    working) glyph=● color=$C_WORKING rank=3 summary=${tool_now:-thinking} ;;
+    compacting) glyph=↻ color=$C_COMPACT rank=3 summary="compacting context" ;;
+    *) glyph=○ color=$C_DIM rank=4 summary=${msg_now:-${state:-idle}} ;;
+  esac
+  if ((subs > 0)) && [[ $state == done || $state == idle || $state == ready ]]; then
+    glyph=◐ color=$C_WORKING rank=3 summary="waiting on subagents"
+  fi
+  summary+=$subs_note
+}
+
+list() {
+  local agents_only=$1 line
+  while IFS=$US read -r pane sess win pidx wname cmd title path agent state needs since tool msg subs subtypes profile mode model; do
+    [[ $sess == _peek-* ]] && continue
+    describe
+    [[ $agents_only == 1 && $rank == 9 ]] && continue
+    local name
+    if [[ -n $agent || $rank == 6 ]]; then name=$(ag_title "$title"); else name=$wname; fi
+    [[ $name == "$(hostname)" ]] && name=$wname
+    local who=${agent:-$cmd}
+    [[ $agent == claude && -n $profile && $profile != default ]] && who+=":$profile"
+    [[ $mode == bypassPermissions ]] && who+=" ⚡"
+    local age=
+    [[ -n $agent ]] && age=$(ago "$since")
+    printf '%s\t%d\t%s\t%s%s%s %s%s%s %s %s%s %s %s%s%s\n' \
+      "$pane" "$rank" "${since:-0}" \
+      "$color" "$glyph" "$C_RESET" "$C_BOLD$C_TEXT" "$(fit 18 "$sess:$win.$pidx")" "$C_RESET" \
+      "$(fit 22 "$name")" "$C_DIM" "$(fit 4 "$age")" "$(fit 13 "$who")" \
+      "$color" "${summary:0:120}" "$C_RESET"
+  done < <(tmux list-panes -a -F "$FIELDS") |
+    sort -t$'\t' -k2,2n -k3,3n | cut -f1,4-
+}
+
+preview() {
+  local pane=$1 lines=${FZF_PREVIEW_LINES:-40}
+  IFS=$US read -r pane sess win pidx wname cmd title path agent state needs since tool msg subs subtypes profile mode model \
+    < <(tmux display -p -t "$pane" "$FIELDS") || return
+  describe
+  local branch
+  branch=$(git -C "$path" branch --show-current 2>/dev/null)
+  local head=()
+  head+=("$color$glyph $C_BOLD$C_TEXT$sess:$win.$pidx$C_RESET  $C_DIM${path/#$HOME/\~}${branch:+  $branch}$C_RESET")
+  if [[ -n $agent ]]; then
+    head+=("$C_DIM$agent${profile:+ · $profile}${model:+ · $model}${mode:+ · $mode} · ${state:-?} for $(ago "$since")$C_RESET")
+    head+=("$color${summary:0:$((FZF_PREVIEW_COLUMNS * 2))}$C_RESET")
+  fi
+  printf '%s\n' "${head[@]}"
+  local rule
+  printf -v rule '%*s' "${FZF_PREVIEW_COLUMNS:-80}" ''
+  printf '%s%s%s\n' "$C_DIM" "${rule// /─}" "$C_RESET"
+  # The bottom of the screen is where prompts and dialogs are.
+  tmux capture-pane -ep -t "$pane" |
+    awk '{ lines[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print lines[i] }' |
+    tail -n $((lines - ${#head[@]} - 1))
+}
+
+case ${1:-} in
+  --list) list "$([[ ${2:-} == --agents ]] && echo 1 || echo 0)"; exit ;;
+  --preview) preview "$2"; exit ;;
+  --popup) exec tmux display-popup -c "$2" -E -w 90% -h 85% -T ' agents ' "'$AG_BIN/agent-board' '$2'" ;;
+esac
+
+client=${1:-}
+"$AG_BIN/agent-reconcile"
+
+sock=$AG_RUN/board-$$.sock
+mkdir -p "$AG_RUN"
+self=$AG_BIN/agent-board
+# fzf runs actions through $SHELL, so keep them POSIX.
+reload="reload-sync($self --list \$([ \"\$FZF_PROMPT\" = 'agents> ' ] && echo --agents))+refresh-preview"
+
+# Keep the list and the preview live while the board is open.
+(
+  while sleep 2; do
+    [[ -S $sock ]] || continue
+    curl -s --unix-socket "$sock" -d "$reload" http://localhost >/dev/null 2>&1 || break
+  done
+) &
+refresher=$!
+trap 'kill $refresher 2>/dev/null; rm -f "$sock"' EXIT
+
+"$self" --list | fzf --ansi --listen="$sock" --delimiter=$'\t' --with-nth=2 --track --no-sort \
+  --layout=reverse --info=inline-right --prompt='all> ' --pointer='▶' --gutter=' ' \
+  --header='enter go · ctrl-o peek · ctrl-a agents/all · ctrl-r refresh · esc close' \
+  --color='header:#6c7086,pointer:#89dceb,prompt:#89dceb,hl:#89dceb,hl+:#89dceb,bg+:#313244,border:#45475a' \
+  --preview="$self --preview {1}" \
+  --preview-window='right,55%,border-left,<150(down,55%,border-top)' \
+  --bind="enter:become($AG_BIN/agent-jump {1} '$client')" \
+  --bind="ctrl-o:become($AG_BIN/agent-peek {1})" \
+  --bind="ctrl-r:$reload" \
+  --bind="ctrl-a:transform:[ \"\$FZF_PROMPT\" = 'all> ' ] && echo 'change-prompt(agents> )+reload-sync($self --list --agents)' || echo 'change-prompt(all> )+reload-sync($self --list)'"
