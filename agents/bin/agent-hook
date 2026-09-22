@@ -228,7 +228,7 @@ esac
 # play.
 if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_state != needs) ]]; then
   vis=away
-  if client=$(ag_focused_client) && [[ $(tmux display -p -c "$client" '#{client_session}') == "$sess" ]]; then
+  if client=$(ag_focused_client) && [[ $(ag_client "$client" '#{client_session}') == "$sess" ]]; then
     [[ $win_active == 1 && $pane_active == 1 ]] && vis=visible || vis=session
   fi
   [[ $new_state == done && $vis == visible ]] && new_state=idle

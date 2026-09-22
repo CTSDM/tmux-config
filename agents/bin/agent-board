@@ -141,7 +141,7 @@ client=${1:-}
 
 mkdir -p "$AG_RUN"
 export BOARD_STATE=$AG_RUN/board-$$.state
-[[ -n $client ]] && home_space=$(tmux display -p -c "$client" '#{?@space,#{@space},#{@space_auto}}')
+[[ -n $client ]] && home_space=$(ag_client "$client" '#{?@space,#{@space},#{@space_auto}}')
 home_space=${home_space:-all} want_space=$home_space
 save_state
 

@@ -44,6 +44,16 @@ ag_descends_from() {
   return 1
 }
 
+# Evaluates a format for one client (its session, window and pane). Not
+# `display -p -c`: that evaluates for the client running the command.
+ag_client() { # <client> <format>
+  local name rest
+  while IFS=$US read -r name rest; do
+    [[ $name == "$1" ]] && { printf '%s\n' "$rest"; return 0; }
+  done < <(tmux list-clients -F "#{client_name}$US$2")
+  return 1
+}
+
 # Prints the tmux client whose terminal window has keyboard focus. Asks
 # Hyprland when it can (tmux only learns about focus when it changes), and
 # falls back to tmux's own focus flag.
@@ -68,7 +78,7 @@ ag_visibility() { # <pane>
   local sess win_active pane_active client
   IFS=$US read -r sess win_active pane_active < <(
     tmux display -p -t "$1" "#{session_name}$US#{window_active}$US#{pane_active}") || { echo away; return; }
-  if client=$(ag_focused_client) && [[ $(tmux display -p -c "$client" '#{client_session}') == "$sess" ]]; then
+  if client=$(ag_focused_client) && [[ $(ag_client "$client" '#{client_session}') == "$sess" ]]; then
     [[ $win_active == 1 && $pane_active == 1 ]] && echo visible || echo session
   else
     echo away
@@ -78,7 +88,7 @@ ag_visibility() { # <pane>
 # Focuses the terminal window that hosts a tmux client (Hyprland only).
 ag_raise_client() {
   local pid wins
-  pid=$(tmux display -p -c "$1" '#{client_pid}' 2>/dev/null) || return 1
+  pid=$(ag_client "$1" '#{client_pid}') || return 1
   wins=$(ag_hyprctl clients -j 2>/dev/null | jq -r '.[].pid' 2>/dev/null) || return 1
   for _ in {1..8}; do
     if grep -qx "$pid" <<<"$wins"; then

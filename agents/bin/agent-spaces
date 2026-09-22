@@ -7,6 +7,7 @@
 #   agent-spaces set <session> <space|auto>
 #   agent-spaces next|prev <client>   switch the client to the next/previous session
 #   agent-spaces go <client> <n>      switch the client to session number n
+#   agent-spaces layout               fit each session's bar to its terminal's width
 # next, prev and go stay within the client's space; its sessions are numbered
 # in the order of the top bar (by name, like tmux itself).
 #
@@ -19,7 +20,7 @@
 # "all spaces" views, and while you are on one the top bar shows all spaces.
 #
 # Each session gets its own top status line in @fleet-line, built from the
-# @fleet-tpl template in theme.conf: only its space's sessions and what they
+# @fleet-*-tpl templates in theme.conf: only its space's sessions and what they
 # are doing. Nothing from other spaces ever shows there.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 shopt -u patsub_replacement 2>/dev/null # bash 5.2: '&' in a \${x//a/b} replacement means the match
@@ -70,57 +71,85 @@ C_IDLE='#{&&:#{m/r:^(idle|ready)$,#{@agent_state}},#{e|<:#{@agent_subs},1}}'
 C_UNTRACKED='#{&&:#{==:#{@agent},},#{m/r:^(claude|codex)$,#{pane_current_command}}}'
 
 # What the panes of the sessions matching <filter> are doing, most urgent first,
-# only the states present: "1 needs you - 2 working - 3 idle" in words when it
-# fits (up to two states, or 120+ columns), else glyphs like "▲1 ✓1 ●2 ○3" so
-# nothing gets cut. Agents that are not reporting (◇, e.g. started before the
-# hooks) come last as "untracked".
-summary() { # <session filter>
-  local filter=$1 words="" glyphs="" before="" present="" item n cond color label glyph
-  for item in needs done working idle untracked; do
-    case $item in
-      needs) cond=$C_NEEDS color='#{@ac-needs}' glyph=▲ ;;
-      done) cond=$C_DONE color='#{@ac-done}' glyph=✓ ;;
-      working) cond=$C_WORKING color='#{@ac-working}' glyph=● ;;
-      idle) cond=$C_IDLE color='#{@thm-overlay1}' glyph=○ ;;
-      untracked) cond=$C_UNTRACKED color='#{@thm-overlay0}' glyph=◇ ;;
-    esac
-    n=$(count "$filter" "$cond")
-    case $item in
-      needs) label="#[bold]$n #{?#{==:$n,1},needs,need} you#[nobold]" ;;
-      *) label="$n $item" ;;
-    esac
-    local sep="" gap=""
-    [[ -n $before ]] && sep="#{?#{!=:$before,0},#[fg=#{@thm-overlay0}] - ,}" gap="#{?#{!=:$before,0}, ,}"
-    words+="#{?#{!=:$n,0},$sep#[fg=$color]$label,}"
-    glyphs+="#{?#{!=:$n,0},$gap#[fg=$color]$glyph$n,}"
-    if [[ -n $before ]]; then before="#{e|+:$before,$n}"; else before=$n; fi
-    local one="#{?#{!=:$n,0},1,0}"
-    if [[ -n $present ]]; then present="#{e|+:$present,$one}"; else present=$one; fi
+# only the states present: "1 needs you - 2 working - 3 idle" in words when
+# they fit the room the layout left on that row (@summary-room), else glyphs
+# like "▲1 ✓1 ●2 ○3". Agents that are not reporting (◇, e.g. started before
+# the hooks) come last as "untracked".
+SUMMARY_STATES=(needs done working idle untracked)
+
+# Defines, per space (and "all"), how many agents of the other sessions are in
+# each state: global options @cnt-<state>-<space>, which summary() refers to.
+# Writing the counts out in every format made them too long for tmux.
+define_counts() {
+  local space key base filter item cond cmds=()
+  for space in "${spaces[@]}" ""; do
+    key=${space:-all} base=1
+    [[ -n $space ]] && base="#{==:$SPACE_OF,$space}"
+    filter="#{&&:$base,#{!=:#{session_name},#{client_session}}}"
+    for item in "${SUMMARY_STATES[@]}"; do
+      case $item in
+        needs) cond=$C_NEEDS ;; done) cond=$C_DONE ;; working) cond=$C_WORKING ;;
+        idle) cond=$C_IDLE ;; untracked) cond=$C_UNTRACKED ;;
+      esac
+      tmux set -g "@cnt-$item-${key//[^A-Za-z0-9_-]/_}" "$(count "$filter" "$cond")"
+    done
   done
-  printf '#{?#{||:#{e|>=:#{client_width},120},#{e|<=:%s,2}},%s,%s}' "$present" "$words" "$glyphs"
 }
 
-fleet_format() { # <space or empty for "all">
-  local space=$1 filter label color
+summary() { # <space or empty for "all">
+  local key=${1:-all} words="" plain="" glyphs="" before="" item n color label text glyph
+  key=${key//[^A-Za-z0-9_-]/_}
+  for item in "${SUMMARY_STATES[@]}"; do
+    case $item in
+      needs) color='#{@ac-needs}' glyph=▲ ;;
+      done) color='#{@ac-done}' glyph=✓ ;;
+      working) color='#{@ac-working}' glyph=● ;;
+      idle) color='#{@thm-overlay1}' glyph=○ ;;
+      untracked) color='#{@thm-overlay0}' glyph=◇ ;;
+    esac
+    n="#{E:@cnt-$item-$key}"
+    text="$n $item"
+    [[ $item == needs ]] && text="$n #{?#{==:$n,1},needs,need} you"
+    label=$text
+    [[ $item == needs ]] && label="#[bold]$text#[nobold]"
+    local sep="" gap="" psep=""
+    if [[ -n $before ]]; then
+      sep="#{?#{!=:$before,0},#[fg=#{@thm-overlay0}] - ,}" gap="#{?#{!=:$before,0}, ,}" psep="#{?#{!=:$before,0}, - ,}"
+    fi
+    words+="#{?#{!=:$n,0},$sep#[fg=$color]$label,}"
+    plain+="#{?#{!=:$n,0},$psep$text,}"
+    glyphs+="#{?#{!=:$n,0},$gap#[fg=$color]$glyph$n,}"
+    if [[ -n $before ]]; then before="#{e|+:$before,$n}"; else before=$n; fi
+  done
+  printf '#{?#{e|>=:#{?@summary-room,#{@summary-room},999},#{n:%s}},%s,%s}' "$plain" "$words" "$glyphs"
+}
+
+# The pieces of a space's top line: head (label), chips (its sessions) and
+# tail (muted, summary), filled in from the templates in theme.conf.
+fleet_piece() { # <piece: head|chips|tail> <space or empty for "all"> [extra chip condition]
+  local space=$2 filter label color tpl
   if [[ -n $space ]]; then
     filter="#{==:$SPACE_OF,$space}" label=$space color=$(color_of "$space")
   else
     filter=1 label=all color=$UNASSIGNED_COLOR
   fi
-  local tpl
-  tpl=$(tmux show -gv @fleet-tpl)
+  [[ -n ${3:-} ]] && filter="#{&&:$filter,$3}"
+  tpl=$(tmux show -gv "@fleet-$1-tpl")
   tpl=${tpl//@@FILTER@@/$filter}
   tpl=${tpl//@@LABEL@@/$label}
   tpl=${tpl//@@COLOR@@/$color}
+  local index="#{@space-index-${space:-all}}"
+  tpl=${tpl//@@INDEX@@/$index}
   local muted=""
   [[ -n $space ]] && muted="#{?#{==:#{@agent_mute_${space//[^A-Za-z0-9_-]/_}},on},#[fg=#{@thm-overlay1}]muted  ,}"
   tpl=${tpl//@@MUTED@@/$muted}
-  local index="#{@space-index-${space:-all}}"
-  tpl=${tpl//@@INDEX@@/$index}
   # What the other sessions are doing; the current one shows in its own tabs.
-  local others_only="#{&&:$filter,#{!=:#{session_name},#{client_session}}}"
-  tpl=${tpl//@@SUMMARY@@/$(summary "$others_only")}
+  [[ $tpl == *@@SUMMARY@@* ]] && tpl=${tpl//@@SUMMARY@@/$(summary "$space")}
   printf '%s' "$tpl"
+}
+
+fleet_format() { # <space or empty for "all">: the whole top line, on one row
+  printf '%s%s%s' "$(fleet_piece head "$1")" "$(fleet_piece chips "$1")" "$(fleet_piece tail "$1")"
 }
 
 # The sessions shown for a space, in the top bar's order: tmux lists sessions
@@ -148,7 +177,7 @@ number_sessions() {
 # Switches a client within its space: next, prev or go <n>.
 switch_in_space() { # <client> next|prev|go [n]
   local client=$1 how=$2 n=${3:-} current space list=() i pos=-1 target
-  IFS=$US read -r current space < <(tmux display -p -c "$client" "#{session_name}$US#{?@space,#{@space},#{@space_auto}}")
+  IFS=$US read -r current space < <(ag_client "$client" "#{session_name}$US#{?@space,#{@space},#{@space_auto}}")
   [[ $current == _peek-* ]] && return
   mapfile -t list < <(space_list "$space")
   ((${#list[@]})) || return
@@ -194,6 +223,140 @@ assign() { # [session...]
     fi
   done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
   number_sessions
+  layout
+}
+
+# --- Narrow terminals ---------------------------------------------------------------
+#
+# The two-row bar fits most terminals. When the one showing a session is too
+# narrow (a vertical screen), that session gets more rows (its status option,
+# up to 5) through its @row0..@row4 options: the space's sessions wrap onto as
+# many rows as needed, with the summary on the last, and if the windows don't
+# fit either, their line drops the session pill and the clock and shortens the
+# tab titles (@narrow-tabs). Widths are estimated from the names and the agents
+# the sessions have now.
+
+SUMMARY_MIN=15 # the glyph form, "▲1 ✓1 ●2 ○3 ◇3"
+
+layout_session() { # <session> <width>
+  local sess=$1 width=$2 space label label_w
+  space=$(tmux show -qv -t "=$sess:" @space)
+  [[ -n $space ]] || space=$(tmux show -qv -t "=$sess:" @space_auto)
+  label=${space:-all}
+  label_w=$((${#label} + 4)) # " work │ "
+  local reserve=$SUMMARY_MIN
+  [[ -n $space ]] && ag_space_muted "$space" && reserve=$((reserve + 7)) # "muted  "
+
+  # Session chips: " 3 name ●○  ", or a pill for the current session.
+  local -a names=() chip_rows=()
+  mapfile -t names < <(space_list "$space")
+  local name chip_w used=$label_w start=1 n=0
+  for name in "${names[@]}"; do
+    ((n++))
+    local glyphs=${agents[$name]:-0}
+    chip_w=$((${#n} + ${#name} + 4))
+    ((${#name} > 16)) && chip_w=$((${#n} + 16 + 4))
+    ((glyphs > 0)) && [[ $name != "$sess" ]] && chip_w=$((chip_w + glyphs + 1))
+    if ((used + chip_w > width && n > start)); then
+      chip_rows+=("$start-$((n - 1))")
+      start=$n used=$label_w
+    fi
+    used=$((used + chip_w))
+  done
+  chip_rows+=("$start-$n")
+  local summary_own_row=0 room=$((width - used))
+  ((room < reserve)) && summary_own_row=1 room=$((width - label_w))
+
+  # Window tabs: does the usual line (pill, tabs, clock) fit? If not, wrap the
+  # tabs, with shorter titles, onto rows of their own.
+  local -a tab_w=() win_rows=()
+  local task panes idx line_w=$((${#sess} + 3 + 7))
+  while IFS=$US read -r idx task panes; do
+    line_w=$((line_w + ${#idx} + ${#panes} + $(( ${#task} > 22 ? 22 : ${#task} )) + 6))
+    tab_w+=("$idx:$((${#idx} + ${#panes} + $(( ${#task} > 14 ? 14 : ${#task} )) + 6))")
+  done < <(tmux list-windows -t "=$sess:" -F "#{window_index}$US#{E:@agent-task}$US#{P:#{?#{||:#{@agent},#{m/r:^(claude|codex)$,#{pane_current_command}}},x,}}")
+  local wide_windows=1
+  if ((line_w > width)); then
+    wide_windows=0
+    local t w_used=0 w_start="" prev=""
+    for t in "${tab_w[@]}"; do
+      local wi=${t%%:*} ww=${t#*:}
+      if [[ -n $w_start ]] && ((w_used + ww > width - 8)); then # 8: "prefix " on the last row
+        win_rows+=("$w_start-$prev")
+        w_start="" w_used=0
+      fi
+      [[ -n $w_start ]] || w_start=$wi
+      w_used=$((w_used + ww)) prev=$wi
+    done
+    [[ -n $w_start ]] && win_rows+=("$w_start-$prev")
+  fi
+
+  # Everything on the usual two rows?
+  if ((${#chip_rows[@]} == 1 && !summary_own_row && wide_windows)); then
+    tmux set -t "=$sess:" @summary-room "$room" \; set -qu -t "=$sess:" status \; \
+      set -qu -t "=$sess:" @narrow-tabs \; set -qu -t "=$sess:" @row0 \; set -qu -t "=$sess:" @row1 \; \
+      set -qu -t "=$sess:" @row2 \; set -qu -t "=$sess:" @row3 \; set -qu -t "=$sess:" @row4
+    return
+  fi
+
+  # tmux has at most 5 status rows: past that, windows go back to one
+  # scrolling row, then sessions are cut.
+  local total=$((${#chip_rows[@]} + summary_own_row + (wide_windows ? 1 : ${#win_rows[@]})))
+  ((total > 5 && !wide_windows)) && win_rows=("scroll") total=$((${#chip_rows[@]} + summary_own_row + 1))
+
+  local rows=() idxfmt="#{@space-index-${label}}" indent i range from to row
+  [[ -n $space ]] || idxfmt="#{@space-index-all}"
+  indent="#[fill=#{@thm-base}]#[bg=#{@thm-base}]#[align=left]$(printf '%*s' "$label_w" '')"
+  for i in "${!chip_rows[@]}"; do
+    from=${chip_rows[i]%-*} to=${chip_rows[i]#*-}
+    range="#{&&:#{e|>=:$idxfmt,$from},#{e|<=:$idxfmt,$to}}"
+    if ((i == 0)); then row=$(fleet_piece head "$space"); else row=$indent; fi
+    row+=$(fleet_piece chips "$space" "$range")
+    ((i == ${#chip_rows[@]} - 1 && !summary_own_row)) && row+=$(fleet_piece tail "$space")
+    rows+=("$row")
+  done
+  ((summary_own_row)) && rows+=("$indent$(fleet_piece tail "$space")")
+  if ((wide_windows)); then
+    rows+=('#{E:@window-line}')
+  elif [[ ${win_rows[0]} == scroll ]]; then
+    rows+=('#{E:@window-line-narrow}')
+  else
+    for i in "${!win_rows[@]}"; do
+      from=${win_rows[i]%-*} to=${win_rows[i]#*-}
+      row="#[align=left]#{W:#{?#{&&:#{e|>=:#{window_index},$from},#{e|<=:#{window_index},$to}},#[range=window|#{window_index}]#{?window_active,#{T:window-status-current-format},#{T:window-status-format}}#[norange default],}}"
+      ((i == ${#win_rows[@]} - 1)) && row+='#[align=right]#[fg=#{@thm-peach},bold]#{?client_prefix,prefix ,}#[fg=#{@thm-overlay2},nobold]#{?#{==:#{@agent_sound},off},sounds off ,}'
+      rows+=("$row")
+    done
+  fi
+
+  local cmds=() k
+  for ((k = 0; k < 5; k++)); do
+    if ((k < ${#rows[@]})); then tmux set -t "=$sess:" "@row$k" "${rows[k]}" # one call each: rows are long
+    else cmds+=(set -qu -t "=$sess:" "@row$k" \;); fi
+  done
+  local nrows=$((${#rows[@]} > 5 ? 5 : ${#rows[@]}))
+  if ((wide_windows)); then cmds+=(set -qu -t "=$sess:" @narrow-tabs \;); else cmds+=(set -t "=$sess:" @narrow-tabs 1 \;); fi
+  cmds+=(set -t "=$sess:" @summary-room "$room" \; set -t "=$sess:" status "$nrows")
+  tmux "${cmds[@]}"
+}
+
+# Lays out every session shown on a terminal (the narrowest one, if several).
+layout() {
+  local sess width
+  local -A widths=()
+  while IFS=$US read -r sess width; do
+    [[ -z ${widths[$sess]:-} ]] || ((width < widths[$sess])) && widths[$sess]=$width
+  done < <(tmux list-clients -F "#{client_session}$US#{client_width}")
+  ((${#widths[@]})) || return 0
+  declare -gA agents=()
+  local s
+  while IFS=$US read -r s; do
+    agents[$s]=$((${agents[$s]:-0} + 1))
+  done < <(tmux list-panes -a -F "#{session_name}$US#{?#{||:#{@agent},#{m/r:^(claude|codex)$,#{pane_current_command}}},x,}" | awk -F"$US" '$2 == "x" { print $1 }')
+  for sess in "${!widths[@]}"; do
+    [[ $sess == _peek-* ]] && continue
+    layout_session "$sess" "${widths[$sess]}"
+  done
 }
 
 bind_menu() {
@@ -214,7 +377,7 @@ bind_menu() {
   for space in "${spaces[@]}"; do
     local opt="@agent_mute_${space//[^A-Za-z0-9_-]/_}"
     args+=("#{?#{==:#{$opt},on},Unmute,Mute} #[fg=$(color_of "$space")]$space#[default] (notifications and sounds)" "$i"
-      "set -gF $opt '#{?#{==:#{$opt},on},off,on}'")
+      "set -gF $opt '#{?#{==:#{$opt},on},off,on}' ; run-shell -b '$AG_BIN/agent-spaces layout'")
     ((i++))
   done
   tmux bind Q "${args[@]}"
@@ -223,11 +386,13 @@ bind_menu() {
 read_rules
 case ${1:-} in
   load)
+    define_counts
     tmux set -g @spaces "${spaces[*]}" \; set -g @fleet-line "$(fleet_format "")"
     bind_menu
     assign
     ;;
   assign) shift; assign "$@" ;;
+  layout) layout ;;
   next | prev) switch_in_space "${2:?usage: agent-spaces next|prev <client>}" "$1" ;;
   go) switch_in_space "${2:?usage: agent-spaces go <client> <n>}" go "${3:-}" ;;
   set)

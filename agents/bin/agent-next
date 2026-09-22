@@ -9,7 +9,7 @@ client=${1:-}
 "$AG_BIN/agent-reconcile"
 current= home=
 if [[ -n $client ]]; then
-  IFS=$US read -r current home < <(tmux display -p -c "$client" "#{pane_id}$US#{?@space,#{@space},#{@space_auto}}")
+  IFS=$US read -r current home < <(ag_client "$client" "#{pane_id}$US#{?@space,#{@space},#{@space_auto}}")
 fi
 
 pick=$(tmux list-panes -a -F "#{pane_id}$US#{@agent_state}$US#{@agent_since}$US#{session_name}$US#{?@space,#{@space},#{@space_auto}}" |

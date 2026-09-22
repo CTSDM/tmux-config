@@ -35,7 +35,7 @@ list() { # <space|all>
   while IFS=$US read -r pane_sess state subs; do
     [[ -n $state ]] && glyphs[$pane_sess]+=$(glyph "$state" "$subs")
   done < <(tmux list-panes -a -F "#{session_name}$US#{@agent_state}$US#{@agent_subs}")
-  current=$(tmux display -p -c "$client" '#{session_name}' 2>/dev/null)
+  current=$(ag_client "$client" '#{session_name}')
   while IFS=$US read -r sess sp path windows; do
     [[ $sess == _peek-* ]] && continue
     [[ $want != all && $sp != "$want" ]] && continue
@@ -67,7 +67,7 @@ case ${1:-} in
 esac
 
 client=${1:-}
-space=$(tmux display -p -c "$client" '#{?@space,#{@space},#{@space_auto}}' 2>/dev/null)
+space=$(ag_client "$client" '#{?@space,#{@space},#{@space_auto}}')
 space=${space:-all}
 self=$AG_BIN/agent-sessions
 
