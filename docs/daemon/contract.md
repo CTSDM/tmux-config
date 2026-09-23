@@ -328,7 +328,7 @@ such part), omitted when it equals the host name. Body and urgency:
 
 **N3. One per pane.** A new notification replaces the pane's previous one.
 It closes when the pane is seen (§12 E1), when the pane leaves `needs` for
-another state, and on SessionEnd. Clicking it runs `agent-jump <pane>`.
+another state, on SessionEnd, and when its agent is found gone (E2, X5). Clicking it runs `agent-jump <pane>`.
 **N4. Reminder.** On entering `needs`, a reminder is armed for
 `@agent_remind_after` seconds (global, default 900). When it fires, if the
 pane is still in the same `needs` (state `needs`, `@agent_since` unchanged),
@@ -351,7 +351,10 @@ without changing `@agent_since`; its notification closes.
 a pane in `working`, `needs` or `compacting`; mission control opens;
 `prefix u`; configuration load.
 - The agent process is gone (Claude: `pane_pid` itself if named `claude` or
-  `codex`, else a child of it with that exact name) → clear the pane (P1).
+  `codex`, else a child of it with that exact name) → as H11: clear the pane
+  (P1, internal options included) and close its notification.
+  **CHANGE C6:** bash's reconcile unsets only the `AG_OPTS` table: internal
+  options stay and the notification remains until the pane is seen.
 - Claude in `working`, `needs` or `compacting` whose transcript says the turn
   is over → `idle`, `@agent_since` = now, unset needs, needs id, tool. No sound,
   no notification. The turn is over when, among the last 80 lines, the last

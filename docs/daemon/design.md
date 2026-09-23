@@ -73,9 +73,24 @@ the daemon with `chain`, since the daemon knows each pane's `pane_pid`.
   ticks, process/rollout observations. Effects: option writes, sounds,
   notifications, timer (re)arming, spawning `agent-jump`. Unit tests live
   here and cover most of the contract without tmux.
-- **tmux transport** behind a trait: phase 1 spawns `tmux` (2-3 ms per batch,
-  like bash, one batch per event); phase 4 may switch to control mode
-  (`tmux -C`) if the spike (T0.3) shows no side effects.
+- **tmux transport** behind a trait. Decided after the spike
+  ([spike-control-mode.md](spike-control-mode.md)):
+  - Phases 1-3 spawn `tmux`, one batch per event (read) and one per write.
+  - Phase 4 moves to control mode with the spike's recipe (case k): the
+    daemon's own session `_peek-agentd` (`destroy-unattached on`), flags
+    `no-output,ignore-size`, size `1000x100`, reattach after `%exit` while
+    the server lives. The session name alone is not enough protection: every
+    client consumer also skips `client_control_mode` clients (Rust visibility,
+    `agent-spaces layout`, `agent-jump`, `ag_focused_client`). Output is not
+    escaped: match `%end`/`%error` by command number, and never read
+    program-controlled strings through it without that. Spawning can't reach
+    the blink target (the cost is per call, ~5% at 14 frames/s); control mode
+    can.
+  - Subscriptions (`refresh-client -B` with `S:`/`W:`/`P:` loops) are for
+    phase 4 too: panes gone, sessions renamed, spaces changed, without
+    polling. Hook-time reads stay (a subscription can be a second stale).
+- **Lifetime:** `$TMUX` holds the server's pid (`socket,pid,session`); the
+  daemon watches it with a pidfd and exits when it ends. No polling.
 - **Visibility:** asks Hyprland's request socket (`.socket.sock`,
   `j/activewindow`) in-process instead of running `hyprctl`; same stale
   signature fallback as `ag_hyprctl`. `AG_FOCUS_CLIENT` overrides (seams).
