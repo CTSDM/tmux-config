@@ -47,11 +47,12 @@ IFS=$US read -r pane_pid cur_state cur_sid cur_needs_id cur_prev cur_tool sess w
 
 # Only the pane's own agent counts, not a `claude -p` or `codex exec` that
 # another agent started from a tool call inside this pane.
-own_agent() {
+agent_pid=
+own_agent() { # also remembers the agent's pid in agent_pid
   local pid=$PPID comm agents=0
   for _ in {1..12}; do
     read -r comm <"/proc/$pid/comm" 2>/dev/null || return 1
-    [[ $comm == claude || $comm == codex ]] && ((agents++))
+    if [[ $comm == claude || $comm == codex ]]; then ((agents++)); agent_pid=$pid; fi
     ((agents > 1)) && return 1
     [[ $pid == "$pane_pid" ]] && break
     pid=$(ag_ppid "$pid") || return 1
@@ -182,6 +183,12 @@ case $ev in
     new_state=done
     set_opt @agent_msg "${last//#/##}"
     unset_opt @agent_tool
+    # Shells left running in the background: agent-bgwatch counts them until they end.
+    bg=0
+    if [[ $kind == claude ]]; then
+      bg=$(ag_bg_shells "$agent_pid")
+      ((bg > 0)) && setsid -f "$AG_BIN/agent-bgwatch" "$TMUX_PANE" "$agent_pid" </dev/null >/dev/null 2>&1
+    fi
     ;;
   StopFailure)
     new_state=error
@@ -263,7 +270,10 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
              body="Needs permission${tool_label:+: $tool_label}" ;;
         esac
         ;;
-      done) urgency=normal body=${last:-Finished} ;;
+      done)
+        urgency=normal body=${last:-Finished}
+        ((${bg:-0} > 0)) && body="$body · $bg shell$( ((bg > 1)) && echo s) still running"
+        ;;
       error) urgency=critical body="Stopped: ${err:-error}" ;;
     esac
     setsid -f "$AG_BIN/agent-notify" "$TMUX_PANE" "$urgency" "$sess${task:+ · $task}" "$body" \

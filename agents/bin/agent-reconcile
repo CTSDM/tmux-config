@@ -5,7 +5,8 @@
 # agent that gets killed never sends SessionEnd. For the given panes (default:
 # every agent pane), clear the state if the agent is gone, and mark a pane idle
 # when it still claims to be busy but the agent's transcript says the turn
-# is over.
+# is over. It also starts agent-bgwatch for a Claude agent that has shells
+# running in the background and no watcher (e.g. after a config reload).
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 
 # Prints "over" when the transcript's last turn has ended, "busy" otherwise.
@@ -32,23 +33,24 @@ turn_status() { # <kind> <transcript>
   fi
 }
 
-agent_running() { # <pane_pid>: is claude or codex the pane's process or its child?
+agent_pid() { # <pane_pid>: the pane's claude or codex process, if any
   local comm
   read -r comm <"/proc/$1/comm" 2>/dev/null
-  [[ $comm == claude || $comm == codex ]] || pgrep -P "$1" -x 'claude|codex' >/dev/null
+  if [[ $comm == claude || $comm == codex ]]; then echo "$1"; else pgrep -P "$1" -x 'claude|codex' | head -n1; fi
 }
 
 if (($#)); then
   panes=$(for p in "$@"; do
-    tmux display -p -t "$p" "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}"
+    tmux display -p -t "$p" "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}$US#{@agent_bg_watch}"
   done)
 else
-  panes=$(tmux list-panes -a -F "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}")
+  panes=$(tmux list-panes -a -F "#{pane_id}$US#{pane_pid}$US#{@agent}$US#{@agent_state}$US#{@agent_transcript}$US#{@agent_bg_watch}")
 fi
 
-while IFS=$US read -r pane pid kind state transcript; do
+while IFS=$US read -r pane pid kind state transcript watch; do
   [[ -n $kind ]] || continue
-  if ! agent_running "$pid"; then
+  apid=$(agent_pid "$pid")
+  if [[ -z $apid ]]; then
     cmds=()
     for o in "${AG_OPTS[@]}"; do cmds+=(set -pu -t "$pane" "$o" \;); done
     tmux "${cmds[@]}"
@@ -56,6 +58,10 @@ while IFS=$US read -r pane pid kind state transcript; do
     [[ $(turn_status "$kind" "$transcript") == over ]]; then
     tmux set -p -t "$pane" @agent_state idle \; set -p -t "$pane" @agent_since "$EPOCHSECONDS" \; \
       set -pu -t "$pane" @agent_needs \; set -pu -t "$pane" @agent_needs_id \; set -pu -t "$pane" @agent_tool
+  fi
+  if [[ $kind == claude && -n $apid ]] && ! grep -qs agent-bgwatch "/proc/${watch:-0}/cmdline" &&
+    (($(ag_bg_shells "$apid") > 0)); then
+    setsid -f "$AG_BIN/agent-bgwatch" "$pane" "$apid" </dev/null >/dev/null 2>&1
   fi
 done <<<"$panes"
 exit 0

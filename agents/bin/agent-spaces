@@ -68,9 +68,9 @@ count() { # <session filter> <pane condition> -> format counting matching agent 
   printf '#{n:#{S:#{?#{&&:%s,%s},#{W:#{P:#{?%s,x,}}},}}}' "$(not_peek)" "$1" "$2"
 }
 C_NEEDS='#{==:#{@agent_state},needs}'
-C_DONE='#{&&:#{==:#{@agent_state},done},#{e|<:#{@agent_subs},1}}'
-C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{e|>:#{@agent_subs},0}}'
-C_IDLE='#{&&:#{m/r:^(idle|ready)$,#{@agent_state}},#{e|<:#{@agent_subs},1}}'
+C_DONE='#{&&:#{==:#{@agent_state},done},#{!=:#{E:@agent-background},1}}'
+C_WORKING='#{||:#{m/r:^(working|compacting)$,#{@agent_state}},#{E:@agent-background}}'
+C_IDLE='#{&&:#{m/r:^(idle|ready)$,#{@agent_state}},#{!=:#{E:@agent-background},1}}'
 C_UNTRACKED='#{&&:#{==:#{@agent},},#{m/r:^(claude|codex)$,#{pane_current_command}}}'
 
 # What the panes of the sessions matching <filter> are doing, most urgent first,

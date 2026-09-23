@@ -10,7 +10,7 @@ US=$'\x1f'   # field separator for tmux output: unlike a tab, empty fields survi
 # Every pane option agent-hook writes. SessionEnd and agent-reconcile clear them all.
 AG_OPTS=(@agent @agent_session @agent_profile @agent_model @agent_mode @agent_state
   @agent_needs @agent_needs_id @agent_since @agent_prev @agent_tool @agent_msg
-  @agent_subs @agent_subtypes @agent_transcript @agent_tests_sound_at)
+  @agent_subs @agent_subtypes @agent_transcript @agent_tests_sound_at @agent_bg @agent_bg_watch)
 
 # Parent pid of a process.
 ag_ppid() {
@@ -105,6 +105,13 @@ ag_raise_client() {
 # @agent_mute_<space> set to on): no notifications or sounds from its agents.
 ag_space_muted() { # <space>
   [[ -n $1 && $(tmux show -gqv "@agent_mute_${1//[^A-Za-z0-9_-]/_}") == on ]]
+}
+
+# How many shells a Claude agent runs in the background: children of its
+# process started by the Bash tool, which goes through its shell snapshot
+# (MCP servers and other children don't).
+ag_bg_shells() { # <agent pid>
+  pgrep -c -P "$1" -f 'shell-snapshots/snapshot-' 2>/dev/null || true
 }
 
 # Task name from a pane title: Claude sets "✳ topic", Codex "topic | project".

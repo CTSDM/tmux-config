@@ -14,15 +14,15 @@ C_BOLD=$'\e[1m' C_WORKING=$'\e[38;2;249;226;175m' C_NEEDS=$'\e[38;2;250;179;135m
 C_DONE=$'\e[38;2;166;227;161m' C_ERROR=$'\e[38;2;243;139;168m' C_COMPACT=$'\e[38;2;148;226;213m'
 C_IDLE=$'\e[38;2;127;132;156m'
 
-glyph() { # <state> <subs>: the pane's glyph, colored as on the bar
-  local state=$1 subs=${2:-0}
+glyph() { # <state> <subs> <background shells>: the pane's glyph, colored as on the bar
+  local state=$1 subs=${2:-0} bg=${3:-0}
   case $state in
     needs) printf '%s▲' "$C_NEEDS" ;;
     error) printf '%s✗' "$C_ERROR" ;;
     working) printf '%s●' "$C_WORKING" ;;
     compacting) printf '%s↻' "$C_COMPACT" ;;
     *)
-      if ((subs > 0)); then printf '%s◐' "$C_WORKING"
+      if ((subs > 0 || bg > 0)); then printf '%s◐' "$C_WORKING"
       elif [[ $state == done ]]; then printf '%s✓' "$C_DONE"
       elif [[ -n $state ]]; then printf '%s○' "$C_IDLE"
       fi ;;
@@ -32,9 +32,9 @@ glyph() { # <state> <subs>: the pane's glyph, colored as on the bar
 list() { # <space|all>
   local want=$1 sess sp path windows idx current pane_sess state subs
   local -A glyphs=()
-  while IFS=$US read -r pane_sess state subs; do
-    [[ -n $state ]] && glyphs[$pane_sess]+=$(glyph "$state" "$subs")
-  done < <(tmux list-panes -a -F "#{session_name}$US#{@agent_state}$US#{@agent_subs}")
+  while IFS=$US read -r pane_sess state subs bg; do
+    [[ -n $state ]] && glyphs[$pane_sess]+=$(glyph "$state" "$subs" "$bg")
+  done < <(tmux list-panes -a -F "#{session_name}$US#{@agent_state}$US#{@agent_subs}$US#{@agent_bg}")
   current=$(ag_client "$client" '#{session_name}')
   while IFS=$US read -r sess sp path windows; do
     [[ $sess == _peek-* ]] && continue

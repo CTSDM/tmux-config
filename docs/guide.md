@@ -50,7 +50,7 @@ when you resize, attach or switch sessions.
 | `▲` | needs you | waiting for a permission, an answer to a question, or your approval of a plan |
 | `✓` | done | finished, and you haven't looked at it yet |
 | `○` | idle | finished and seen, or not started yet |
-| `◐` | subagents | its turn ended but subagents it launched are still running |
+| `◐` | background | its turn ended but work it started is still running: subagents, or shells it left running in the background (Claude) |
 | `↻` | compacting | summarizing its context |
 | `✗` | error | its turn stopped on an API error or a rate limit |
 | `◇` | untracked | a Claude or Codex that doesn't report (see below) |
@@ -112,6 +112,9 @@ A desktop notification goes out when an agent:
   a new one replaces the previous.
 - **Finished while subagents still run:** no notification until they are done
   and the agent really finishes.
+- **Finished with a shell still running in the background:** the notification
+  goes out (a dev server may run forever) and says so: `… · 1 shell still
+  running`. When the shell ends, Claude usually picks up by itself.
 - **Muting:** `prefix Q` → "Mute work" (or personal) silences that space's
   notifications and sounds; its bar shows `muted`. The bar keeps updating.
 - **mako's privacy mode** hides every notification; switch back to the normal

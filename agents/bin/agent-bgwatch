@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# agent-bgwatch <pane> <agent pid>: keeps @agent_bg, the number of shells a
+# Claude agent left running in the background (Bash with run_in_background),
+# up to date until they are all gone.
+#
+# No hook reports when such a shell ends, so this looks at the agent's child
+# processes every 2 seconds. Claude's Bash tool runs commands through its
+# shell snapshot, which tells them apart from MCP servers and other children.
+# agent-hook starts it when a turn ends; one watcher per pane.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+pane=${1:?usage: agent-bgwatch <pane> <agent pid>} agent=${2:?}
+
+previous=$(tmux show -pqv -t "$pane" @agent_bg_watch) || exit 0
+if [[ $previous =~ ^[0-9]+$ && $previous != "$$" ]] && grep -qs agent-bgwatch "/proc/$previous/cmdline"; then
+  kill "$previous" 2>/dev/null
+fi
+tmux set -p -t "$pane" @agent_bg_watch "$$" || exit 0
+
+last=-1
+while :; do
+  n=$(ag_bg_shells "$agent")
+  if ((n != last)); then
+    if ((n > 0)); then tmux set -p -t "$pane" @agent_bg "$n" || exit 0
+    else tmux set -pu -t "$pane" @agent_bg; fi
+    last=$n
+  fi
+  ((n > 0)) || break
+  sleep 2
+  [[ $(tmux show -pqv -t "$pane" @agent_bg_watch 2>/dev/null) == "$$" ]] || exit 0 # replaced
+done
+[[ $(tmux show -pqv -t "$pane" @agent_bg_watch) == "$$" ]] && tmux set -pu -t "$pane" @agent_bg_watch
+exit 0

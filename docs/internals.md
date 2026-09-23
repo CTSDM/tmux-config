@@ -26,6 +26,7 @@ spaces, mission control) reads the same options.
 | `agents/bin/agent-notify` | desktop notifications over D-Bus (uv script, jeepney) |
 | `agents/bin/agent-sound` | plays a sound with priority and debounce |
 | `agents/bin/agent-remind` | the 15-minute reminder |
+| `agents/bin/agent-bgwatch` | counts the shells a Claude agent left running in the background (`@agent_bg`) |
 | `agents/bin/agent-spaces` | spaces: tagging, numbering, the space line, narrow layouts, prefix+S / prefix+Q menus, next/prev/go |
 | `agents/bin/agent-board` | mission control (fzf) |
 | `agents/bin/agent-sessions` | session search (fzf) |
@@ -54,6 +55,7 @@ subagents per session, sound debounce, rounds) and
 | `@agent_prev` | hook | state before compacting |
 | `@agent_notify_id`, `@agent_notify_pid` | agent-notify | the pane's notification and its waiter |
 | `@agent_tests_sound_at` | hook | last "fight like a man" |
+| `@agent_bg`, `@agent_bg_watch` | agent-bgwatch | background shells, and the watcher's pid |
 
 ## From events to states
 
@@ -87,6 +89,15 @@ process is gone.
 
 **Seen.** `pane-focus-in` turns `done` into `idle` and closes the pane's
 notification.
+
+**Background shells.** No hook says when a shell started with
+`run_in_background` ends. On `Stop` the hook counts the agent's child
+processes started through Claude's shell snapshot (`shell-snapshots/snapshot-`
+in the command line, which MCP servers and other children lack); if there are
+any, `agent-bgwatch` rechecks every 2 s and keeps `@agent_bg` until they are
+gone. `agent-reconcile` starts a missing watcher (after a reload, say). The
+formats treat `@agent_bg` like `@agent_subs`: `◐`, counted as working.
+Claude only for now.
 
 ## Visibility
 
