@@ -124,6 +124,13 @@ subagent events: `@agent` = kind; `@agent_session` = sid, `@agent_transcript`
 **O1.** Options are written first; sounds, notifications and timers after.
 A hook that has returned has its options already visible.
 **O2.** Events of one pane are applied in the order the hooks ran.
+**O3.** Effects of one pane happen in the order of the events that caused
+them: a notification an event decides is shown before a later event of that
+pane can close it. So a notification never outlives a later close (leaving
+`needs`, SessionEnd, seen), and after SessionEnd no option remains.
+**CHANGE C5.** Bash starts `agent-notify` detached and it takes ~150 ms (uv)
+to publish its id; a close that comes sooner finds nothing to close, and the
+notification stays open with an orphan `@agent_notify_id`.
 
 ## 5. Subagents
 
@@ -131,7 +138,10 @@ A hook that has returned has its options already visible.
 identity. SubagentStart adds that subagent (type = `agent_type`; empty or
 `default` count as `agent`), SubagentStop removes it, other events are ignored.
 **A2.** After each change: `@agent_subs` = count; `@agent_subtypes` = one
-`N type` per type, sorted by type name, joined by `, ` (unset when 0).
+`N type` per type, sorted by type name ignoring case (ties in byte order),
+joined by `, ` (unset when 0): `1 agent, 1 Explore, 1 Plan`. Bash gets this
+order from `sort` under the user's locale (en_US.UTF-8); under `C` it would
+put upper case first.
 **A3.** Subagents are per agent session (sid): H1 and H11 forget them.
 **A4.** While subagents run, a pane in `done`, `idle` or `ready` shows `◐`
 (formats); for the effects, "subagents running" suppresses the done sound and
