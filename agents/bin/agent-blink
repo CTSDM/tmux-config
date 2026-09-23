@@ -9,7 +9,16 @@
 # on windows; @blink-s / @blink-w say it's on). theme.conf paints them. It
 # runs only while something needs you: agent-hook starts it, it stops by
 # itself, and only one runs at a time.
+#
+#   agent-blink --demo <session> <window id> [seconds]
+#       blinks that session and window for a while (default 10 s) whatever
+#       their state, to see what it looks like (prefix+Q, "Preview").
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+if [[ ${1:-} == --demo ]]; then
+  tmux set -g @blink-demo "${2:?} ${3:?} $((EPOCHSECONDS + ${4:-10}))"
+  shift $#
+fi
 
 mkdir -p "$AG_RUN"
 exec 8>"$AG_RUN/blink-$(basename "${TMUX%%,*}").lock" # one animator per tmux server
@@ -26,6 +35,12 @@ refresh() {
     [[ $state == needs && $sess != _peek-* ]] || continue
     want_s[$sess]=1 want_w[$win]=1
   done < <(tmux list-panes -a -F "#{session_name}$US#{window_id}$US#{@agent_state}")
+  local demo_sess demo_win demo_until
+  read -r demo_sess demo_win demo_until <<<"$(tmux show -gqv @blink-demo)"
+  if [[ -n $demo_until ]]; then
+    if ((EPOCHSECONDS < demo_until)); then want_s[$demo_sess]=1 want_w[$demo_win]=1
+    else tmux set -gu @blink-demo; fi
+  fi
 
   # Stop blinking what no longer needs you.
   local cmds=() t

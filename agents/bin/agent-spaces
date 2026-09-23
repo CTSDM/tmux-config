@@ -374,7 +374,9 @@ bind_menu() {
   # prefix+Q: all sounds on/off, and mute one space (its notifications and sounds).
   args=(display-menu -T "#[align=centre] agent alerts " -x C -y C
     "#{?#{==:#{@agent_sound},off},Turn sounds on,Turn sounds off}" s
-    "set -gF @agent_sound '#{?#{==:#{@agent_sound},off},on,off}'")
+    "set -gF @agent_sound '#{?#{==:#{@agent_sound},off},on,off}'"
+    "Preview the turn signal here (10 s)" t
+    "run-shell -b \"$AG_BIN/agent-blink --demo '#{session_name}' '#{window_id}' 10\"")
   ((${#spaces[@]})) && args+=("")
   i=1
   for space in "${spaces[@]}"; do
