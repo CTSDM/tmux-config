@@ -1,26 +1,19 @@
 #!/usr/bin/env bash
 # agent-reconcile [pane...]: repair agent states that no hook reported.
 #
-# Denying a permission or pressing Esc ends a turn without any hook, and an
-# agent that gets killed never sends SessionEnd. For the given panes (default:
-# every agent pane), clear the state if the agent is gone, and mark a pane idle
-# when it still claims to be busy but the agent's transcript says the turn
-# is over. It also starts agent-bgwatch for a Claude agent that has shells
+# Some cancellations have no hook, and a killed agent cannot send SessionEnd.
+# For the given panes (default: every agent pane), clear state if the agent is
+# gone and repair busy states from its transcript. Codex also distinguishes
+# errors and starts its observer. It starts agent-bgwatch for Claude shells
 # running in the background and no watcher (e.g. after a config reload).
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 
-# Prints "over" when the transcript's last turn has ended, "busy" otherwise.
-turn_status() { # <kind> <transcript>
-  [[ -r $2 ]] || { echo busy; return; }
-  if [[ $1 == codex ]]; then
-    tail -n 300 "$2" | jq -Rrn '
-      [inputs | fromjson? // empty | select(.type == "event_msg") | .payload.type
-        | select(. == "task_started" or . == "task_complete" or . == "turn_aborted")]
-      | if (last // "task_started") == "task_started" then "busy" else "over" end'
-  else
-    # Claude ends every turn with a system/turn_duration entry, except when
-    # interrupted: then the last message is "[Request interrupted by user...]".
-    tail -n 80 "$2" | jq -Rrn '
+# Prints "over" when Claude's last turn has ended, "busy" otherwise.
+claude_turn_status() { # <transcript>
+  [[ -r $1 ]] || { echo busy; return; }
+  # Claude ends every turn with a system/turn_duration entry, except when
+  # interrupted: then the last message is "[Request interrupted by user...]".
+  tail -n 80 "$1" | jq -Rrn '
       [inputs | fromjson? // empty
         | select(.type == "user" or .type == "assistant"
                  or (.type == "system" and .subtype == "turn_duration"))]
@@ -30,7 +23,6 @@ turn_status() { # <kind> <transcript>
                | if type == "string" then . else map(.text? // "") | join(" ") end)
                | startswith("[Request interrupted by user")) then "over"
         else "busy" end'
-  fi
 }
 
 agent_pid() { # <pane_pid>: the pane's claude or codex process, if any
@@ -50,12 +42,21 @@ fi
 while IFS=$US read -r pane pid kind state transcript watch; do
   [[ -n $kind ]] || continue
   apid=$(agent_pid "$pid")
+  if [[ $kind == codex ]]; then
+    "$AG_BIN/agent-codex" reconcile "$pane" "$apid"
+    IFS=$US read -r sid tracked watch < <(
+      tmux display -p -t "$pane" "#{@agent_session}$US#{@agent_pid}$US#{@agent_codex_watch}")
+    if [[ -n $sid && -n $tracked ]] && ! "$AG_BIN/agent-codex" watcher-alive "${watch:-0}"; then
+      setsid -f "$AG_BIN/agent-codex" watch "$pane" "$tracked" "$sid" </dev/null >/dev/null 2>&1
+    fi
+    continue
+  fi
   if [[ -z $apid ]]; then
     cmds=()
     for o in "${AG_OPTS[@]}"; do cmds+=(set -pu -t "$pane" "$o" \;); done
     tmux "${cmds[@]}"
   elif [[ $state == working || $state == needs || $state == compacting ]] &&
-    [[ $(turn_status "$kind" "$transcript") == over ]]; then
+    [[ $(claude_turn_status "$transcript") == over ]]; then
     tmux set -p -t "$pane" @agent_state idle \; set -p -t "$pane" @agent_since "$EPOCHSECONDS" \; \
       set -pu -t "$pane" @agent_needs \; set -pu -t "$pane" @agent_needs_id \; set -pu -t "$pane" @agent_tool
   fi

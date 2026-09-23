@@ -29,6 +29,25 @@ else
   exec >/dev/null 2>&1
 fi
 
+# Codex's observer is not a child of the agent. Only our helper can publish
+# observations; ordinary hooks still have to pass the process-tree check.
+observing=
+if [[ $kind == codex && ${2:-} == --observe ]]; then
+  mapfile -d '' -t parent_args <"/proc/$PPID/cmdline" || exit 0
+  [[ $(readlink -f -- "${parent_args[1]:-}") == "$(readlink -f -- "$AG_BIN/agent-codex")" &&
+     (${parent_args[2]:-} == watch || ${parent_args[2]:-} == reconcile) ]] || exit 0
+  observing=1
+fi
+
+# Serialize Codex hooks and rollout observations, including the eventual tmux
+# write. Detached helpers must close this descriptor before outliving the hook.
+if [[ $kind == codex ]]; then
+  codex_dir=$("$AG_BIN/agent-codex" path "$TMUX_PANE") || exit 0
+  mkdir -p -m 700 "$codex_dir" || exit 0
+  exec 9>"$codex_dir/pane.lock"
+  flock -w 2 9 || exit 0
+fi
+
 fields=$(jq -r '
   def line: tostring | gsub("\\s+"; " ") | .[0:300];
   [ .hook_event_name, .session_id, .agent_id, .agent_type, .tool_name, .tool_use_id,
@@ -60,13 +79,29 @@ own_agent() { # also remembers the agent's pid in agent_pid
   done
   [[ $pid == "$pane_pid" ]] && ((agents == 1))
 }
-own_agent || exit 0
+if [[ -n $observing ]]; then
+  agent_pid=${AG_CODEX_PID:-}
+  [[ $agent_pid =~ ^[0-9]+$ ]] || exit 0
+else
+  own_agent || exit 0
+fi
+
+codex_update=
+if [[ $kind == codex ]]; then
+  codex_update=$("$AG_BIN/agent-codex" prepare "$TMUX_PANE" "$agent_pid" "$observing" <<<"$payload") || exit 0
+  [[ $(jq -r '.skip // false' <<<"$codex_update") == true ]] && exit 0
+  # Reconciliation can synthesize StopFailure, Stop or Interrupt. Preserve the
+  # shared notification/sound behavior without inventing public Codex hooks.
+  ev=$(jq -r '.payload.hook_event_name' <<<"$codex_update")
+  last=$(jq -r '.payload.last_assistant_message // "" | gsub("\\s+"; " ") | .[0:300]' <<<"$codex_update")
+  err=$(jq -r '.payload.error // "" | tostring | gsub("\\s+"; " ") | .[0:300]' <<<"$codex_update")
+fi
 
 cmds=()
 set_opt() { cmds+=(set -p -t "$TMUX_PANE" "$1" "$2" \;); }
 unset_opt() { cmds+=(set -pu -t "$TMUX_PANE" "$1" \;); }
 muted=$(ag_space_muted "$space" && echo 1) # prefix+Q muted this pane's space
-play() { [[ -z $muted ]] && setsid -f "$AG_BIN/agent-sound" "$1" </dev/null >/dev/null 2>&1; }
+play() { [[ -z $muted ]] && setsid -f "$AG_BIN/agent-sound" "$1" </dev/null >/dev/null 2>&1 9>&-; }
 
 # A round: the agents of a space that worked since the space was last quiet.
 # When the last busy one finishes and at least two took part, the round is won.
@@ -187,12 +222,22 @@ case $ev in
     bg=0
     if [[ $kind == claude ]]; then
       bg=$(ag_bg_shells "$agent_pid")
-      ((bg > 0)) && setsid -f "$AG_BIN/agent-bgwatch" "$TMUX_PANE" "$agent_pid" </dev/null >/dev/null 2>&1
+      ((bg > 0)) && setsid -f "$AG_BIN/agent-bgwatch" "$TMUX_PANE" "$agent_pid" </dev/null >/dev/null 2>&1 9>&-
+    else
+      bg=$(jq -r '.options["@agent_bg"] // "0" | if . == "" then "0" else . end' <<<"$codex_update")
     fi
     ;;
+  Interrupt)
+    [[ $kind == codex ]] || exit 0
+    new_state=idle
+    unset_opt @agent_tool
+    unset_opt @agent_prev
+    ;;
+  CodexReconcile) [[ $kind == codex ]] || exit 0 ;;
   StopFailure)
     new_state=error
-    set_opt @agent_msg "${err:-${last:-unknown error}}"
+    error_text=${err:-${last:-unknown error}}
+    set_opt @agent_msg "${error_text//#/##}"
     ;;
   SessionEnd)
     rm -rf "$subs_dir"
@@ -203,6 +248,15 @@ case $ev in
     ;;
   *) exit 0 ;;
 esac
+
+if [[ -n $codex_update ]]; then
+  new_state=$(jq -r '.state' <<<"$codex_update")
+  needs=$(jq -r '.needs' <<<"$codex_update")
+  while IFS= read -r pair; do
+    eval "set -- $pair"
+    [[ -n $2 ]] && set_opt "$1" "$2" || unset_opt "$1"
+  done < <(jq -r '.options | to_entries[] | [.key, .value] | @sh' <<<"$codex_update")
+fi
 
 # Hooks may be installed while a session is already running: keep identity current.
 set_opt @agent "$kind"
@@ -233,6 +287,9 @@ esac
 # Sounds play unless the pane itself is in front; desktop notifications only
 # go out when the user is away. Errors, won rounds and accepted plans always
 # play.
+if [[ $cur_state == needs && -n $new_state && $new_state != needs ]]; then
+  [[ -n $(tmux show -pqv -t "$TMUX_PANE" @agent_notify_id) ]] && "$AG_BIN/agent-notify" --close "$TMUX_PANE"
+fi
 if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_state != needs) ]]; then
   vis=away
   if client=$(ag_focused_client) && [[ $(ag_client "$client" '#{client_session}') == "$sess" ]]; then
@@ -253,7 +310,7 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
         if [[ $vis != visible ]]; then
           case $needs in question) play report-in ;; plan) play wait-for-my-go ;; *) play need-backup ;; esac
         fi
-        setsid -f "$AG_BIN/agent-remind" "$TMUX_PANE" "$EPOCHSECONDS" </dev/null >/dev/null 2>&1
+        setsid -f "$AG_BIN/agent-remind" "$TMUX_PANE" "$EPOCHSECONDS" </dev/null >/dev/null 2>&1 9>&-
       fi
       ;;
   esac
@@ -277,7 +334,7 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
       error) urgency=critical body="Stopped: ${err:-error}" ;;
     esac
     setsid -f "$AG_BIN/agent-notify" "$TMUX_PANE" "$urgency" "$sess${task:+ · $task}" "$body" \
-      </dev/null >/dev/null 2>&1
+      </dev/null >/dev/null 2>&1 9>&-
   fi
 fi
 
@@ -295,6 +352,12 @@ tmux "${cmds[@]}"
 # The turn signal (needs you) and the soft green one (done, unseen); started
 # once the state is written, so its first look sees it. One per server.
 if [[ $new_state == needs || $new_state == done ]]; then
-  setsid -f "$AG_BIN/agent-blink" </dev/null >/dev/null 2>&1
+  setsid -f "$AG_BIN/agent-blink" </dev/null >/dev/null 2>&1 9>&-
+fi
+if [[ $kind == codex && -z $observing && -z $agent_id ]]; then
+  watch=$(tmux show -pqv -t "$TMUX_PANE" @agent_codex_watch)
+  if ! "$AG_BIN/agent-codex" watcher-alive "${watch:-0}"; then
+    setsid -f "$AG_BIN/agent-codex" watch "$TMUX_PANE" "$agent_pid" "$sid" </dev/null >/dev/null 2>&1 9>&-
+  fi
 fi
 exit 0

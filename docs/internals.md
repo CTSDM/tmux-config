@@ -8,8 +8,9 @@ How the agent-aware tmux setup works, for changing it. For using it, see
 Agents report, tmux draws. Claude Code and Codex call `agents/bin/agent-hook`
 on their lifecycle events; the hook writes facts into **pane options** of the
 agent's pane (`@agent_state`, `@agent_needs`, ...). The tmux config turns those
-options into the bar and the borders with formats, so nothing polls: tmux
-redraws when an option changes. Everything else (notifications, sounds,
+options into the bar and the borders with formats: tmux redraws when an option
+changes. Short-lived observers repair missing Codex events and count background
+processes. Everything else (notifications, sounds,
 spaces, mission control) reads the same options.
 
 ## Files
@@ -21,6 +22,7 @@ spaces, mission control) reads the same options.
 | `agents/agents.conf` | agent formats (glyphs, labels, task names), hooks (seen/unseen, re-checks, relayout), keys |
 | `agents/install` | registers `agent-hook` in every Claude Code profile and in Codex |
 | `agents/bin/agent-hook` | the hook: event JSON on stdin → pane options, notifications, sounds |
+| `agents/bin/agent-codex` | Codex turn/call correlation, incremental rollout reader and execution observer (Python standard library) |
 | `agents/bin/agent-lib.sh` | shared helpers: process tree, Hyprland, focused client, per-client formats, visibility |
 | `agents/bin/agent-reconcile` | repairs states no hook reported (Esc, denied permission, killed agent) |
 | `agents/bin/agent-notify` | desktop notifications over D-Bus (uv script, jeepney) |
@@ -57,6 +59,10 @@ subagents per session, sound debounce, rounds) and
 | `@agent_notify_id`, `@agent_notify_pid` | agent-notify | the pane's notification and its waiter |
 | `@agent_tests_sound_at` | hook | last "fight like a man" |
 | `@agent_bg`, `@agent_bg_watch` | agent-bgwatch | background shells, and the watcher's pid |
+| `@agent_turn`, `@agent_outcome` | agent-codex | current Codex turn and its terminal result |
+| `@agent_question` | agent-codex | `sent` after an asynchronous question, dismissed by the next user prompt |
+| `@agent_collaboration` | agent-codex | collaboration mode from the rollout; independent of `@agent_mode` (permissions) |
+| `@agent_pid`, `@agent_pid_start`, `@agent_codex_watch` | agent-codex | root PID, process start time and Codex observer PID |
 
 ## From events to states
 
@@ -65,6 +71,7 @@ subagents per session, sound debounce, rounds) and
 | SessionStart | `ready` (compaction restarts keep the state) |
 | UserPromptSubmit | `working` |
 | PreToolUse | `working` (not while waiting for permission) |
+| PreToolUse: request_user_input (Codex) | `needs question` until the matching PostToolUse |
 | PermissionRequest | `needs`: `question` for AskUserQuestion, `plan` for ExitPlanMode, else `permission` |
 | PostToolUse, PostToolUseFailure | `working`; ends `needs` only for the call that asked |
 | Notification (Claude) | `needs` for permission prompts and elicitations |
@@ -72,6 +79,7 @@ subagents per session, sound debounce, rounds) and
 | PreCompact / PostCompact | `compacting` / back to the previous state |
 | Stop | `done`, or `idle` if you are looking at the pane |
 | StopFailure (Claude) | `error` |
+| Interrupt (Codex) | `idle`, clears the wait and its notification |
 | SubagentStart / SubagentStop | subagent count; a subagent's own events never change the main state |
 | SessionEnd | all options cleared |
 
@@ -80,13 +88,35 @@ pane's shell and ignores a `claude -p` or `codex exec` run by another agent.
 It never prints and always exits 0 (hook output can land in the conversation;
 exit 2 would block a tool call).
 
-**No hook for Esc or a denied permission.** Both end the turn silently.
-`agent-reconcile` checks the agent's transcript: Claude ends every turn with a
-`system/turn_duration` entry, or an interrupted one with `[Request interrupted
-by user`; Codex writes `task_complete` or `turn_aborted`. It runs when you
-leave a pane that still looks busy (`pane-focus-out`), when mission control or
-`prefix u` open, and on config reload. It also clears panes whose agent
-process is gone.
+**Reconciliation.** Claude can end a turn without a hook; its transcript has
+`system/turn_duration` or `[Request interrupted by user`. Codex 0.156.1 has
+`Interrupt`, including cancelled approvals; declining a tool can instead let
+the model continue. Codex writes `task_started`, `task_complete` (possibly with
+`error`) and `turn_aborted`. `agent-reconcile` runs on focus-out, mission control,
+`prefix u` and config reload, and clears panes whose agent process is gone.
+
+For Codex it delegates to `agent-codex`. Hooks and observations share a lock per
+server socket/pane; session and turn IDs reject old results. Permission requests
+lack `tool_use_id`, so the helper matches canonical tool/input fingerprints to
+the calls seen by PreToolUse. An ambiguous match stays pending until all matching
+calls return; an unmatched request stays pending until the turn ends. Tool output
+in the rollout also clears a denied call that never emits PostToolUse. Parallel
+results cannot dismiss another call's question or permission wait.
+
+One Codex observer per pane reads appended complete JSONL lines every 2 seconds.
+It tracks inode/offset, rebuilds after rotation/truncation, and retains lifecycle
+records beyond a fixed tail window. `task_complete.error` publishes `error` using
+the same notifications as the shared hook; it does not mark a retry or nonzero
+shell exit as a failed turn. The observer exits after terminal state and no live
+commands, or when the pane/session disappears. A later hook/reconcile starts it
+again. Its cache and locks live under `$XDG_RUNTIME_DIR/tmux-agents/codex-*`;
+only input fingerprints, lifecycle metadata and process identities are retained.
+The rollout is an internal format; these paths are covered by regression tests.
+
+`request_user_input_async` publishes `question sent` after `accepted=true`; this
+is an acknowledgement of sending, not an answer. The badge persists across Stop
+and is dismissed by the next user prompt. `plan mode` is separate from a request
+to approve a plan; Codex has no ExitPlanMode hook in this version.
 
 **Seen.** `pane-focus-in` turns `done` into `idle` and closes the pane's
 notification.
@@ -98,7 +128,16 @@ in the command line, which MCP servers and other children lack); if there are
 any, `agent-bgwatch` rechecks every 2 s and keeps `@agent_bg` until they are
 gone. `agent-reconcile` starts a missing watcher (after a reload, say). The
 formats treat `@agent_bg` like `@agent_subs`: `◐`, counted as working.
-Claude only for now.
+Codex's observer also maintains `@agent_bg`: it finds execution roots with the
+thread's `CODEX_THREAD_ID` and a new Unix session, then counts each root and its
+descendants once (including nested bubblewrap/sandbox processes). PID/starttime
+records retain known descendants after reparenting and reject recycled PIDs.
+The scan uses PPIDs across all processes, since Rust can spawn from any thread.
+Normal MCP children keep the parent's session, so they are excluded. This is a
+local heuristic: a custom MCP launched with the same markers and a new session
+can resemble a command, and a daemon that detaches before any scan can be missed.
+No snapshot filename, shell name or PTY is required. Remote/shared app-server
+processes outside the pane's tree require an explicit mapping and are not tracked.
 
 ## Visibility
 
@@ -185,6 +224,16 @@ Moving between sessions (`next`, `prev`, `go`, the search) uses the same
 list, sorted by name, that the top row draws with `#{S/n:}`.
 
 ## Testing
+
+Run the Codex lifecycle, concurrency, incremental-reader and real tmux/process
+regressions without an API connection or changes to user configuration:
+
+```sh
+python3 -B agents/tests/test_codex.py -v
+```
+
+The suite creates and destroys its own tmux server, with muted alerts. The fake
+agent only provides a process identity; the hook, observer and processes are real.
 
 Never test on the live server by attaching extra clients (they resize windows).
 Start an isolated server with the real config and point the scripts at it:

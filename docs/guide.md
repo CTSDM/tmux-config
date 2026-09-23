@@ -50,7 +50,7 @@ when you resize, attach or switch sessions.
 | `▲` | needs you | waiting for a permission, an answer to a question, or your approval of a plan |
 | `✓` | done | finished, and you haven't looked at it yet |
 | `○` | idle | finished and seen, or not started yet |
-| `◐` | background | its turn ended but work it started is still running: subagents, or shells it left running in the background (Claude) |
+| `◐` | background | its turn ended but work it started is still running: subagents or local shell executions (Claude and Codex) |
 | `↻` | compacting | summarizing its context |
 | `✗` | error | its turn stopped on an API error or a rate limit |
 | `◇` | untracked | a Claude or Codex that doesn't report (see below) |
@@ -76,14 +76,23 @@ seen yet. Two levels stand out from the rest:
 Amber wins over green: a session with one agent that needs you and another
 that finished shows the amber band.
 
-Codex reports fewer details than Claude Code: no separate "question" or "plan"
-kinds of "needs you", and no `error` state.
+Codex distinguishes a blocking question (`needs question`) from a permission
+request. Its interruptions become idle immediately, and terminal API/quota errors
+appear within about two seconds, even if you stay in the pane. Local commands that
+outlive the turn keep the background indicator until they exit.
+
+The border can also show `plan mode` and `question sent`. Plan mode means the
+agent is planning, not necessarily waiting for approval. An asynchronous question
+can coexist with ongoing work; its badge is dismissed by your next message, not
+by the tool's acknowledgement that the question was sent.
 
 **Untracked agents (`◇`).** An agent reports its state through hooks, which
 Claude Code and Codex only read when they start. An agent started before the
 hooks were installed shows as `◇` until you restart it (`claude --resume`,
 `codex resume`). The first time Codex starts with the hooks it asks you to
 review them ("Hooks need review"): trust them, or they won't run.
+After adding the Codex `Interrupt` hook, restart/resume Codex and review the new
+entry with `/hooks`. Existing hook definitions do not need to be replaced.
 
 ## Noticing when an agent needs you
 
@@ -262,16 +271,17 @@ git clone <this repo> ~/.config/tmux
 `agents/install`, which adds the hook to every Claude Code profile
 (`~/.claude`, `~/.config/claude/*/`) and to Codex (`~/.codex/hooks.json`),
 keeping a `.pre-agents.bak` of each file. `agents/install --uninstall` removes
-it. Needs `jq`, `fzf`, `uv` (for notifications), a notification daemon (mako)
+it. Needs `jq`, `python3` (for Codex observation), `fzf`, `uv` (for notifications), a notification daemon (mako)
 and PipeWire's `pw-play` (for sounds).
 
 ## Troubleshooting
 
 - **An agent shows `◇`:** it doesn't report; restart it. For Codex, trust the
   hooks when it asks.
-- **An agent stays `●` or `▲` after you pressed Esc or denied a permission:**
-  those end a turn without telling the hooks. Leave the pane (or open mission
-  control) and it is re-checked against the agent's own transcript.
+- **An agent stays `●` or `▲` after cancelling:** leave the pane or open mission
+  control to re-check its transcript. Codex also observes it automatically; check
+  that `python3` is available and the `Interrupt` hook is trusted. Declining one
+  tool can let Codex continue its turn.
 - **No notifications:** are you looking at that session (then none are sent)?
   Is the space muted (`prefix Q`)? Is mako in privacy mode? Test one by hand:
   `~/.config/tmux/agents/bin/agent-notify "$TMUX_PANE" normal test hello`.

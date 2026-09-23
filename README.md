@@ -14,7 +14,7 @@ git clone <this repo> ~/.config/tmux
 `setup.sh` installs TPM and the plugins, enables the commit leak guard and runs
 `agents/install`, which registers the agent hook with every Claude Code profile
 (`~/.claude`, `~/.config/claude/*/`) and with Codex (`~/.codex/hooks.json`).
-`agents/install --uninstall` removes it again. Needs `jq`, `fzf`, `uv`, a
+`agents/install --uninstall` removes it again. Needs `jq`, `python3`, `fzf`, `uv`, a
 notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
 
 ## Documentation
@@ -32,6 +32,12 @@ work spaces that never mix, and `prefix a` / `prefix u` / `prefix e` to get
 anywhere.
 
 ## Development
+
+Codex integration tests (isolated tmux server, no API calls):
+
+```sh
+python3 -B agents/tests/test_codex.py -v
+```
 
 Shell scripts are plain bash. `agents/bin/agent-notify` is a uv script
 (dependencies declared inline) checked with pyright in strict mode, using the

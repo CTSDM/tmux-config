@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""Codex hook bookkeeping and a bounded-lifetime rollout/process observer.
+
+The shell publisher holds pane.lock across prepare + tmux publication. Observer
+updates go through that same publisher/lock; no model/API calls are involved.
+"""
+
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+BIN = Path(__file__).resolve().parent
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "tmux-agents"
+US = "\x1f"
+
+
+def pane_dir(pane):
+    socket = os.environ.get("TMUX", "").split(",")[0]
+    return RUN / (
+        "codex-" + hashlib.sha256((socket + ":" + pane).encode()).hexdigest()[:24]
+    )
+
+
+def tmux(*args):
+    return subprocess.check_output(
+        ["tmux", *args], text=True, stderr=subprocess.DEVNULL
+    ).rstrip("\n")
+
+
+def pane_values(pane):
+    names = [
+        "agent",
+        "agent_session",
+        "agent_turn",
+        "agent_state",
+        "agent_transcript",
+        "agent_pid",
+        "agent_pid_start",
+        "agent_codex_watch",
+        "agent_bg",
+    ]
+    values = tmux("display", "-p", "-t", pane, US.join("#{@" + n + "}" for n in names))
+    return dict(zip(names, values.split(US)))
+
+
+def proc_stat(pid):
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()
+        return {
+            "pid": int(pid),
+            "state": fields[0],
+            "ppid": int(fields[1]),
+            "pgid": int(fields[2]),
+            "sid": int(fields[3]),
+            "start": fields[19],
+        }
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def alive(pid, start):
+    p = proc_stat(pid)
+    return p is not None and p["start"] == str(start) and p["state"] != "Z"
+
+
+def watcher_alive(pid):
+    try:
+        args = Path(f"/proc/{int(pid)}/cmdline").read_bytes().split(b"\0")
+        return (
+            len(args) > 2
+            and Path(os.fsdecode(args[1])).resolve() == BIN / "agent-codex"
+            and args[2] == b"watch"
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def read_json(path):
+    try:
+        value = json.loads(path.read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_json(path, data):
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(data, separators=(",", ":")))
+    temp.replace(path)
+
+
+def read_rollout(path, cache):
+    """Incremental JSONL reader; never consume an unfinished final line.
+
+    Retains only the latest lifecycle and recent completed calls, not prompts or
+    tool output. Identity/size changes reset the cursor; no fixed tail window.
+    """
+    if not path:
+        return cache
+    try:
+        with open(path, "rb") as stream:
+            st = os.fstat(stream.fileno())
+            identity = [path, st.st_dev, st.st_ino]
+            if cache.get("identity") != identity or st.st_size < cache.get("offset", 0):
+                cache = {"identity": identity, "offset": 0, "completed_calls": []}
+            stream.seek(cache["offset"])
+            for line in stream:
+                if not line.endswith(b"\n"):
+                    break
+                cache["offset"] += len(line)
+                try:
+                    record = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                data = record.get("payload", {})
+                if not isinstance(data, dict):
+                    continue
+                kind = data.get("type")
+                if record.get("type") == "event_msg":
+                    if kind == "task_started":
+                        cache["turn"] = data.get("turn_id", "")
+                        cache["status"] = "busy"
+                        cache["collaboration"] = data.get("collaboration_mode_kind", "")
+                        cache.pop("error", None)
+                    elif kind in ("task_complete", "turn_aborted"):
+                        turn = data.get("turn_id", "")
+                        if turn and cache.get("turn") not in (None, "", turn):
+                            continue
+                        cache["turn"] = turn
+                        cache["status"] = (
+                            "aborted" if kind == "turn_aborted" else "complete"
+                        )
+                        cache["message"] = data.get("last_agent_message") or ""
+                        if data.get("error"):
+                            cache["status"] = "error"
+                            cache["error"] = data["error"]
+                elif (
+                    record.get("type") == "response_item"
+                    and kind == "function_call_output"
+                ):
+                    call = data.get("call_id")
+                    if call and call not in cache["completed_calls"]:
+                        cache["completed_calls"] = (cache["completed_calls"] + [call])[
+                            -256:
+                        ]
+    except OSError:
+        pass  # Missing/temporarily moved transcript is unknown, never success.
+    return cache
+
+
+def command_roots(agent, session, groups):
+    """Count local execution trees, retaining PID/starttime across reparenting.
+
+    Heuristic: execution roots start a new Unix session and carry this thread's
+    CODEX_THREAD_ID. MCPs normally retain the agent's SID. Count a sandbox and
+    its nested shell once. No assumptions about shell command names or PTYs.
+    """
+    root = proc_stat(agent)
+    # Rust can spawn from any Tokio thread. /proc/PID/task/PID/children alone
+    # misses children created by other threads; use process PPIDs instead.
+    all_processes = {}
+    children = {}
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit():
+            stat = proc_stat(int(entry.name))
+            if stat and stat["state"] != "Z":
+                all_processes[stat["pid"]] = stat
+                children.setdefault(stat["ppid"], []).append(stat["pid"])
+    processes = {}
+    todo = [agent] + [
+        int(pid)
+        for group in groups
+        for pid, start in group.items()
+        if all_processes.get(int(pid), {}).get("start") == start
+    ]
+    visited = set()
+    while todo:
+        pid = todo.pop()
+        if pid in visited:
+            continue
+        visited.add(pid)
+        stat = all_processes.get(pid)
+        if stat is None or stat["state"] == "Z":
+            continue
+        processes[pid] = stat
+        todo.extend(children.get(pid, []))
+
+    def below(pid, parents):
+        seen = set()
+        while pid in processes and pid not in seen:
+            if pid in parents:
+                return True
+            seen.add(pid)
+            pid = processes[pid]["ppid"]
+        return False
+
+    retained = []
+    for group in groups:
+        live = {int(pid): start for pid, start in group.items() if alive(pid, start)}
+        if live:
+            retained.append(
+                {
+                    str(pid): p["start"]
+                    for pid, p in processes.items()
+                    if below(pid, live)
+                }
+            )
+    candidates = []
+    if root:
+        for pid, p in processes.items():
+            if pid == agent or p["sid"] == root["sid"] or p["sid"] != pid:
+                continue
+            if any(below(pid, {int(v) for v in group}) for group in retained):
+                continue
+            try:
+                env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+                args = Path(f"/proc/{pid}/cmdline").read_bytes()
+            except OSError:
+                continue
+            if (b"CODEX_THREAD_ID=" + session.encode()) not in env:
+                continue
+            argv = args.split(b"\0")
+            helper = any(
+                arg.startswith(os.fsencode(BIN) + b"/agent-") and b" " not in arg
+                for arg in argv
+            )
+            if helper or any(arg.endswith(b"/codex-code-mode-host") for arg in argv):
+                continue
+            candidates.append(pid)
+        for pid in candidates:
+            if any(
+                other != pid and below(processes[pid]["ppid"], {other})
+                for other in candidates
+            ):
+                continue
+            retained.append(
+                {
+                    str(child): p["start"]
+                    for child, p in processes.items()
+                    if below(child, {pid})
+                }
+            )
+    return retained
+
+
+def call_key(tool, args):
+    # PermissionRequest adds a description, and Bash hook input is canonicalized.
+    if isinstance(args, dict):
+        args = {k: v for k, v in args.items() if k != "description"}
+    # Keep fingerprints, not commands, prompts or tool arguments, in runtime state.
+    return hashlib.sha256(
+        json.dumps([tool, args], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def transition(data, event, current, rollout):
+    """Pure transition; return (publish state, needs, payload), or None if stale."""
+    ev = event.get("hook_event_name", "")
+    sid, turn = event.get("session_id", ""), event.get("turn_id", "")
+    start = ev == "SessionStart" and event.get("source") != "compact"
+    if data.get("session") and sid != data["session"] and not start:
+        return None
+    if start:
+        data.clear()
+        data.update(
+            session=sid, turn="", calls={}, pending={}, terminal=False, question=False
+        )
+    elif not data.get("session"):
+        data.update(
+            session=sid,
+            turn=current.get("agent_turn", ""),
+            calls={},
+            pending={},
+            terminal=False,
+            question=False,
+        )
+    if event.get("agent_id"):
+        return "", "", event  # Subagent turn IDs are independent of the parent.
+    if ev == "UserPromptSubmit":
+        if turn != data.get("turn"):
+            data.update(turn=turn, calls={}, pending={}, terminal=False)
+        data["question"] = (
+            False  # A new user message dismisses the sent-question badge.
+        )
+        data["terminal"] = False
+        data["outcome"] = ""
+    elif turn and data.get("turn") and turn != data["turn"]:
+        return None
+    elif turn and not data.get("turn"):
+        data["turn"] = turn
+    state, needs = "", ""
+    calls, pending = data.setdefault("calls", {}), data.setdefault("pending", {})
+    tool, call = event.get("tool_name", ""), event.get("tool_use_id", "")
+    key = call_key(tool, event.get("tool_input", {}))
+    if ev == "SessionStart":
+        if start:
+            state = "ready"
+    elif ev == "UserPromptSubmit":
+        state = "working"
+    elif ev == "PreToolUse":
+        if call:
+            calls[call] = key
+        data["terminal"] = False
+        data["outcome"] = ""
+        state = "working"
+        if tool == "request_user_input":
+            pending[call or key] = {"kind": "question", "key": key}
+    elif ev == "PermissionRequest":
+        if not call:
+            matches = [cid for cid, value in calls.items() if value == key]
+            call = (
+                matches[0]
+                if len(matches) == 1
+                else ("unresolved:" if matches else "unmatched:") + key
+            )
+        pending[call] = {"kind": "permission", "key": key}
+    elif ev == "PostToolUse":
+        calls.pop(call, None)
+        pending.pop(call, None)
+        if tool == "request_user_input_async":
+            response = event.get("tool_response", {})
+            if isinstance(response, str):
+                try:
+                    response = json.loads(response)
+                except ValueError:
+                    response = {}
+            if isinstance(response, dict) and response.get("accepted") is True:
+                data["question"] = True
+        # A background result may arrive after Stop/Interrupt or task_complete.
+        if not data.get("terminal"):
+            state = "working"
+    elif ev == "PreCompact":
+        data["previous"] = current.get("agent_state") or "working"
+        state = "compacting"
+    elif ev == "PostCompact":
+        state = data.pop("previous", "working")
+        if state == "compacting":
+            state = "working"
+    elif ev in ("Stop", "Interrupt", "SessionEnd"):
+        data["terminal"] = True
+        pending.clear()
+        # Keep command records until output/next turn; they may still be alive.
+        state = "done" if ev == "Stop" else "idle"
+        data["outcome"] = "interrupted" if ev == "Interrupt" else "complete"
+    elif ev == "CodexReconcile":
+        if rollout.get("turn") == data.get("turn"):
+            for completed in rollout.get("completed_calls", []):
+                calls.pop(completed, None)
+                pending.pop(completed, None)
+            status = rollout.get("status")
+            if status in ("error", "aborted", "complete"):
+                data["terminal"] = True
+                pending.clear()
+                data["outcome"] = "interrupted" if status == "aborted" else status
+                if status == "error" and current.get("agent_state") != "error":
+                    error = rollout.get("error", {})
+                    message = (
+                        error.get("message", "Unknown error")
+                        if isinstance(error, dict)
+                        else str(error)
+                    )
+                    event = {
+                        **event,
+                        "hook_event_name": "StopFailure",
+                        "error": message,
+                    }
+                    state = "error"
+                elif status == "aborted" and current.get("agent_state") not in (
+                    "idle",
+                    "error",
+                ):
+                    event = {**event, "hook_event_name": "Interrupt"}
+                    state = "idle"
+                elif status == "complete" and current.get("agent_state") in (
+                    "working",
+                    "needs",
+                    "compacting",
+                ):
+                    event = {
+                        **event,
+                        "hook_event_name": "Stop",
+                        "last_assistant_message": rollout.get("message", ""),
+                    }
+                    state = "done"
+            elif (
+                current.get("agent_state") == "needs"
+                and not pending
+                and not data.get("terminal")
+            ):
+                state = "working"
+    else:
+        return None
+    for pending_id, request in list(pending.items()):
+        if (
+            pending_id.startswith("unresolved:")
+            and request["key"] not in calls.values()
+        ):
+            pending.pop(pending_id)
+    if pending and not data.get("terminal") and state != "compacting":
+        state = "needs"
+        needs = next(iter(pending.values()))["kind"]
+    return state, needs, event
+
+
+def prepare(pane, agent, event, observing=False):
+    # Called under the shell publisher's lock.
+    folder = pane_dir(pane)
+    current = pane_values(pane)
+    if observing and current.get("agent") != "codex":
+        return {"skip": True}
+    stored = read_json(folder / "state.json")
+    if stored.get("session") != current.get("agent_session"):
+        stored = {
+            "session": current.get("agent_session", ""),
+            "turn": current.get("agent_turn", ""),
+        }
+    path = event.get("transcript_path") or current.get("agent_transcript", "")
+    rollout = read_rollout(path, stored.get("rollout", {}))
+    if event.get("hook_event_name") == "CodexReconcile" and not stored.get("turn"):
+        stored["turn"] = rollout.get("turn", "")  # Upgrade an already running pane.
+    decision = transition(stored, event, current, rollout)
+    if decision is None:
+        return {"skip": True}
+    state, needs, event = decision
+    stored["rollout"] = rollout
+    if event.get("agent_id"):
+        return {"payload": event, "state": "", "needs": "", "options": {}}
+    if event.get("hook_event_name") == "SessionEnd":
+        save_json(folder / "state.json", {})
+        return {"payload": event, "state": "", "needs": "", "options": {}}
+    stat = proc_stat(agent)
+    options = {
+        "@agent_turn": stored.get("turn", ""),
+        "@agent_outcome": stored.get("outcome", ""),
+        "@agent_question": "sent" if stored.get("question") else "",
+        "@agent_collaboration": "",
+        "@agent_pid": str(agent),
+        "@agent_pid_start": stat["start"] if stat else "",
+    }
+    if rollout.get("turn") == stored.get("turn"):
+        options["@agent_collaboration"] = rollout.get("collaboration", "")
+    if needs:
+        options["@agent_needs_id"] = next(iter(stored["pending"]))
+    # Scan only on observer ticks and completion, not every tool hook.
+    if event.get("hook_event_name") in (
+        "CodexReconcile",
+        "Stop",
+        "StopFailure",
+        "Interrupt",
+    ):
+        stored["groups"] = command_roots(
+            agent, stored["session"], stored.get("groups", [])
+        )
+        options["@agent_bg"] = str(len(stored["groups"])) if stored["groups"] else ""
+    save_json(folder / "state.json", stored)
+    return {"payload": event, "state": state, "needs": needs, "options": options}
+
+
+def observe(pane, fallback=0):
+    current = pane_values(pane)
+    session, turn = current.get("agent_session"), current.get("agent_turn")
+    if not session or current.get("agent") != "codex":
+        return
+    agent = int(current.get("agent_pid") or fallback or 0)
+    stat = proc_stat(agent)
+    gone = stat is None or (
+        current.get("agent_pid_start") and not alive(agent, current["agent_pid_start"])
+    )
+    event = {
+        "hook_event_name": "SessionEnd" if gone else "CodexReconcile",
+        "session_id": session,
+        "turn_id": turn or "",
+        "transcript_path": current.get("agent_transcript", ""),
+    }
+    subprocess.run(
+        [str(BIN / "agent-hook"), "codex", "--observe"],
+        input=json.dumps(event),
+        text=True,
+        env={**os.environ, "TMUX_PANE": pane, "AG_CODEX_PID": str(agent)},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def watch(pane, agent, session):
+    folder = pane_dir(pane)
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (folder / "watch.lock").open("w") as lock:
+        for attempt in range(5):
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if attempt == 4:
+                    return
+                time.sleep(0.05)
+        # Inherited hook lock must not outlive the hook (shell closes fd 9).
+        tmux("set", "-p", "-t", pane, "@agent_codex_watch", str(os.getpid()))
+        finished_since = None
+        try:
+            while True:
+                current = pane_values(pane)
+                if not current.get("agent_session") or current.get("agent") != "codex":
+                    break
+                session = current["agent_session"]
+                agent = int(current.get("agent_pid") or agent)
+                if not alive(agent, current.get("agent_pid_start", "")):
+                    observe(pane)
+                    if pane_values(pane).get("agent_session"):
+                        continue
+                    break
+                observe(pane)
+                current = pane_values(pane)
+                data = read_json(folder / "state.json")
+                if current.get("agent_session") != session:
+                    if current.get("agent_session"):
+                        continue
+                    break
+                lifecycle = data.get("rollout", {})
+                terminal = lifecycle.get("turn") == data.get("turn") and lifecycle.get(
+                    "status"
+                ) in ("complete", "aborted", "error")
+                if data.get("terminal"):
+                    finished_since = finished_since or time.monotonic()
+                    # A missing rollout must not leave a watcher forever after
+                    # an explicit Stop/Interrupt. Allow time for the final flush.
+                    terminal = terminal or time.monotonic() - finished_since >= 10
+                else:
+                    finished_since = None
+                if current.get("agent_state") == "ready" or (
+                    terminal and not current.get("agent_bg")
+                ):
+                    # Serialize the exit decision with a newly arriving prompt.
+                    with (folder / "pane.lock").open("w") as pane_lock:
+                        fcntl.flock(pane_lock, fcntl.LOCK_EX)
+                        fresh = read_json(folder / "state.json")
+                        if fresh != data:
+                            continue
+                        tmux("set", "-pu", "-t", pane, "@agent_codex_watch")
+                        return
+                time.sleep(2)
+        finally:
+            try:
+                if pane_values(pane).get("agent_codex_watch") == str(os.getpid()):
+                    tmux("set", "-pu", "-t", pane, "@agent_codex_watch")
+            except subprocess.CalledProcessError:
+                pass
+
+
+def main():
+    command, pane = sys.argv[1:3]
+    if command == "path":
+        print(pane_dir(pane))
+    elif command == "prepare":
+        print(
+            json.dumps(
+                prepare(
+                    pane,
+                    int(sys.argv[3]),
+                    json.load(sys.stdin),
+                    len(sys.argv) > 4 and sys.argv[4] == "1",
+                )
+            )
+        )
+    elif command == "reconcile":
+        observe(pane, int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else 0)
+    elif command == "watch":
+        watch(pane, int(sys.argv[3]), sys.argv[4])
+    elif command == "watcher-alive":
+        sys.exit(0 if watcher_alive(pane) else 1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Hooks/observers are advisory; debug logs capture unexpected failures.
+        sys.exit(1)

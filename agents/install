@@ -20,7 +20,7 @@ CLAUDE_EVENTS=(SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse
   PostToolUseFailure PermissionRequest Notification Stop StopFailure
   SubagentStart SubagentStop PreCompact PostCompact Elicitation ElicitationResult)
 CODEX_EVENTS=(SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse
-  PermissionRequest Stop SubagentStart SubagentStop PreCompact PostCompact)
+  PermissionRequest Stop Interrupt SubagentStart SubagentStop PreCompact PostCompact)
 
 # rewrite <mode> <kind>: stdin settings JSON -> stdout, with our entries
 # removed and, for "install", added back for every event.
@@ -38,7 +38,8 @@ rewrite() {
           .hooks[$event] += [
             (if $kind == "claude" then {matcher: "*"} else {} end)
             + {hooks: [{type: "command", command: $cmd}
-                       + (if $kind == "claude" then {timeout: 10} else {} end)]}])
+                       + (if $kind == "claude" then {timeout: 10}
+                          elif $event == "Interrupt" then {timeout: 3} else {} end)]}])
       else . end
     | if .hooks == {} then del(.hooks) else . end'
 }

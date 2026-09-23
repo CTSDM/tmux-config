@@ -10,7 +10,9 @@ US=$'\x1f'   # field separator for tmux output: unlike a tab, empty fields survi
 # Every pane option agent-hook writes. SessionEnd and agent-reconcile clear them all.
 AG_OPTS=(@agent @agent_session @agent_profile @agent_model @agent_mode @agent_state
   @agent_needs @agent_needs_id @agent_since @agent_prev @agent_tool @agent_msg
-  @agent_subs @agent_subtypes @agent_transcript @agent_tests_sound_at @agent_bg @agent_bg_watch)
+  @agent_subs @agent_subtypes @agent_transcript @agent_tests_sound_at @agent_bg @agent_bg_watch
+  @agent_turn @agent_outcome @agent_question @agent_collaboration
+  @agent_pid @agent_pid_start @agent_codex_watch)
 
 # Parent pid of a process.
 ag_ppid() {
