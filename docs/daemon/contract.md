@@ -81,6 +81,12 @@ part of the contract. **CHANGE C3:** Rust does not write `@agent_bg_watch`,
 
 **P1. Clear all.** "Clear the pane" unsets every option of this table
 (`AG_OPTS` in agent-lib.sh) plus internal ones.
+**P2. Options can change from outside** (tmux hooks such as `pane-focus-in`,
+the user, tests): each event starts from the pane's options as they are at
+that moment (`@agent_state`, `@agent_since`, `@agent_prev`, `@agent_needs_id`,
+`@agent_tool`, `@agent_tests_sound_at`, `@agent_subs`), never from a copy an
+implementation kept. Its own bookkeeping (subagent sets, rounds, Codex calls
+and waits, timers) is internal and cannot be seeded this way.
 
 ## 3. Claude events → state
 
@@ -333,7 +339,9 @@ notification, same title, body `Still waiting for you, N min now`
 leaving `needs` cancels it (bash leaves one sleeping process per `needs`).
 **CHANGE C2.** The reminder compares with the `@agent_since` written by the
 same event (bash reads the clock twice and can miss when a second boundary
-falls in between).
+falls in between). Not deterministic in bash: its test there is a non-strict
+expected failure; tests of N4 start their event just after a second boundary
+so they don't hit this by chance.
 
 ## 12. Seen and reconciliation
 
