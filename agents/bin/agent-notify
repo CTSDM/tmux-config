@@ -15,8 +15,13 @@
 This talks to org.freedesktop.Notifications directly because notify-send goes
 through the desktop portal, which drops click actions. Run by uv; type-checked
 with pyright (see README).
+
+AG_SINK=<file> (tests): instead of calling D-Bus, append what would be shown
+or closed to <file> as a JSON line. A shown notification then stays open (a
+fake id in @agent_notify_id, no waiter) until it is closed or replaced.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -36,6 +41,7 @@ NOTIFICATIONS = DBusAddress(
 )
 URGENCY = {"low": 0, "normal": 1, "critical": 2}
 WAIT_SECONDS = 6 * 3600
+SINK = os.environ.get("AG_SINK", "")
 
 
 def tmux(*args: str) -> str:
@@ -73,6 +79,13 @@ def call(conn: DBusConnection, method: str, signature: str, body: tuple[object, 
     return unwrap_msg(reply)
 
 
+def sink(effect: str, **fields: str) -> None:
+    line = json.dumps({"t": time.time_ns() // 1_000_000, "effect": effect, **fields},
+                      ensure_ascii=False, separators=(",", ":"))
+    with open(SINK, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
 def member(msg: Message) -> str:
     return str(msg.header.fields.get(HeaderFields.member, ""))
 
@@ -81,14 +94,25 @@ def close(pane: str) -> None:
     notification_id = pane_opt(pane, "@agent_notify_id")
     stop_waiter(pane)
     forget(pane)
-    if notification_id.isdigit():
-        with open_dbus_connection(bus="SESSION") as conn:
-            call(conn, "CloseNotification", "u", (int(notification_id),))
+    if not notification_id.isdigit():
+        return
+    if SINK:
+        sink("notify-close", pane=pane)
+        return
+    with open_dbus_connection(bus="SESSION") as conn:
+        call(conn, "CloseNotification", "u", (int(notification_id),))
 
 
 def show(pane: str, urgency: str, title: str, body: str) -> None:
     previous = pane_opt(pane, "@agent_notify_id")
     stop_waiter(pane)
+    if SINK:
+        # A notification server keeps the id of a notification it replaces.
+        sink("notify", pane=pane, urgency=urgency, title=title, body=body)
+        notification_id = previous if previous.isdigit() else str(os.getpid())
+        tmux("set", "-p", "-t", pane, "@agent_notify_id", notification_id, ";",
+             "set", "-pu", "-t", pane, "@agent_notify_pid")
+        return
     with open_dbus_connection(bus="SESSION") as conn:
         # Listen before sending, so a quick click is not missed.
         rule = MatchRule(type="signal", interface=NOTIFICATIONS.interface,

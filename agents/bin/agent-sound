@@ -16,6 +16,9 @@
 # prefix+Q mutes (server option @agent_sound off); @agent_sound_volume sets the
 # volume (0-1, default 0.8). Within 2.5 s of a sound only a more important one
 # plays, and it cuts the previous one off.
+#
+# AG_SINK=<file> (tests): a sound that would play is appended to <file> as a
+# JSON line instead, after the same checks.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
 name=${1:?usage: agent-sound <name>}
 
@@ -56,6 +59,11 @@ read -r last_us last_priority last_pid <"$AG_RUN/sound.last" 2>/dev/null
 if [[ ${last_us:-} =~ ^[0-9]+$ ]] && ((now - last_us < 2500000)); then
   ((priority > last_priority)) || exit 0
   kill "$last_pid" 2>/dev/null
+fi
+if [[ -n ${AG_SINK:-} ]]; then
+  jq -nc --argjson t "$((now / 1000))" --arg name "$name" '{t: $t, effect: "sound", name: $name}' >>"$AG_SINK"
+  echo "$now $priority" >"$AG_RUN/sound.last" # no player to cut off
+  exit 0
 fi
 "${player[@]}" </dev/null >/dev/null 2>&1 9>&- &
 echo "$now $priority $!" >"$AG_RUN/sound.last"
