@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 
 FAKE_AGENT = Path(__file__).with_name("fake_agent.py")
 KINDS = ("claude", "codex")
+# Fakes: the two agents, and a process with another name (e.g. a Node tool).
+FAKES = (*KINDS, "node")
 _ids = itertools.count(1)
 
 type Json = dict[str, Any]
@@ -35,7 +38,7 @@ def make_fakes(directory: Path) -> dict[str, Path]:
     candidates = [Path(sys.executable).resolve()]
     candidates += [(Path(d) / "python3").resolve() for d in os.get_exec_path() if (Path(d) / "python3").exists()]
     fakes: dict[str, Path] = {}
-    for kind in KINDS:
+    for kind in FAKES:
         fakes[kind] = directory / kind
         for python in candidates:
             shutil.copy2(python, fakes[kind])
@@ -114,7 +117,7 @@ class FakeAgent:
         *,
         argv: list[str] | None = None,
         kind: str | None = None,
-        env: dict[str, str | None] | None = None,
+        env: Mapping[str, str | None] | None = None,
         wrap: int = 0,
         timeout: float = 10.0,
         check: bool = True,
@@ -128,7 +131,7 @@ class FakeAgent:
             timeout=timeout + 5,
             argv=argv or IMPL.hook_argv(kind or self.kind),
             stdin=stdin,
-            env=env or {},
+            env=dict(env or {}),
             wrap=wrap,
         )
         result = HookResult(
@@ -155,10 +158,10 @@ class FakeAgent:
     # --- other processes -----------------------------------------------------
 
     def spawn(
-        self, argv: list[str], *, env: dict[str, str | None] | None = None, new_session: bool = False
+        self, argv: list[str], *, env: Mapping[str, str | None] | None = None, new_session: bool = False
     ) -> int:
         """Start a child of this agent (stdio on /dev/null); returns its pid."""
-        return int(self.request("spawn", argv=argv, env=env or {}, new_session=new_session)["pid"])
+        return int(self.request("spawn", argv=argv, env=dict(env or {}), new_session=new_session)["pid"])
 
     def signal(self, pid: int, sig: int = signal.SIGTERM, *, group: bool = False) -> bool:
         return bool(self.request("signal", pid=pid, sig=int(sig), group=group)["sent"])

@@ -120,6 +120,7 @@ class TmuxServer:
                 "AG_SOUND_PLAYER": str(root / "tripwire-player"),
                 "AG_SPACES_FILE": str(root / "spaces.conf"),
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "UV_OFFLINE": "1",  # agent-notify starts from the cache or fails, never downloads
                 procs.MARKER_VAR: self.marker,
             }
         )
