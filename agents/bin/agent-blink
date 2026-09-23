@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# agent-blink: the sequential "turn signal" on sessions and windows that need
+# you, like a modern car's indicator: an amber band sweeps across the name
+# from left to right, stays lit a moment, goes dark, and starts again.
+#
+# tmux has no animation, so this draws the frames: every 70 ms it sets, on
+# each session and window with an agent in "needs", which part of the name is
+# lit (@blink-s-lit / @blink-s-rest on sessions, @blink-w-lit / @blink-w-rest
+# on windows; @blink-s / @blink-w say it's on). theme.conf paints them. It
+# runs only while something needs you: agent-hook starts it, it stops by
+# itself, and only one runs at a time.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+mkdir -p "$AG_RUN"
+exec 8>"$AG_RUN/blink-$(basename "${TMUX%%,*}").lock" # one animator per tmux server
+flock -n 8 || exit 0
+
+FRAMES=12 # 6 sweeping, 3 lit, 3 dark: about 0.84 s
+exec 9<> <(:) # a pipe nobody writes to: read -t on it sleeps without a new process
+
+declare -A s_text=() w_text=() # what is lit: session -> name, window id -> tab text
+refresh() {
+  local -A want_s=() want_w=()
+  local sess win state
+  while IFS=$US read -r sess win state; do
+    [[ $state == needs && $sess != _peek-* ]] || continue
+    want_s[$sess]=1 want_w[$win]=1
+  done < <(tmux list-panes -a -F "#{session_name}$US#{window_id}$US#{@agent_state}")
+
+  # Stop blinking what no longer needs you.
+  local cmds=() t
+  for t in "${!s_text[@]}"; do
+    [[ -n ${want_s[$t]:-} ]] && continue
+    cmds+=(set -qu -t "=$t:" @blink-s \; set -qu -t "=$t:" @blink-s-lit \; set -qu -t "=$t:" @blink-s-rest \;)
+    unset "s_text[$t]"
+  done
+  for t in "${!w_text[@]}"; do
+    [[ -n ${want_w[$t]:-} ]] && continue
+    cmds+=(set -wqu -t "$t" @blink-w \; set -wqu -t "$t" @blink-w-lit \; set -wqu -t "$t" @blink-w-rest \;)
+    unset "w_text[$t]"
+  done
+  ((${#cmds[@]})) && tmux "${cmds[@]}" 2>/dev/null
+
+  # The texts as the bar shows them: a session chip's name, a tab's task.
+  for t in "${!want_s[@]}"; do
+    s_text[$t]=$(tmux display -p -t "=$t:" '#{=/16/…:session_name}' 2>/dev/null)
+  done
+  for t in "${!want_w[@]}"; do
+    w_text[$t]=$(tmux display -p -t "$t" '#{?@narrow-tabs,#{=/14/…:#{E:@agent-task}},#{=/22/…:#{E:@agent-task}}}' 2>/dev/null)
+  done
+  ((${#s_text[@]} + ${#w_text[@]}))
+}
+
+lit() { # <length> <frame>: sets k, how many characters are lit (no subshell per frame)
+  local len=$1 f=$2
+  if ((f < 6)); then k=$(((len * (f + 1) + 5) / 6))
+  elif ((f < 9)); then k=$len
+  else k=0; fi
+}
+
+frame=0
+while :; do
+  if ((frame % 6 == 0)); then refresh || break; fi
+  cmds=()
+  for t in "${!s_text[@]}"; do
+    text=${s_text[$t]}
+    lit "${#text}" $((frame % FRAMES))
+    cmds+=(set -t "=$t:" @blink-s 1 \; set -t "=$t:" @blink-s-lit "${text:0:k}" \; set -t "=$t:" @blink-s-rest "${text:k}" \;)
+  done
+  for t in "${!w_text[@]}"; do
+    text=${w_text[$t]}
+    lit "${#text}" $((frame % FRAMES))
+    cmds+=(set -w -t "$t" @blink-w 1 \; set -w -t "$t" @blink-w-lit "${text:0:k}" \; set -w -t "$t" @blink-w-rest "${text:k}" \;)
+  done
+  tmux "${cmds[@]}" 2>/dev/null || break
+  frame=$((frame + 1))
+  read -r -t 0.07 -u 9 _ || true
+done
+exit 0

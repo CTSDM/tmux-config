@@ -254,6 +254,7 @@ if [[ $new_state == done || $new_state == error || ($new_state == needs && $cur_
           case $needs in question) play report-in ;; plan) play wait-for-my-go ;; *) play need-backup ;; esac
         fi
         setsid -f "$AG_BIN/agent-remind" "$TMUX_PANE" "$EPOCHSECONDS" </dev/null >/dev/null 2>&1
+        setsid -f "$AG_BIN/agent-blink" </dev/null >/dev/null 2>&1 # the turn signal (one per server)
       fi
       ;;
   esac

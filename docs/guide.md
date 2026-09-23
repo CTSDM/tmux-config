@@ -76,8 +76,10 @@ review them ("Hooks need review"): trust them, or they won't run.
 
 The signals stack, from the quietest to the loudest:
 
-1. **The bar:** a `▲` next to the session, and `1 needs you` in bold at the
-   top right.
+1. **The bar:** a `▲` next to the session, `1 needs you` in bold at the top
+   right, and the session's name and the window's tab blink like a modern
+   car's turn signal: an amber band sweeps across the name, stays lit, goes
+   dark, and again, about once a second, until you answer.
 2. **The pane border** turns peach.
 3. **A desktop notification**, when you are not looking at that session.
 4. **A sound** ("Need backup!"), when you are not looking at that pane.

@@ -26,6 +26,7 @@ spaces, mission control) reads the same options.
 | `agents/bin/agent-notify` | desktop notifications over D-Bus (uv script, jeepney) |
 | `agents/bin/agent-sound` | plays a sound with priority and debounce |
 | `agents/bin/agent-remind` | the 15-minute reminder |
+| `agents/bin/agent-blink` | draws the "turn signal" frames on sessions and windows that need you |
 | `agents/bin/agent-bgwatch` | counts the shells a Claude agent left running in the background (`@agent_bg`) |
 | `agents/bin/agent-spaces` | spaces: tagging, numbering, the space line, narrow layouts, prefix+S / prefix+Q menus, next/prev/go |
 | `agents/bin/agent-board` | mission control (fzf) |
@@ -111,6 +112,22 @@ focus flag is the fallback.
 - Notifications: only `away`.
 - Sounds: unless `visible`; errors, won rounds and accepted plans always.
 - `done` becomes `idle` at once when `visible`.
+
+## The turn signal
+
+tmux can't animate, and its formats can't cut text at a computed position, so
+`agent-blink` draws the frames: every 70 ms it sets, on each session and
+window with an agent in `needs`, the lit and unlit parts of the name as
+displayed (`@blink-s-lit`/`@blink-s-rest` on sessions, `@blink-w-*` on
+windows, plus `@blink-s`/`@blink-w` as the switch; different names, because
+a window's lookup falls back to its session's options). theme.conf paints the
+lit part as an amber band, on each element's own background. Changing an
+option redraws the bar, which is what moves it. 12 frames: 6 sweeping, 3 lit,
+3 dark. One animator per server (a `flock`), started by the hook when a pane
+starts needing you and on config load; it rechecks who needs you every 6
+frames and exits when nobody does. Measured cost while it runs, with 6
+terminals attached: about 8% of a core for the tmux server plus ~5% for the
+animator and its tmux calls; nothing when idle.
 
 ## Notifications
 
