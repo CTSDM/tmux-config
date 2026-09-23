@@ -67,9 +67,14 @@ seen yet. Two levels stand out from the rest:
 - **Needs you (`▲`):** the session's name and the window's tab blink like a
   car's turn signal. Act on it.
 - **Finished, not seen (`✓`):** the session's name and the window's tab turn
-  green, steadily, until you look at the pane. Something to read.
+  green until you look at the pane. Something to read. For the first 2
+  minutes after it finishes, a soft green band sweeps across them, at half
+  the speed of the amber one; then the green stays still. To change how
+  long it moves: `set -g @agent_unseen_blink_for 300` (seconds; `0` = until
+  you look).
 
-The blinking wins over the green.
+Amber wins over green: a session with one agent that needs you and another
+that finished shows the amber band.
 
 Codex reports fewer details than Claude Code: no separate "question" or "plan"
 kinds of "needs you", and no `error` state.

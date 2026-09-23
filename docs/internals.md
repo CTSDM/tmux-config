@@ -117,17 +117,28 @@ focus flag is the fallback.
 
 tmux can't animate, and its formats can't cut text at a computed position, so
 `agent-blink` draws the frames: every 70 ms it sets, on each session and
-window with an agent in `needs`, the lit and unlit parts of the name as
-displayed (`@blink-s-lit`/`@blink-s-rest` on sessions, `@blink-w-*` on
-windows, plus `@blink-s`/`@blink-w` as the switch; different names, because
-a window's lookup falls back to its session's options). theme.conf paints the
-lit part as an amber band, on each element's own background. Changing an
-option redraws the bar, which is what moves it. 12 frames: 6 sweeping, 3 lit,
-3 dark. One animator per server (a `flock`), started by the hook when a pane
-starts needing you and on config load; it rechecks who needs you every 6
-frames and exits when nobody does. Measured cost while it runs, with 6
-terminals attached: about 8% of a core for the tmux server plus ~5% for the
-animator and its tmux calls; nothing when idle.
+window that blinks, the lit and unlit parts of the name as displayed
+(`@blink-s-lit`/`@blink-s-rest` on sessions, `@blink-w-*` on windows, plus
+`@blink-s`/`@blink-w` as the switch; different names, because a window's
+lookup falls back to its session's options). `@blink-s-kind`/`@blink-w-kind`
+say which signal it is:
+
+- `needs`: an agent there needs you. theme.conf paints the lit part as an
+  amber band.
+- `unseen`: an agent finished (`done`, with no subagents or background shells
+  left) less than `@agent_unseen_blink_for` seconds ago (default 120, `0` =
+  no limit). The lit part gets a dark green background (`@ac-done-soft`)
+  under the green text. `needs` wins when a session or window has both.
+
+Each band sits on its element's own background. Changing an option redraws
+the bar, which is what moves it. 12 frames: 6 sweeping, 3 lit, 3 dark; 70 ms
+each while anything needs you (green bands then advance every other tick),
+140 ms when only green ones are left. One animator per
+server (a `flock`), started by the hook when a pane enters `needs` or `done`,
+and on config load; it rechecks every 6 frames and exits when nothing is left
+to blink. Measured cost while it runs, with 6 terminals attached: about 8% of
+a core for the tmux server plus ~5% for the animator and its tmux calls; half
+that with only green bands; nothing when idle.
 
 ## Notifications
 
