@@ -36,11 +36,17 @@ Detail: if `tool_input` is an object, the first non-empty of `command`,
 `tool_input` itself. Tool label: `tool` alone, or `tool: detail`.
 
 **I4. Ownership.** Only the pane's own agent counts. Walk from the hook's
-parent process up through parents (at most 12 steps) until reaching the
-pane's `pane_pid`. The walk must reach `pane_pid`, and exactly one process on
-it, `pane_pid` included, must be named (`/proc/<pid>/comm`) `claude` or
-`codex`. Otherwise the event is ignored: this drops a `claude -p` or
-`codex exec` that an agent runs inside its own pane.
+parent process up through its ancestors until reaching the pane's
+`pane_pid`, looking at no more than 13 processes (the parent and 12 more).
+The walk must reach `pane_pid` within them, and exactly one process on it,
+`pane_pid` included, must be named (`/proc/<pid>/comm`) `claude` or `codex`.
+Otherwise the event is ignored: this drops a `claude -p` or `codex exec` that
+an agent runs inside its own pane.
+**CHANGE C4.** Bash looks at the names of 12 processes and accepts a
+`pane_pid` found 13th without looking at its name: with the 13th being the
+only agent it rejects, with another agent among the first 12 it accepts two.
+The rule above counts the 13th like the others. Chains of 12 or fewer are
+the same in both.
 
 ## 2. Pane options (the output)
 
@@ -353,7 +359,10 @@ Changes take effect for the next event or tick (no restart needed).
   default) for sound lines to appear.
 - The seams go in the test server's **global** environment (start the server
   with them, or `set-environment -g`), not only in the hook's: tmux hooks such
-  as `pane-focus-in` run helpers with the server's environment.
+  as `pane-focus-in` run helpers with the server's environment. The Rust
+  daemon reads them from its own environment once, when it starts: fix them
+  before any agent or daemon starts, and change focus afterwards only through
+  tmux (clients, panes, focus events).
 - Bash sink mode keeps a shown notification "open" (a fake id, no waiter)
   until it is replaced or closed, so every close path produces its
   `notify-close` line. A click cannot be simulated; `agent-jump` is out of scope.
