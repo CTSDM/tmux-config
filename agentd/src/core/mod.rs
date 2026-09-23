@@ -1,0 +1,272 @@
+//! The pure core (design.md, "Inside the daemon"): an event and the facts read
+//! for it go in, option writes and effects come out. No I/O, no clock: time,
+//! visibility and everything read from tmux or /proc arrive in [`Facts`].
+//! Rule ids in comments and test names are those of docs/daemon/contract.md.
+
+mod claude;
+mod text;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+
+pub use text::{escape_hashes, notify_title, subtypes};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Claude,
+    Codex,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Claude => "claude",
+            Kind::Codex => "codex",
+        }
+    }
+}
+
+/// The fields of a hook event that the contract uses (I3), already converted
+/// to strings, whitespace collapsed and cut. Missing means empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Event {
+    #[serde(rename = "hook_event_name")]
+    pub ev: String,
+    #[serde(rename = "session_id")]
+    pub sid: String,
+    pub agent_id: String,
+    pub agent_type: String,
+    #[serde(rename = "tool_name")]
+    pub tool: String,
+    #[serde(rename = "tool_use_id")]
+    pub tool_id: String,
+    pub detail: String,
+    #[serde(rename = "notification_type")]
+    pub ntype: String,
+    #[serde(rename = "last_assistant_message")]
+    pub last: String,
+    pub error: String,
+    #[serde(rename = "permission_mode")]
+    pub mode: String,
+    pub source: String,
+    pub model: String,
+    #[serde(rename = "transcript_path")]
+    pub transcript: String,
+}
+
+/// One hook call that passed ownership (I4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Input {
+    pub kind: Kind,
+    pub pane: String,
+    pub event: Event,
+    /// `CLAUDE_CONFIG_DIR` of the agent, if set (H14).
+    pub config_dir: Option<String>,
+    /// The agent process found by the ownership walk.
+    pub agent_pid: u32,
+}
+
+/// The pane as tmux has it when the event is handled (P2), plus what
+/// visibility, titles and mute need. Options are raw (`##` as stored).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Pane {
+    pub state: String,
+    pub since: String,
+    pub prev: String,
+    pub needs_id: String,
+    pub tool: String,
+    pub tests_sound_at: String,
+    /// `@agent_session`: the sid the pane had before this event.
+    pub sid: String,
+    pub session: String,
+    pub title: String,
+    /// `@space`, else `@space_auto`, of the pane's session.
+    pub space: String,
+    /// `@agent_mute_<space>` is `on`.
+    pub muted: bool,
+}
+
+/// Another pane of the server, for rounds (R).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherPane {
+    pub pane: String,
+    pub state: String,
+    pub subs: String,
+    pub space: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    Visible,
+    Session,
+    Away,
+}
+
+/// Everything read for one event. `vis` is only computed when
+/// [`may_need_visibility`] says so, `others` when [`may_need_panes`] does.
+#[derive(Debug, Clone)]
+pub struct Facts {
+    pub now: i64,
+    pub host: String,
+    pub pane: Pane,
+    pub vis: Option<Visibility>,
+    pub others: Vec<OtherPane>,
+    /// Shells the agent runs in the background (B1), counted at Stop.
+    pub bg_shells: u32,
+    /// Global `@agent_remind_after`, raw.
+    pub remind_after: String,
+    /// Global `@agent_test_regex`, raw.
+    pub test_regex: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Op {
+    Set(&'static str, String),
+    Unset(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Urgency {
+    Low,
+    Normal,
+    Critical,
+}
+
+impl Urgency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Urgency::Low => "low",
+            Urgency::Normal => "normal",
+            Urgency::Critical => "critical",
+        }
+    }
+}
+
+/// What an event makes happen, in order (O1): the pane's option writes
+/// first, then the rest.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    Options(Vec<Op>),
+    /// Close the pane's notification (N3).
+    NotifyClose,
+    Sound(&'static str),
+    /// Keep `@agent_bg` up to date for the agent's background shells (B1).
+    Bgwatch {
+        agent_pid: u32,
+    },
+    /// The reminder (N4): fire after `after` seconds if the pane is still in
+    /// the `needs` that started at `since`. Replaces the previous one (C1).
+    RemindArm {
+        after: f64,
+        since: i64,
+    },
+    RemindCancel,
+    Notify {
+        urgency: Urgency,
+        title: String,
+        body: String,
+    },
+    /// Make sure the turn signal runs (K5).
+    Blink,
+}
+
+/// The daemon's own bookkeeping (P2: never seeded from options).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct State {
+    /// Running subagents per agent session: sid -> agent id -> type (A1-A3).
+    pub subagents: BTreeMap<String, BTreeMap<String, String>>,
+    /// Rounds per space: the panes that took part (R).
+    pub rounds: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Whether handling `ev` may need the pane's visibility (V1: entering
+/// `needs`, `done` or `error`). A superset: false means it never does.
+pub fn may_need_visibility(kind: Kind, ev: &str) -> bool {
+    kind == Kind::Claude
+        && matches!(
+            ev,
+            "PermissionRequest"
+                | "Notification"
+                | "Elicitation"
+                | "PostCompact"
+                | "Stop"
+                | "StopFailure"
+        )
+}
+
+/// Whether handling `ev` may need the other panes of the server (R).
+pub fn may_need_panes(kind: Kind, ev: &str) -> bool {
+    kind == Kind::Claude && ev == "Stop"
+}
+
+/// Whether handling `ev` may need the agent's background shells (B1).
+pub fn may_need_bg_shells(kind: Kind, ev: &str) -> bool {
+    kind == Kind::Claude && ev == "Stop"
+}
+
+/// Handles one hook event. Codex arrives in phase 2.
+pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
+    match input.kind {
+        Kind::Claude => claude::handle(state, input, facts),
+        Kind::Codex => Vec::new(),
+    }
+}
+
+/// The reminder fired (N4, C1, C2): what to do now that `@agent_remind_after`
+/// has passed since the `needs` that started at `since`.
+pub fn reminder(since: i64, facts: &Facts) -> Vec<Effect> {
+    let pane = &facts.pane;
+    if pane.state != "needs" || pane.since != since.to_string() || pane.muted {
+        return Vec::new();
+    }
+    if facts.vis == Some(Visibility::Visible) {
+        return Vec::new();
+    }
+    let minutes = (facts.now - since).div_euclid(60);
+    vec![
+        Effect::Sound("come-to-papa"),
+        Effect::Notify {
+            urgency: Urgency::Critical,
+            title: notify_title(&pane.session, &pane.title, &facts.host),
+            body: format!("Still waiting for you, {minutes} min now"),
+        },
+    ]
+}
+
+/// Every option of the contract's table (P1), as `AG_OPTS` in agent-lib.sh.
+pub const ALL_OPTIONS: [&str; 25] = [
+    "@agent",
+    "@agent_session",
+    "@agent_profile",
+    "@agent_model",
+    "@agent_mode",
+    "@agent_state",
+    "@agent_needs",
+    "@agent_needs_id",
+    "@agent_since",
+    "@agent_prev",
+    "@agent_tool",
+    "@agent_msg",
+    "@agent_subs",
+    "@agent_subtypes",
+    "@agent_transcript",
+    "@agent_tests_sound_at",
+    "@agent_bg",
+    "@agent_bg_watch",
+    "@agent_turn",
+    "@agent_outcome",
+    "@agent_question",
+    "@agent_collaboration",
+    "@agent_pid",
+    "@agent_pid_start",
+    "@agent_codex_watch",
+];
+
+#[cfg(test)]
+mod tests;
