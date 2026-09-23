@@ -35,6 +35,12 @@ class Impl:
             return [str(self.agentd), "ctl", "reconcile", *panes]
         return [str(self.bin / "agent-reconcile"), *panes]
 
+    def blink_demo_argv(self, session: str, window: str, seconds: int) -> list[str]:
+        """What prefix+Q "Preview the turn signal" runs (contract K1 demo)."""
+        if self.agentd is not None:
+            return [str(self.agentd), "ctl", "blink-demo", session, window, str(seconds)]
+        return [str(self.bin / "agent-blink"), "--demo", session, window, str(seconds)]
+
     def ensure_argv(self) -> list[str] | None:
         """What tmux.conf runs on load to start the implementation, if anything."""
         return [str(self.agentd), "ensure"] if self.agentd is not None else None

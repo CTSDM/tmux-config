@@ -524,3 +524,45 @@ def test_H14_follows_the_latest_event(server: TmuxServer) -> None:
     assert shown(agent)["@agent_profile"] == "work"
     agent.hook("UserPromptSubmit", _env={"CLAUDE_CONFIG_DIR": "/nonexistent/home"})
     assert shown(agent)["@agent_profile"] == "home"
+
+
+# --- P2 options changed from outside ------------------------------------------------------
+
+
+def seed(server: TmuxServer, agent: FakeAgent, **options: str) -> None:
+    for name, value in options.items():
+        server.tmux("set", "-p", "-t", agent.pane, f"@agent_{name}", value)
+
+
+@rule("P2", "H5")
+def test_P2_needs_set_from_outside(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    seed(server, agent, state="needs", needs="permission", needs_id="outside")
+    post(agent, "Bash", "other")
+    assert state(agent) == "needs"
+    post(agent, "Bash", "outside")
+    assert state(agent) == "working"
+
+
+@rule("P2", "H13")
+def test_P2_state_and_since_set_from_outside(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    agent.hook("Stop")
+    seed(server, agent, state="working", since="1000")
+    pre(agent, "Bash", "a")  # working to working: no change
+    assert shown(agent)["@agent_since"] == "1000"
+    seed(server, agent, state="idle")  # what pane-focus-in does to done
+    agent.hook("PreCompact")
+    assert shown(agent)["@agent_prev"] == "idle"
+
+
+@rule("P2", "H8b")
+def test_P2_prev_set_from_outside(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    agent.hook("PreCompact")
+    seed(server, agent, prev="done")
+    agent.hook("PostCompact")
+    assert state(agent) == "done"

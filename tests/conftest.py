@@ -6,7 +6,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -60,32 +60,32 @@ def server(make_server: Callable[..., TmuxServer]) -> TmuxServer:
 
 # --- coverage by contract rule ------------------------------------------------
 
-_rules: dict[str, list[str]] = {}
-_outcomes: dict[str, str] = {}
+# Rule ids travel on each report, so the summary also works under xdist.
+_outcomes: dict[str, tuple[list[str], str]] = {}
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         ids = [str(i) for mark in item.iter_markers("rule") for i in mark.args]
         if ids:
-            _rules[item.nodeid] = ids
+            item.user_properties.append(("rules", ids))
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    if report.when == "call" or report.outcome != "passed":
-        outcome = "xfailed" if hasattr(report, "wasxfail") else report.outcome
-        if _outcomes.get(report.nodeid) in (None, "passed"):
-            _outcomes[report.nodeid] = outcome
+    ids = [str(i) for k, v in report.user_properties if k == "rules" for i in cast(list[str], v)]
+    if not ids or not (report.when == "call" or report.outcome != "passed"):
+        return
+    outcome = "xfailed" if hasattr(report, "wasxfail") and report.outcome == "skipped" else report.outcome
+    if hasattr(report, "wasxfail") and report.outcome == "passed":
+        outcome = "xpassed"
+    previous = _outcomes.get(report.nodeid)
+    if previous is None or previous[1] == "passed":
+        _outcomes[report.nodeid] = (ids, outcome)
 
 
 def pytest_terminal_summary(terminalreporter: Any) -> None:
-    if not _rules:
-        return
     by_rule: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    for nodeid, ids in _rules.items():
-        outcome = _outcomes.get(nodeid)
-        if outcome is None:
-            continue
+    for ids, outcome in _outcomes.values():
         for rule_id in ids:
             by_rule[rule_id][outcome] += 1
     if not by_rule:

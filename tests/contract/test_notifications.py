@@ -9,6 +9,7 @@ import pytest
 
 from harness.agent import FakeAgent
 from harness.claude import ask, next_second, post, pre, working
+from harness.impl import IMPL
 from harness.marks import change, rule
 from harness.tmux import TmuxServer
 
@@ -160,6 +161,15 @@ def test_N2_permission_prompt_names_the_last_tool_unescaped(server: TmuxServer) 
     assert note[2] == "Needs permission: Bash: echo #1"
 
 
+@rule("N2", "H6", "P2")
+def test_P2_N2_permission_prompt_names_a_tool_set_from_outside(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    server.tmux("set", "-p", "-t", agent.pane, "@agent_tool", "Bash: make ##2")
+    note = one_note(server, agent, lambda: agent.hook("Notification", notification_type="permission_prompt"))
+    assert note[2] == "Needs permission: Bash: make #2"
+
+
 @rule("N2", "H6")
 def test_N2_permission_prompt_without_tool(server: TmuxServer) -> None:
     agent = server.agent("claude")
@@ -242,6 +252,12 @@ def test_N3_notifications_are_per_pane(server: TmuxServer) -> None:
 # --- N4 reminders ----------------------------------------------------------------
 
 
+def arm(agent: FakeAgent, call: str = "a") -> None:
+    """Enter needs just after a second boundary, clear of the C2 race."""
+    next_second()
+    ask(agent, "Bash", call)
+
+
 def reminders(server: TmuxServer, agent: FakeAgent) -> list[Line]:
     return [line for line in pane_lines(server, agent)
             if line["effect"] == "notify" and line["body"].startswith("Still waiting")]
@@ -253,7 +269,7 @@ def test_N4_reminder(server: TmuxServer) -> None:
     agent = server.agent("claude")
     server.tmux("select-pane", "-t", agent.pane, "-T", "✳ Fix CSV")
     working(agent)
-    ask(agent, "Bash", "a")
+    arm(agent)
     server.sink.wait_sound("come-to-papa", timeout=REMIND + 3)
     note = server.sink.wait_for(lambda line: line in reminders(server, agent), timeout=2)
     assert (note["urgency"], note["title"], note["body"]) == (
@@ -265,7 +281,7 @@ def test_N4_no_reminder_once_answered(server: TmuxServer) -> None:
     server.set_global("@agent_remind_after", str(REMIND))
     agent = server.agent("claude")
     working(agent)
-    ask(agent, "Bash", "a")
+    arm(agent)
     post(agent, "Bash", "a")
     time.sleep(REMIND + 2)
     assert "come-to-papa" not in server.sink.sounds()
@@ -277,10 +293,9 @@ def test_N4_only_the_latest_wait_reminds(server: TmuxServer) -> None:
     server.set_global("@agent_remind_after", str(REMIND))
     agent = server.agent("claude")
     working(agent)
-    ask(agent, "Bash", "a")
+    arm(agent)
     post(agent, "Bash", "a")
-    next_second()  # the second wait has another @agent_since
-    ask(agent, "Bash", "b")
+    arm(agent, "b")  # the next second: another @agent_since
     time.sleep(REMIND + 3)
     assert len(reminders(server, agent)) == 1
 
@@ -290,7 +305,7 @@ def test_N4_no_reminder_when_muted(server: TmuxServer) -> None:
     server.set_global("@agent_remind_after", str(REMIND))
     agent = server.agent("claude")
     working(agent)
-    ask(agent, "Bash", "a")
+    arm(agent)
     server.set_global("@agent_mute_test", "on")
     time.sleep(REMIND + 2)
     assert "come-to-papa" not in server.sink.sounds()
@@ -303,7 +318,7 @@ def test_N4_no_reminder_when_visible(make_server: Callable[..., TmuxServer]) -> 
     server.set_global("@agent_remind_after", str(REMIND))
     agent = server.agent("claude")
     working(agent)
-    ask(agent, "Bash", "a")  # its session is on screen: no notification yet
+    arm(agent)  # its session is on screen: no notification yet
     server.tmux("select-window", "-t", agent.pane)  # now in front
     time.sleep(REMIND + 2)
     assert "come-to-papa" not in server.sink.sounds()
@@ -316,7 +331,7 @@ def test_N4_reminds_when_only_the_session_is_on_screen(make_server: Callable[...
     server.set_global("@agent_remind_after", str(REMIND))
     agent = server.agent("claude")  # a background window of the client's session
     working(agent)
-    ask(agent, "Bash", "a")
+    arm(agent)
     server.sink.wait_sound("come-to-papa", timeout=REMIND + 3)
     server.sink.wait_for(lambda line: line in reminders(server, agent), timeout=2)
     first = [line for line in pane_lines(server, agent) if line["effect"] == "notify"]
@@ -338,3 +353,21 @@ def test_C1_one_reminder_per_pane(server: TmuxServer) -> None:
     assert agent.option("@agent_state") == "needs"
     time.sleep(REMIND + 3)
     assert len(reminders(server, agent)) == 1
+
+
+@rule("N4", "C2")
+@pytest.mark.xfail(IMPL.name == "bash", reason="C2: bash can miss at a second boundary", strict=False)
+def test_C2_reminder_despite_a_second_boundary(server: TmuxServer) -> None:
+    """Needs entered at 5, 10 ... 50 ms before a second boundary: every pane
+    gets its reminder (bash misses when the boundary falls between its two
+    clock reads)."""
+    server.set_global("@agent_remind_after", str(REMIND))
+    agents = [server.agent("claude") for _ in range(10)]
+    for agent in agents:
+        working(agent)
+    for i, agent in enumerate(agents):
+        before_boundary = (1 - time.time() % 1) - 0.005 * (i + 1)
+        time.sleep(before_boundary if before_boundary > 0 else before_boundary + 1)
+        ask(agent, "Bash", "a")
+    time.sleep(REMIND + 3)
+    assert [len(reminders(server, agent)) for agent in agents] == [1] * 10

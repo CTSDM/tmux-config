@@ -347,3 +347,27 @@ def test_S_explicit_space_wins_over_the_detected_one(make_server: Callable[..., 
     agent = server.agent("claude", "both")
     working(agent)
     assert sounds_after(server, lambda: ask(agent, "Bash", "a")) == ["need-backup"]
+
+
+# --- P2 options changed from outside ------------------------------------------------------
+
+
+@rule("P2", "S6")
+@pytest.mark.parametrize(("ago", "plays"), [(601, True), (590, False)])
+def test_P2_S6_last_test_sound_set_from_outside(server: TmuxServer, ago: int, plays: bool) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    server.tmux("set", "-p", "-t", agent.pane, "@agent_tests_sound_at", str(int(time.time()) - ago))
+    expected = ["fight-like-a-man"] if plays else []
+    assert sounds_after(server, lambda: pre(agent, "Bash", "a", command="pytest")) == expected
+
+
+@rule("P2", "R")
+def test_P2_R_subagents_set_from_outside(server: TmuxServer) -> None:
+    a, b = server.agent("claude"), server.agent("claude")
+    working(a)
+    working(b)
+    b.hook("Stop")
+    server.tmux("set", "-p", "-t", b.pane, "@agent_subs", "1")
+    time.sleep(DEBOUNCE)
+    assert sounds_after(server, lambda: a.hook("Stop")) == ["enemy-down"]  # not won: b is busy

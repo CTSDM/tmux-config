@@ -116,3 +116,13 @@ def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
             if alive(pid):
                 _signal_marked(pid, marker, signal.SIGKILL)
     return killed
+
+
+def cpu_ticks(pids: list[int]) -> dict[int, int]:
+    """utime + stime + cutime + cstime of each process, in clock ticks."""
+    ticks: dict[int, int] = {}
+    for pid in pids:
+        fields = stat(pid)
+        if fields is not None:
+            ticks[pid] = sum(int(f) for f in fields[11:15])
+    return ticks

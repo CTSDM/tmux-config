@@ -180,6 +180,18 @@ class TmuxServer:
             argv, env=self.tool_env(), capture_output=True, text=True, timeout=timeout
         )
 
+    def start_tool(self, argv: list[str]) -> None:
+        """Start a command in the background, like `run-shell -b` (it carries
+        the marker, so teardown stops it)."""
+        subprocess.Popen(
+            argv,
+            env=self.tool_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
     def reconcile(self, *panes: str) -> None:
         self.run_tool(self.impl.reconcile_argv(*panes))
 
