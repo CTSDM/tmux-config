@@ -178,6 +178,7 @@ space, unless you mute one.
 | `prefix g` then `1`-`9` | the session with that number in the top row |
 | `prefix e` | search the sessions of your space: type to filter, `enter` switches this terminal; `ctrl-s` for all spaces |
 | `prefix L` | back to the session you were in before |
+| `prefix N` | a new session (form below) |
 | `prefix u` | the agent of your space that needs you most: waiting on you (longest first), then errors, then finished work you haven't seen |
 | `prefix a` | mission control (below) |
 | `prefix S` | this session's space |
@@ -187,6 +188,30 @@ space, unless you mute one.
 Jumping to a session that another kitty window already shows focuses that
 window rather than taking over yours (`prefix u`, mission control, a clicked
 notification). Moving with `( ) g e` switches the terminal you are in.
+
+## A new session
+
+`prefix N` opens a small form:
+
+```
+  in personal · Tab completes the path · ctrl-c cancels
+
+  session name › grammar
+  path         › ~/repos/github.com/<me>/japan-grammar
+
+  → grammar in ~/repos/…/japan-grammar · personal
+    enter creates it · any other key cancels
+```
+
+- **path** starts at the folder of the pane you are in; Tab completes it like
+  the shell (case-insensitive, first Tab lists the options). A folder that
+  doesn't exist can be created.
+- **session name** left empty takes the folder's name. If a session with that
+  name exists, the form just opens it.
+- **Space:** the one `spaces.conf` names for the folder, or else the space you
+  are in (not the `*` default). The last line says which, and warns when the
+  folder belongs to another space.
+- Enter creates it and switches this terminal to it.
 
 ## Mission control
 

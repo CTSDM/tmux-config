@@ -29,6 +29,7 @@ spaces, mission control) reads the same options.
 | `agents/bin/agent-spaces` | spaces: tagging, numbering, the space line, narrow layouts, prefix+S / prefix+Q menus, next/prev/go |
 | `agents/bin/agent-board` | mission control (fzf) |
 | `agents/bin/agent-sessions` | session search (fzf) |
+| `agents/bin/agent-new`, `agents/new-session.inputrc` | the new-session form (bash `read -e` with readline Tab completion) |
 | `agents/bin/agent-jump`, `agent-next`, `agent-peek` | going to a pane, to the next agent that needs you, peeking |
 | `agents/typings/` | type stubs for jeepney (pyright strict) |
 | `spaces.conf` | folders → spaces; local, git-ignored |

@@ -8,6 +8,9 @@
 #   agent-spaces next|prev <client>   switch the client to the next/previous session
 #   agent-spaces go <client> <n>      switch the client to session number n
 #   agent-spaces layout               fit each session's bar to its terminal's width
+#   agent-spaces which <path>         the space a folder belongs to: "<space> named"
+#                                     (a rule names it), "<space> default" (only "*"
+#                                     matches) or nothing
 # next, prev and go stay within the client's space; its sessions are numbered
 # in the order of the top bar (by name, like tmux itself).
 #
@@ -393,6 +396,15 @@ case ${1:-} in
     ;;
   assign) shift; assign "$@" ;;
   layout) layout ;;
+  which)
+    path=$(realpath -m "${2:?usage: agent-spaces which <path>}") default=""
+    for rule in "${rules[@]}"; do
+      space=${rule%%$'\t'*} dir=${rule#*$'\t'}
+      if [[ $dir == '*' ]]; then [[ -n $default ]] || default=$space
+      elif [[ $path == "$dir" || $path == "$dir"/* ]]; then echo "$space named"; exit 0; fi
+    done
+    [[ -n $default ]] && echo "$default default"
+    ;;
   next | prev) switch_in_space "${2:?usage: agent-spaces next|prev <client>}" "$1" ;;
   go) switch_in_space "${2:?usage: agent-spaces go <client> <n>}" go "${3:-}" ;;
   set)

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# agent-new [client]: a small form to start a session, in a popup.
+#
+#   session name   empty: the folder's name; an existing session is just opened
+#   path           starts at the current pane's folder; Tab completes it, like
+#                  in the shell; a missing folder can be created
+#
+# The session joins the space spaces.conf names for its folder, or else the
+# space you are in (not the "*" default). The last line says which before you
+# confirm; then this terminal switches to the session.
+# prefix+N runs `agent-new --popup <client>`, which opens it on that client.
+. "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+
+if [[ ${1:-} == --popup ]]; then
+  exec tmux display-popup -c "$2" -E -w 74 -h 12 -T ' new session ' "'$AG_BIN/agent-new' '$2'"
+fi
+client=${1:-}
+
+# Colors (Catppuccin Mocha). \001 and \002 tell readline where invisible
+# characters are, so the cursor stays where it should.
+E=$'\e' A=$'\001' B=$'\002'
+RESET="$E[0m" DIM="$E[38;2;108;112;134m" TEXT="$E[38;2;205;214;244m" BOLD="$E[1m"
+ACCENT="$E[38;2;203;166;247m" WARN="$E[38;2;250;179;135m" OK="$E[38;2;166;227;161m"
+c() { printf '%s%s%s' "$A" "$1" "$B"; } # a color, marked invisible for readline
+label() { printf '  %s%-12s %s›%s ' "$(c "$ACCENT$BOLD")" "$1" "$(c "$RESET$DIM")" "$(c "$RESET$TEXT")"; }
+say() { printf '  %s\n' "$*"; }
+short() { # a path shortened in the middle to fit the popup: ~/repos/…/project
+  local p=${1/#$HOME/\~}
+  ((${#p} <= 44)) && { printf '%s' "$p"; return; }
+  local first last=${p##*/}
+  first=${p%%/*}/$(cut -d/ -f2 <<<"$p")
+  printf '%s/…/%s' "$first" "${last:0:30}"
+}
+
+IFS=$US read -r here space < <(ag_client "$client" "#{pane_current_path}$US#{?@space,#{@space},#{@space_auto}}")
+here=${here:-$HOME}
+space_color() { case $1 in "") printf '%s' "$DIM" ;; *) printf '%s' "$ACCENT" ;; esac; }
+
+export INPUTRC=$AG_BIN/../new-session.inputrc
+trap 'printf "%s\n" "$RESET"; exit 0' INT
+
+printf '\n'
+say "${DIM}in $RESET$(space_color "$space")${space:-no space}$RESET$DIM · Tab completes the path · ctrl-c cancels$RESET"
+printf '\n'
+
+# Session name: tmux turns "." and ":" into "_" anyway.
+read -r -e -p "$(label 'session name')" name || exit 0
+name=${name//[.:]/_}
+name=${name#"${name%%[![:space:]]*}"} name=${name%"${name##*[![:space:]]}"}
+if [[ -n $name ]] && tmux has-session -t "=$name" 2>/dev/null; then
+  printf '\n'
+  say "${WARN}$name already exists$RESET${DIM}: enter opens it · any other key cancels$RESET"
+  IFS= read -r -s -n1 key
+  [[ -z $key ]] && tmux switch-client -c "$client" -t "=$name:"
+  exit 0
+fi
+
+# Path, with Tab completion from readline; ~ is fine.
+while :; do
+  read -r -e -p "$(label 'path')" -i "${here/#$HOME/\~}" path || exit 0
+  path=${path/#\~/$HOME}
+  path=${path%/}
+  [[ -n $path ]] || path=$HOME
+  [[ -d $path ]] && break
+  if [[ -e $path ]]; then
+    say "${WARN}${path/#$HOME/\~} is a file, not a folder$RESET"
+    continue
+  fi
+  say "${WARN}${path/#$HOME/\~} doesn't exist$RESET${DIM}: create it? y/N$RESET"
+  IFS= read -r -s -n1 key
+  if [[ $key == [yY] ]]; then mkdir -p -- "$path" && break; fi
+done
+path=$(realpath -- "$path")
+[[ -n $name ]] || name=$(basename -- "$path")
+name=${name//[.:]/_}
+
+# Which space: the one spaces.conf names for the folder, else the current one.
+read -r rule_space how < <("$AG_BIN/agent-spaces" which "$path")
+target=$space
+[[ $how == named || -z $target ]] && target=$rule_space
+
+printf '\n'
+if tmux has-session -t "=$name" 2>/dev/null; then
+  say "${WARN}$name already exists$RESET${DIM}: enter opens it · any other key cancels$RESET"
+  IFS= read -r -s -n1 key
+  [[ -z $key ]] && tmux switch-client -c "$client" -t "=$name:"
+  exit 0
+fi
+note=""
+[[ -n $target && -n $space && $target != "$space" ]] && note=" ${WARN}(its folder is in $target)$RESET"
+say "${OK}→$RESET $TEXT$BOLD$name$RESET$DIM in $(short "$path") · $RESET$(space_color "$target")${target:-no space}$RESET$note"
+say "${DIM}enter creates it · any other key cancels$RESET"
+IFS= read -r -s -n1 key
+[[ -z $key ]] || exit 0
+
+tmux new-session -d -s "$name" -c "$path" || { sleep 2; exit 1; }
+# A folder only "*" matches follows the space you are in.
+[[ $how != named && -n $target ]] && tmux set -t "=$name:" @space "$target"
+"$AG_BIN/agent-spaces" assign "$name"
+tmux switch-client -c "$client" -t "=$name:"
