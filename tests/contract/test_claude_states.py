@@ -318,7 +318,7 @@ def test_H8b_compaction_end_without_start_is_idle(server: TmuxServer) -> None:
 # --- H9-H10 end of turn ----------------------------------------------------------
 
 
-@rule("H9")
+@rule("H9", "O1")
 def test_H9_stop_is_done_with_the_reply(server: TmuxServer) -> None:
     agent = server.agent("claude")
     working(agent)

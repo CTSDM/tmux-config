@@ -39,7 +39,7 @@ def one_note(server: TmuxServer, agent: FakeAgent, run: Callable[[], object]) ->
 # --- N1 when --------------------------------------------------------------------
 
 
-@rule("N1", "N2")
+@rule("N1", "N2", "O1")
 def test_N1_on_needs_done_and_error(server: TmuxServer) -> None:
     agent = server.agent("claude")
     working(agent)
@@ -371,3 +371,31 @@ def test_C2_reminder_despite_a_second_boundary(server: TmuxServer) -> None:
         ask(agent, "Bash", "a")
     time.sleep(REMIND + 3)
     assert [len(reminders(server, agent)) for agent in agents] == [1] * 10
+
+
+# --- N4 reading @agent_remind_after (CHANGE C7) ---------------------------------------
+
+
+@rule("N4")
+@pytest.mark.parametrize("value", ["3s", "0.05m", "3.0"])
+def test_N4_remind_after_reads_like_sleep(server: TmuxServer, value: str) -> None:
+    server.set_global("@agent_remind_after", value)
+    agent = server.agent("claude")
+    working(agent)
+    arm(agent)
+    time.sleep(2)
+    assert reminders(server, agent) == []
+    server.sink.wait_for(lambda line: line in reminders(server, agent), timeout=4)
+
+
+@rule("N4", "C7")
+@pytest.mark.parametrize(
+    "value", ["", pytest.param("soon", marks=change("C7")), pytest.param("-5", marks=change("C7"))]
+)
+def test_C7_unreadable_remind_after_is_900(server: TmuxServer, value: str) -> None:
+    server.set_global("@agent_remind_after", value)
+    agent = server.agent("claude")
+    working(agent)
+    arm(agent)
+    time.sleep(4)
+    assert reminders(server, agent) == []
