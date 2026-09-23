@@ -31,9 +31,12 @@ one space, cut to 300 characters (not bytes), missing/null → empty:
 `last_assistant_message` (last), `error`, `permission_mode` (mode), `source`,
 `model`, `transcript_path` (transcript); Codex also `turn_id`, `tool_input`
 (as a fingerprint, §6) and `tool_response.accepted`.
-Detail: if `tool_input` is an object, the first non-empty of `command`,
-`file_path`, `path`, `pattern`, `url`, `query`, `description`; otherwise
-`tool_input` itself. Tool label: `tool` alone, or `tool: detail`.
+Detail: if `tool_input` is an object, the value of the first of `command`,
+`file_path`, `path`, `pattern`, `url`, `query`, `description` that is present
+and neither null nor `false` (jq's `//`: an empty string or `0` counts, and
+wins); none → empty. A `tool_input` that is null or `false` gives an empty
+detail; any other non-object is the detail itself (as JSON text if not a
+string). Tool label: `tool` alone when detail is empty, else `tool: detail`.
 
 **I4. Ownership.** Only the pane's own agent counts. Walk from the hook's
 parent process up through its ancestors until reaching the pane's
