@@ -60,8 +60,16 @@ Colors: yellow working, peach needs you, green done, red error, teal
 compacting, grey idle. The space's color (mauve for personal, blue for work)
 only ever marks where you are.
 
-`done` turns into `idle` when you look at the pane: that's how the bar tells
-you what you haven't seen yet.
+`done` turns into `idle` when you look at the pane (or at once, if it finished
+while you were looking at it): that's how the bar tells you what you haven't
+seen yet. Two levels stand out from the rest:
+
+- **Needs you (`▲`):** the session's name and the window's tab blink like a
+  car's turn signal. Act on it.
+- **Finished, not seen (`✓`):** the session's name and the window's tab turn
+  green, steadily, until you look at the pane. Something to read.
+
+The blinking wins over the green.
 
 Codex reports fewer details than Claude Code: no separate "question" or "plan"
 kinds of "needs you", and no `error` state.
