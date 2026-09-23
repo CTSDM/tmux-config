@@ -393,3 +393,12 @@ Changes take effect for the next event or tick (no restart needed).
 - Bash sink mode keeps a shown notification "open" (a fake id, no waiter)
   until it is replaced or closed, so every close path produces its
   `notify-close` line. A click cannot be simulated; `agent-jump` is out of scope.
+
+## 15. The bar
+
+**U1. Clicking a session.** A left click on a session chip of the top row
+(its index, name and glyphs) switches that client to the session, as tmux's
+default `MouseDown1Status` does for a `range=session`. The row shows only the
+sessions of the client's space, so a click never leaves the space. Clicking a
+window tab of the second row selects that window (already so). **CHANGE C8:**
+bash's chips have no range: a click on them does nothing.
