@@ -7,7 +7,7 @@ Report progress by message with the task id; the architect updates this file.
 
 | Id | Owner | Status | Task |
 |---|---|---|---|
-| T0.1 | arquitecto | doing | design.md, contract.md, tasks.md |
+| T0.1 | arquitecto | done | design.md, contract.md, tasks.md |
 | T0.2 | implementador | todo | Bash test seams (design.md, "Test seams"): `AG_SINK` in `agent-sound` and `agent-notify` (both `show` and `--close`), `AG_FOCUS_CLIENT` in `ag_focused_client`. No other behavior change. |
 | T0.3 | implementador | todo | Spike, control mode on tmux 3.6, findings in `docs/daemon/spike-control-mode.md` (send them to the architect, who commits them). Questions below. |
 | T0.4 | implementador | todo | Crate skeleton in `agentd/`: `Cargo.toml` (edition 2024, release profile with `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`), `deny.toml` (crates.io only, license allowlist), `agentd/check.sh` (fmt, clippy -D warnings, test, deny), `target/` ignored, subcommand stubs. Dependencies of design.md only. |
