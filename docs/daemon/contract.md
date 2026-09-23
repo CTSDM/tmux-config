@@ -330,7 +330,10 @@ such part), omitted when it equals the host name. Body and urgency:
 It closes when the pane is seen (§12 E1), when the pane leaves `needs` for
 another state, on SessionEnd, and when its agent is found gone (E2, X5). Clicking it runs `agent-jump <pane>`.
 **N4. Reminder.** On entering `needs`, a reminder is armed for
-`@agent_remind_after` seconds (global, default 900). When it fires, if the
+`@agent_remind_after` seconds (global, default 900; read as `sleep` reads
+one argument: decimals and an `s`/`m`/`h`/`d` suffix work; empty or
+unreadable → 900, **CHANGE C7**: bash's `sleep` fails at once on those and the
+reminder fires immediately). When it fires, if the
 pane is still in the same `needs` (state `needs`, `@agent_since` unchanged),
 its space is not muted and it is not `visible`: sound S7 and a critical
 notification, same title, body `Still waiting for you, N min now`
