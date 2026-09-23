@@ -7,7 +7,7 @@ import pytest
 
 from harness.agent import FakeAgent
 from harness.claude import ask, near_now, next_second, post, pre, shown, state, working
-from harness.marks import rule
+from harness.marks import change, rule
 from harness.tmux import TmuxServer
 
 def sub(agent: FakeAgent, event: str, agent_id: str, agent_type: str = "Explore") -> None:
@@ -394,7 +394,8 @@ def test_H11_session_end_clears_the_pane(server: TmuxServer) -> None:
     assert agent.options() == {}  # internal options too
 
 
-@rule("H11", "P1", "N3")
+@rule("H11", "N3", "O3", "P1", "C5")
+@change("C5")
 def test_H11_session_end_right_after_needs(server: TmuxServer) -> None:
     """SessionEnd before the needs notification went out: once things settle,
     no notification is left open and the pane has no agent option left."""
@@ -406,6 +407,21 @@ def test_H11_session_end_right_after_needs(server: TmuxServer) -> None:
     effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
     assert effects in ([], ["notify", "notify-close"]), effects
     assert agent.options() == {}
+
+
+@rule("H5", "N3", "O3", "C5")
+@change("C5")
+def test_H5_answer_right_after_needs(server: TmuxServer) -> None:
+    """The wait ends before its notification went out: once things settle,
+    no notification is left open."""
+    agent = server.agent("claude")
+    working(agent)
+    ask(agent, "Bash", "a", command="ls")
+    post(agent, "Bash", "a")
+    time.sleep(2)
+    effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
+    assert effects in ([], ["notify", "notify-close"]), effects
+    assert state(agent) == "working"
 
 
 @rule("H11", "A3")
