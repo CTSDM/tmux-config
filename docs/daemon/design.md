@@ -1,0 +1,191 @@
+# agentd: design
+
+A resident Rust process that replaces the hot path of the bash agent layer:
+`agent-hook`, `agent-codex`, `agent-remind`, `agent-bgwatch`, `agent-blink`,
+`agent-sound`, `agent-notify` and `agent-reconcile`. The popups (board,
+sessions, new, peek, jump, next) and `agent-spaces` stay in bash for now.
+
+Owner of this file: **arquitecto**. Others propose changes by message.
+Behavior to preserve is in [contract.md](contract.md), work in [tasks.md](tasks.md).
+
+## Why
+
+Measured on 2026-09-24 against the bash version (commit 885bb9b):
+
+| What | Today | Target |
+|---|---|---|
+| Claude hook, per event | ~25 ms median (Stop ~180 ms) | p50 ≤ 5 ms, p99 ≤ 15 ms |
+| Codex hook, per event | ~25 ms + 3 Python starts | same as Claude |
+| Resident helpers | one bash + `sleep` (~11 MB) per reminder, never cancelled; one Python per pending notification (~15 MB + uv); one bash per watched pane | one process, RSS ≤ 10 MB |
+| Blink animator | ~5% of a core (a `tmux` process per frame) | ≤ 1% (tmux's own redraw, ~8%, is not ours) |
+| Idle | 0 | 0: no timers run when nothing blinks or is watched |
+
+The wins are fewer moving pieces and one place for timers, not raw speed.
+
+## Shape
+
+One binary, `agentd`, with subcommands:
+
+- `agentd hook claude|codex`: the hook, called by Claude Code and Codex
+  exactly like `agent-hook` today (same stdin JSON, same environment). It
+  parses the payload, keeps only the fields the contract uses (truncated as
+  the contract says; Codex tool input only as a fingerprint), collects its
+  parent process chain, sends one message to the daemon and waits for the
+  ack. Never prints, always exits 0. If the daemon is not running it starts
+  it (`agentd ensure`) and retries for up to 300 ms, then gives up silently
+  (reconciliation repairs a lost event).
+- `agentd daemon`: one per tmux server. Runs until the tmux server is gone.
+- `agentd ensure`: starts the daemon for the current tmux server unless it
+  runs; idempotent (flock). `tmux.conf` calls it on load.
+- `agentd ctl <command> [args]`: small requests for tmux hooks, key bindings
+  and scripts, e.g. `seen <pane>` (pane-focus-in), `reconcile [pane...]`,
+  `blink-demo <session> <window> [seconds]`, `status` (JSON dump for
+  debugging and tests), `reload` (re-read tmux options).
+
+### Daemon identity
+
+The tmux server is `${TMUX%%,*}` (its socket path). Runtime files live in
+`$XDG_RUNTIME_DIR/tmux-agents/` (same folder as bash):
+`agentd-<id>.sock`, `agentd-<id>.lock`, `agentd-<id>.state.json`, where
+`<id>` is the socket's basename plus the first 8 hex digits of the SHA-256 of
+the full path (e.g. `default-3f2a9c1b`).
+
+### Hook → daemon protocol
+
+Unix stream socket, one connection per hook call, one JSON line each way:
+
+```
+→ {"v":1,"kind":"claude","pane":"%12","event":{...fields...},
+   "chain":[[pid,"comm",starttime],...],"env":{"CLAUDE_CONFIG_DIR":"..."},
+   "t":1790201509123}
+← {"ok":true}
+```
+
+The daemon acks after the pane options are written (so a hook that returned
+is already visible, and events from one pane stay in order), before any
+sound, notification or timer runs. The ownership check (contract §2) runs in
+the daemon with `chain`, since the daemon knows each pane's `pane_pid`.
+
+### Inside the daemon
+
+- **Core, pure:** `fn handle(&mut State, Input, &Ctx) -> Vec<Effect>`. No I/O,
+  no clock (time comes in `Ctx`). Inputs: hook events, `ctl` requests, timer
+  ticks, process/rollout observations. Effects: option writes, sounds,
+  notifications, timer (re)arming, spawning `agent-jump`. Unit tests live
+  here and cover most of the contract without tmux.
+- **tmux transport** behind a trait: phase 1 spawns `tmux` (2-3 ms per batch,
+  like bash, one batch per event); phase 4 may switch to control mode
+  (`tmux -C`) if the spike (T0.3) shows no side effects.
+- **Visibility:** asks Hyprland's request socket (`.socket.sock`,
+  `j/activewindow`) in-process instead of running `hyprctl`; same stale
+  signature fallback as `ag_hyprctl`. `AG_FOCUS_CLIENT` overrides (seams).
+- **Notifications:** one D-Bus session connection (zbus), signal match set
+  once; notification id ↔ pane map in memory; a click runs `agent-jump`.
+- **Timers:** reminder (one per pane, re-armed or cancelled on every state
+  change), blink frames, background-shell polling and Codex observation (one
+  shared 2 s tick that scans `/proc` once for every watched pane).
+- **State file:** small JSON snapshot (subagents, rounds, Codex bookkeeping,
+  reminder due times, background groups) written on change, debounced, and
+  read on start. Pane options stay the source of truth for anything shown;
+  on start the daemon rebuilds from them and reconciles.
+- **Runtime:** tokio current-thread. Dependencies need the architect's OK
+  (see Rules). Starting set: `serde`, `serde_json`, `tokio`, `zbus`
+  (`default-features = false`, tokio), `sha2`, `regex`, `libc` or `rustix`.
+
+### Migration (strangler)
+
+Until phase 3 the daemon runs effects by spawning the existing bash helpers
+(`agent-sound`, `agent-notify`, `agent-remind`, `agent-bgwatch`,
+`agent-blink`), so phase 1 is already a complete replacement of the hook and
+the contract suite can pass end to end. Each later phase moves one family of
+effects in-process and deletes its bash script. The live system switches only
+at cutover (phase 5), with the user, with a way back.
+
+## Test seams (both implementations)
+
+Needed so the same black-box suite runs against bash and Rust without
+touching the desktop. Bash gets them in T0.2; Rust honors the same variables.
+
+| Variable | Effect |
+|---|---|
+| `AG_SINK=<file>` | Sounds and notifications are appended to `<file>` as JSON lines instead of played/shown (see below). No D-Bus, no player. |
+| `AG_FOCUS_CLIENT=<client name>` or `none` | The focused tmux client, instead of asking Hyprland (`none`: no client has focus, so every pane is `away`). |
+| `XDG_RUNTIME_DIR` | Already moves all runtime files; tests always point it at a temp dir. |
+| `AG_SOUNDS`, `AG_SOUND_PLAYER` | Already exist in `agent-sound`. |
+
+Sink lines, one JSON object each, `t` in epoch milliseconds:
+
+```
+{"t":…,"effect":"sound","name":"need-backup"}
+{"t":…,"effect":"notify","pane":"%3","urgency":"critical","title":"api · Fix CSV","body":"Needs permission: Bash: ls"}
+{"t":…,"effect":"notify-close","pane":"%3"}
+```
+
+`sound` is written only for a sound that would really play: after the
+`@agent_sound` switch, the missing-file check and the 2.5 s priority
+debounce. `notify` and `notify-close` are written where D-Bus would be called.
+
+## Phases
+
+0. **Preparation:** this design, the contract, bash test seams, contract
+   suite green on bash, crate skeleton, control-mode spike, baseline numbers.
+1. **Core, hook, daemon:** every Claude event and state of the contract,
+   subagents, ownership, rounds; effects via the bash helpers. Suite green.
+2. **Codex:** port `agent-codex` (fingerprints, rollout reader, command roots,
+   observer). Suite green, including the scenarios of `agents/tests/test_codex.py`.
+3. **Effects in-process:** sounds, D-Bus notifications, reminders,
+   background shells, reconcile, seen. Bash helpers deleted.
+4. **Blink in-process**, over control mode if T0.3 says so.
+5. **Cutover:** `agents/install` points hooks at `agentd hook`, `tmux.conf`
+   and `agents.conf` call `agentd`, docs updated, rollback tested. With the user.
+6. **Optional:** `agent-spaces` counts and layout.
+
+## Roles and branches
+
+All three sessions run in the tmux session `tmux-ricing` of the **live**
+server. Worktrees of `~/.config/tmux` under `~/repos/github.com/ctsdm/tmux-ricing/`:
+
+| Session | Worktree | Branch | Owns |
+|---|---|---|---|
+| arquitecto | `review/` | `daemon` (integration) | `docs/daemon/*`, reviews, merges, measurements |
+| implementador | `impl/` | `daemon-impl` | `agentd/`, bash test seams in `agents/`, Rust unit tests |
+| tester | `tests/` | `daemon-tests` | `tests/` (contract suite, fixtures, benchmarks) |
+
+Flow: work on your branch, commit, push, then message **arquitecto** with the
+task id and commit. The architect reviews, runs the suite, merges into
+`daemon` (`--no-ff`), pushes, updates tasks.md and tells you when to
+`git merge daemon`. Read the docs from `review/docs/daemon/` (always current),
+don't edit them: send the proposal. Questions about behavior go to the
+architect; the answer ends up in the contract.
+
+The tester writes tests from the contract, not from the Rust code. When the
+contract is unclear, ask; don't infer it from either implementation.
+
+## Rules
+
+1. **The live system is off limits.** `~/.config/tmux` (the `main` checkout the
+   live hooks run from) is read-only. Never run `agents/install`, never edit
+   `~/.claude*`, `~/.config/claude/*` or `~/.codex/*`.
+2. **Never talk to the live tmux server.** Your shell has `TMUX` set to it.
+   Every test runs `env -u TMUX -u TMUX_PANE` against `tmux -L <unique name>`
+   and kills that server by name when done. Never attach clients to the live
+   server, never `tmux kill-server` without `-L`.
+3. **No real sounds or notifications.** Tests always set `AG_SINK`,
+   `XDG_RUNTIME_DIR` (temp dir) and, as a second line of defense,
+   `@agent_sound off` and a muted space in the test server.
+4. **Kill by pid or by `-L` name**, never `pkill -f <pattern>` (it can match
+   your own shell).
+5. **Only fake agents.** A test agent is a copy of the Python interpreter
+   named `claude` or `codex`; no real Claude or Codex runs (they cost tokens)
+   unless the user asks.
+6. **No private data in commits.** Fixtures are synthetic. Never copy
+   `~/.local/state/tmux-agents/events.log` (it holds prompts). The pre-commit
+   leak guard (gitleaks + private words) must pass; never bypass it.
+7. **Dependencies:** Rust crates only from crates.io, each new one approved by
+   the architect, `Cargo.lock` committed, `cargo deny check` clean. Python via
+   `uv` (PEP 723 or a `pyproject.toml` in `tests/`) and `pyright` strict.
+8. **Checks before handing over:** Rust: `cargo fmt --check`, `cargo clippy
+   --all-targets -- -D warnings`, `cargo test`. Tests: `pyright` clean, suite
+   run on bash (and Rust when it exists) with the result in the message.
+9. **Style:** match the repo: short comments that say why, English in code
+   and docs.
