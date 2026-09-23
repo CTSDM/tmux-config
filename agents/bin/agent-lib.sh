@@ -58,9 +58,15 @@ ag_client() { # <client> <format>
 
 # Prints the tmux client whose terminal window has keyboard focus. Asks
 # Hyprland when it can (tmux only learns about focus when it changes), and
-# falls back to tmux's own focus flag.
+# falls back to tmux's own focus flag. AG_FOCUS_CLIENT=<client>|none replaces
+# all of that, for tests that must not depend on the desktop.
 ag_focused_client() {
   local clients name pid flags win
+  if [[ -n ${AG_FOCUS_CLIENT:-} ]]; then
+    [[ $AG_FOCUS_CLIENT != none ]] || return 1
+    printf '%s\n' "$AG_FOCUS_CLIENT"
+    return 0
+  fi
   clients=$(tmux list-clients -F "#{client_name}$US#{client_pid}$US#{client_flags}") || return 1
   win=$(ag_hyprctl activewindow -j 2>/dev/null | jq -r '.pid // empty' 2>/dev/null)
   while IFS=$US read -r name pid flags; do
