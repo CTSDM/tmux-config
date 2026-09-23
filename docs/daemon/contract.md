@@ -138,7 +138,10 @@ notification stays open with an orphan `@agent_notify_id`.
 identity. SubagentStart adds that subagent (type = `agent_type`; empty or
 `default` count as `agent`), SubagentStop removes it, other events are ignored.
 **A2.** After each change: `@agent_subs` = count; `@agent_subtypes` = one
-`N type` per type, sorted by type name, joined by `, ` (unset when 0).
+`N type` per type, sorted by type name ignoring case (ties in byte order),
+joined by `, ` (unset when 0): `1 agent, 1 Explore, 1 Plan`. Bash gets this
+order from `sort` under the user's locale (en_US.UTF-8); under `C` it would
+put upper case first.
 **A3.** Subagents are per agent session (sid): H1 and H11 forget them.
 **A4.** While subagents run, a pane in `done`, `idle` or `ready` shows `◐`
 (formats); for the effects, "subagents running" suppresses the done sound and
