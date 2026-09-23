@@ -1,0 +1,19 @@
+[project]
+name = "agent-contract-tests"
+version = "0"
+description = "Black-box contract suite for the tmux agent layer (bash and agentd)"
+requires-python = ">=3.12"
+dependencies = ["pytest>=8.3"]
+
+[dependency-groups]
+dev = ["pyright>=1.1.400"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["selftest", "contract"]
+addopts = ["-ra", "--strict-markers"]
+markers = [
+  "rule(*ids): contract rules (docs/daemon/contract.md) the test covers",
+]
