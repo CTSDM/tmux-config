@@ -6,11 +6,7 @@ usage: agentd hook claude|codex     the agent hook: event JSON on stdin
        agentd ensure                start the daemon of this tmux server unless it runs
        agentd ctl <command> [args]  a request to the daemon (seen, reconcile, status...)";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Claude,
-    Codex,
-}
+pub use crate::core::Kind;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
