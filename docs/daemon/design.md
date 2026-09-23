@@ -170,9 +170,13 @@ contract is unclear, ask; don't infer it from either implementation.
    Every test runs `env -u TMUX -u TMUX_PANE` against `tmux -L <unique name>`
    and kills that server by name when done. Never attach clients to the live
    server, never `tmux kill-server` without `-L`.
-3. **No real sounds or notifications.** Tests always set `AG_SINK`,
-   `XDG_RUNTIME_DIR` (temp dir) and, as a second line of defense,
-   `@agent_sound off` and a muted space in the test server.
+3. **No real sounds or notifications.** Tests always set `AG_SINK` and
+   `XDG_RUNTIME_DIR` (temp dir) in the test server's global environment. Second
+   line of defense, so a missed sink still stays silent: `AG_SOUND_PLAYER`
+   pointing at a no-op, and `DBUS_SESSION_BUS_ADDRESS` unset (the fallback bus
+   under the temp `XDG_RUNTIME_DIR` does not exist). Don't use `@agent_sound
+   off` or a muted space for this: they would hide what the tests check;
+   use them only in the tests of those switches.
 4. **Kill by pid or by `-L` name**, never `pkill -f <pattern>` (it can match
    your own shell).
 5. **Only fake agents.** A test agent is a copy of the Python interpreter

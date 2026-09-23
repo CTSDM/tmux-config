@@ -349,4 +349,11 @@ Changes take effect for the next event or tick (no restart needed).
 - Timers: set `@agent_remind_after` and `@agent_unseen_blink_for` to a few
   seconds; the Codex observation tick is ~2 s.
 - Sounds need files: point `AG_SOUNDS` at a temp dir with empty `<name>.wav`
-  files; with `AG_SINK` nothing plays anyway.
+  files; with `AG_SINK` nothing plays anyway. `@agent_sound` must be on (the
+  default) for sound lines to appear.
+- The seams go in the test server's **global** environment (start the server
+  with them, or `set-environment -g`), not only in the hook's: tmux hooks such
+  as `pane-focus-in` run helpers with the server's environment.
+- Bash sink mode keeps a shown notification "open" (a fake id, no waiter)
+  until it is replaced or closed, so every close path produces its
+  `notify-close` line. A click cannot be simulated; `agent-jump` is out of scope.
