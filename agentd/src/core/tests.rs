@@ -1012,8 +1012,13 @@ fn n4_reminder_armed_on_entering_needs() {
         ("0.5", 0.5),
         ("2m", 120.0),
         ("1h", 3600.0),
-        ("-1", 0.0),
-        ("x", 0.0),
+        ("0", 0.0),
+        ("", 900.0),
+        // C7: unreadable is the default, not "at once" as in bash.
+        ("-1", 900.0),
+        ("x", 900.0),
+        ("inf", 900.0),
+        ("m", 900.0),
     ] {
         f.remind_after = raw.into();
         let r = run_with(&mut State::default(), e.clone(), f.clone());
@@ -1136,4 +1141,57 @@ fn v1_facts_predicates_are_supersets() {
             }
         }
     }
+}
+
+// --- §1 ownership --------------------------------------------------------------
+
+fn chain<'a>(names: &[&'a str]) -> Vec<(u32, &'a str)> {
+    // pids 100, 101, ... from the hook's parent upwards
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (100 + i as u32, *n))
+        .collect()
+}
+
+#[test]
+fn i4_the_panes_own_agent() {
+    // hook <- claude <- shell (pane_pid)
+    assert_eq!(owner(chain(&["claude", "zsh"]), 101), Some(100));
+    // The agent is the pane's process itself.
+    assert_eq!(owner(chain(&["node", "claude"]), 101), Some(101));
+    // A `claude -p` run by the pane's agent: two agents on the way.
+    assert_eq!(
+        owner(chain(&["claude", "bash", "claude", "zsh"]), 103),
+        None
+    );
+    // No agent, or the walk never reaches the pane.
+    assert_eq!(owner(chain(&["bash", "zsh"]), 101), None);
+    assert_eq!(owner(chain(&["claude", "zsh"]), 999), None);
+    // codex counts the same.
+    assert_eq!(owner(chain(&["codex", "zsh"]), 101), Some(100));
+    // Names are exact.
+    assert_eq!(owner(chain(&["claude-code", "zsh"]), 101), None);
+}
+
+#[test]
+fn c4_thirteen_processes_all_counted() {
+    let mut names = vec!["sh"; 12];
+    names[0] = "claude";
+    names.push("zsh"); // pane_pid is the 13th
+    assert_eq!(owner(chain(&names), 112), Some(100));
+    // The 13th is the only agent: counted like the others (bash rejects).
+    let mut names = vec!["sh"; 12];
+    names.push("claude");
+    assert_eq!(owner(chain(&names), 112), Some(112));
+    // Another agent among the first 12 and the 13th: two (bash accepts).
+    let mut names = vec!["sh"; 12];
+    names[0] = "claude";
+    names.push("codex");
+    assert_eq!(owner(chain(&names), 112), None);
+    // pane_pid 14th: too far.
+    let mut names = vec!["sh"; 13];
+    names[0] = "claude";
+    names.push("zsh");
+    assert_eq!(owner(chain(&names), 113), None);
 }
