@@ -22,8 +22,10 @@ const MAX_PAYLOAD: u64 = 64 << 20;
 const MAX_CHAIN: usize = 16;
 /// How long to wait for a daemon that has to be started first.
 const START_BUDGET: Duration = Duration::from_millis(300);
-/// The ack comes after one tmux read and one write.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+/// The ack comes after one tmux read and one write. A daemon stuck longer
+/// (tmux not answering) delays the agent at most this; reconciliation
+/// repairs what is lost.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn run(kind: Option<Kind>) {
     let started = SystemTime::now();

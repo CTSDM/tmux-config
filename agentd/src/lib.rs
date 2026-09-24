@@ -5,6 +5,8 @@
 pub mod cli;
 pub mod client;
 pub mod core;
+pub mod ctl;
+pub mod daemon;
 pub mod hook;
 pub mod identity;
 pub mod procfs;

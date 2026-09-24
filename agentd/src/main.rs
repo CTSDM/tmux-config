@@ -14,10 +14,9 @@ fn main() -> ExitCode {
             agentd::hook::run(kind);
             ExitCode::SUCCESS
         }
-        Some(command) => {
-            eprintln!("agentd {}: not implemented yet", command.name());
-            ExitCode::FAILURE
-        }
+        Some(Command::Daemon) => agentd::daemon::run(),
+        Some(Command::Ensure) => agentd::ctl::ensure(),
+        Some(Command::Ctl { command, args }) => agentd::ctl::ctl(&command, &args),
         None => {
             eprintln!("{}", cli::USAGE);
             ExitCode::from(2)

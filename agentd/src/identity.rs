@@ -39,7 +39,7 @@ pub fn runtime_dir(xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
 }
 
 /// The daemon's runtime files for one tmux server.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub socket: PathBuf,
     pub lock: PathBuf,
