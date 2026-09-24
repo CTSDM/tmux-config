@@ -142,3 +142,20 @@ Done live without the whole `setup.sh`: `~/.tmuxifier` did not exist and
 `setup.sh` would have cloned it, which was not part of this. Its steps 3a and
 3b ran by hand (the same commands). Settings before the switch: copies kept
 outside the repo.
+
+## After cutover: no forks when switching sessions
+
+Found live (2026-09-24): the tmux server held 6 GB after 20 h (freed memory
+the allocator kept, from the bash era; not growing with agentd), and each
+`fork()` of it costs ~350 ms: `tmux run-shell true` took 352 ms. Switching
+sessions ran one or two `run-shell -b` from hooks (`agentd ctl seen`,
+`agent-spaces layout`), measured as 180-340 ms of blocked server per switch.
+Rule from now on: paths the user triggers with a key or a focus change do not
+make the tmux server fork; `run-shell -C` (a tmux command, no fork) and
+`if -F` are fine.
+
+| Id | Owner | Status | Task |
+|---|---|---|---|
+| F1 | implementador | todo | **Seen without a fork:** the daemon sets the global option `@agentd_client` to its control client's name whenever it attaches (unset when it closes its session); it takes `%message agentd seen <pane>` on that client as `ctl seen <pane>` (E1). agents.conf, with `@agentd`: `pane-focus-in[40]` runs `run-shell -C "display-message -c '#{@agentd_client}' 'agentd seen #{hook_pane}'"` for panes with `@agent` when `@agentd_client` is set, else today's `run-shell -b … ctl seen` (spawn transport). Verified by hand on tmux 3.6: a control client gets `%message <text>` for `display-message -c <it>`. |
+| F2 | implementador | todo | **Layout only when the width changes:** `agent-spaces layout` stores per session `@layout-width`, the client width it laid out for; `client-session-changed[40]` runs it only when `#{client_width}` differs from the session's `@layout-width` (check that `client_width` is the switching client in that hook). `client-attached`/`client-resized` keep running it. |
+| F3 | tester | todo | Tests: E1 green with `AGENT_IMPL=rust` through the new path (and with `AGENTD_TRANSPORT=spawn`, the fallback); a switch of session (`switch-client`, `prefix g N`) makes the tmux server start no process: count the server's children around the switch (none new); and the bar still lays out right when a narrower client arrives. |
