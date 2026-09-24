@@ -2,13 +2,15 @@
 //! spawned `tmux` for everything an event reads, one for what it writes.
 
 use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use super::control::{self, Control};
 use crate::core::{Op, OtherPane, Pane};
 
 /// Record and field separators in tmux output: unlike tabs or newlines, no
@@ -18,6 +20,8 @@ const US: char = '\x1f';
 
 /// A wedged tmux server must not hold a pane's events forever.
 const TIMEOUT: Duration = Duration::from_secs(3);
+/// Attaching again after our control client went away.
+const REATTACH: Duration = Duration::from_secs(1);
 
 /// The session's space, as everywhere in agents/.
 const SPACE: &str = "#{?@space,#{@space},#{@space_auto}}";
@@ -97,20 +101,107 @@ pub struct Tmux {
     socket: PathBuf,
     /// `$TMUX` for the helpers, which run plain `tmux`.
     env: String,
+    /// Phase 4: our control-mode client; `None` until attached, or when
+    /// `AGENTD_TRANSPORT=spawn`.
+    control: RefCell<Option<Control>>,
+    use_control: bool,
+    last_attach: Cell<Option<Instant>>,
+}
+
+/// One tmux command, word by word.
+pub type Cmd = Vec<String>;
+
+fn cmd(words: &[&str]) -> Cmd {
+    words.iter().map(|w| w.to_string()).collect()
 }
 
 impl Tmux {
     pub fn new(socket: PathBuf, server_pid: u32) -> Self {
         let env = format!("{},{server_pid},0", socket.display());
-        Tmux { socket, env }
+        let use_control = std::env::var("AGENTD_TRANSPORT").as_deref() != Ok("spawn");
+        Tmux {
+            socket,
+            env,
+            control: RefCell::new(None),
+            use_control,
+            last_attach: Cell::new(None),
+        }
     }
 
     pub fn env(&self) -> &str {
         &self.env
     }
 
-    /// Runs `tmux -S <socket> <args>`; its output if it succeeded.
-    pub async fn run(&self, args: &[Cow<'_, str>]) -> Result<String, Missing> {
+    /// Which transport answers now.
+    pub fn transport(&self) -> &'static str {
+        match self.control.borrow().as_ref() {
+            Some(c) if c.alive() => "control",
+            _ => "spawn",
+        }
+    }
+
+    /// Our control client, attached (again) when needed: after `%exit`
+    /// while the server lives, at most once a second.
+    pub fn attach(&self) {
+        if !self.use_control || self.control.borrow().as_ref().is_some_and(Control::alive) {
+            return;
+        }
+        if self
+            .last_attach
+            .get()
+            .is_some_and(|t| t.elapsed() < REATTACH)
+        {
+            return;
+        }
+        self.last_attach.set(Some(Instant::now()));
+        match Control::start(&self.socket) {
+            Ok(control) => *self.control.borrow_mut() = Some(control),
+            Err(e) => super::log(&format!("control mode: {e}; spawning tmux")),
+        }
+    }
+
+    /// Runs the commands, in order, as one request; the output of them all.
+    /// Through the control client when attached, else a spawned `tmux`.
+    pub async fn run(&self, commands: &[Cmd]) -> Result<String, Missing> {
+        self.attach();
+        let answer = {
+            let control = self.control.borrow();
+            match (control.as_ref(), control::line(commands)) {
+                (Some(c), Some(line)) => c.send(line, commands.len()),
+                _ => None,
+            }
+        };
+        let Some(answer) = answer else {
+            return self.spawn(commands).await;
+        };
+        match timeout(TIMEOUT, answer).await {
+            Ok(Ok(Ok(out))) => Ok(out),
+            Ok(Ok(Err(error))) => {
+                super::log(&format!("control mode: {}", error.trim()));
+                Err(missing(&error))
+            }
+            // The client went away while we waited: this once, spawn.
+            Ok(Err(_)) => self.spawn(commands).await,
+            Err(_) => {
+                // No answer: the stream can't be trusted; attach again later.
+                if let Some(c) = self.control.borrow().as_ref() {
+                    c.kill();
+                }
+                super::log("control mode: no answer, attaching again");
+                Err(Missing::Tmux)
+            }
+        }
+    }
+
+    /// `tmux -S <socket> <commands>`, joined by `;` arguments.
+    async fn spawn(&self, commands: &[Cmd]) -> Result<String, Missing> {
+        let mut args: Vec<Cow<str>> = Vec::new();
+        for (i, c) in commands.iter().enumerate() {
+            if i > 0 {
+                args.push(";".into());
+            }
+            args.extend(c.iter().map(|w| protect_semicolon(w)));
+        }
         let child = Command::new("tmux")
             .arg("-S")
             .arg(&self.socket)
@@ -128,68 +219,67 @@ impl Tmux {
         };
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        } else if String::from_utf8_lossy(&out.stderr).contains("no such pane") {
-            Err(Missing::Pane)
         } else {
-            Err(Missing::Tmux)
+            Err(missing(&String::from_utf8_lossy(&out.stderr)))
         }
     }
 
-    /// One `tmux` for the pane (P2 options, V2 facts, space, mute, §13
+    /// One request for the pane (P2 options, V2 facts, space, mute, §13
     /// globals), and when asked the clients (V1) and every pane (R).
     pub async fn read(&self, pane: &str, clients: bool, panes: bool) -> Result<Read, Missing> {
-        let mut args: Vec<Cow<str>> = vec![
-            "display".into(),
-            "-p".into(),
-            "-t".into(),
-            pane.into(),
-            format!("{RS}D{US}{}", PANE_FIELDS.join(&US.to_string())).into(),
-        ];
+        let mut commands = vec![cmd(&[
+            "display",
+            "-p",
+            "-t",
+            pane,
+            &format!("{RS}D{US}{}", PANE_FIELDS.join(&US.to_string())),
+        ])];
         if clients {
-            args.extend([
-                ";".into(),
-                "list-clients".into(),
-                "-F".into(),
-                format!("{RS}C{US}#{{client_name}}{US}#{{client_pid}}{US}#{{client_flags}}{US}#{{client_session}}{US}#{{client_control_mode}}").into(),
-            ]);
+            commands.push(cmd(&[
+                "list-clients",
+                "-F",
+                &format!("{RS}C{US}#{{client_name}}{US}#{{client_pid}}{US}#{{client_flags}}{US}#{{client_session}}{US}#{{client_control_mode}}"),
+            ]));
         }
         if panes {
-            args.extend([
-                ";".into(),
-                "list-panes".into(),
-                "-a".into(),
-                "-F".into(),
-                format!(
+            commands.push(cmd(&[
+                "list-panes",
+                "-a",
+                "-F",
+                &format!(
                     "{RS}P{US}#{{pane_id}}{US}#{{@agent_state}}{US}#{{@agent_subs}}{US}{SPACE}"
-                )
-                .into(),
-            ]);
+                ),
+            ]));
         }
-        parse(&self.run(&args).await?)
+        let out = self.run(&commands).await?;
+        parse(&out).inspect_err(|_| {
+            let head: String = out.chars().take(120).collect();
+            super::log(&format!("read {pane}: unreadable answer {head:?}"));
+        })
     }
 
-    /// The pane's option writes, in order, in one `tmux`.
+    /// The pane's option writes, in order, as one request.
     pub async fn write(&self, pane: &str, ops: &[Op]) -> Result<(), Missing> {
         if ops.is_empty() {
             return Ok(());
         }
-        let mut args: Vec<Cow<str>> = Vec::new();
-        for op in ops {
-            if !args.is_empty() {
-                args.push(";".into());
-            }
-            match op {
-                Op::Set(name, value) => {
-                    args.extend(["set".into(), "-p".into(), "-t".into(), pane.into()]);
-                    args.extend([(*name).into(), protect_semicolon(value)]);
-                }
-                Op::Unset(name) => {
-                    args.extend(["set".into(), "-pu".into(), "-t".into(), pane.into()]);
-                    args.push((*name).into());
-                }
-            }
-        }
-        self.run(&args).await.map(drop)
+        let commands: Vec<Cmd> = ops
+            .iter()
+            .map(|op| match op {
+                Op::Set(name, value) => cmd(&["set", "-p", "-t", pane, name, value]),
+                Op::Unset(name) => cmd(&["set", "-pu", "-t", pane, name]),
+            })
+            .collect();
+        self.run(&commands).await.map(drop)
+    }
+}
+
+/// What a failed command's message says about the pane.
+fn missing(error: &str) -> Missing {
+    if error.contains("no such pane") || error.contains("can't find pane") {
+        Missing::Pane
+    } else {
+        Missing::Tmux
     }
 }
 

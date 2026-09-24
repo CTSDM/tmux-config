@@ -11,7 +11,7 @@ pane=${1:?usage: agent-jump <pane> [client]} client=${2:-}
 IFS=$US read -r sess win < <(tmux display -p -t "$pane" "#{session_name}$US#{window_id}") || exit 1
 tmux select-window -t "$win" \; select-pane -t "$pane"
 
-viewer=$(tmux list-clients -F "#{client_session}$US#{client_name}" |
+viewer=$(tmux list-clients -f "$AG_USER_CLIENTS" -F "#{client_session}$US#{client_name}" |
   awk -F"$US" -v s="$sess" '$1 == s { print $2; exit }')
 if [[ -n $viewer ]]; then
   [[ $viewer == "$client" ]] && exit 0
@@ -19,7 +19,7 @@ if [[ -n $viewer ]]; then
 fi
 
 if [[ -z $client ]]; then
-  client=$(tmux list-clients -F "#{client_activity}$US#{client_name}$US#{client_session}" |
+  client=$(tmux list-clients -f "$AG_USER_CLIENTS" -F "#{client_activity}$US#{client_name}$US#{client_session}" |
     awk -F"$US" '$3 !~ /^_peek-/' | sort -rn | head -n1 | cut -d"$US" -f2)
   [[ -n $client ]] || exit 1
   ag_raise_client "$client"

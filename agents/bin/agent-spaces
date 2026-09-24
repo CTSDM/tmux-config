@@ -349,7 +349,7 @@ layout() {
   local -A widths=()
   while IFS=$US read -r sess width; do
     [[ -z ${widths[$sess]:-} ]] || ((width < widths[$sess])) && widths[$sess]=$width
-  done < <(tmux list-clients -F "#{client_session}$US#{client_width}")
+  done < <(tmux list-clients -f "$AG_USER_CLIENTS" -F "#{client_session}$US#{client_width}")
   ((${#widths[@]})) || return 0
   declare -gA agents=()
   local s
