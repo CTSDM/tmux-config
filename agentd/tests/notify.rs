@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
@@ -21,6 +22,8 @@ use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
 const PATH: &str = "/org/freedesktop/Notifications";
+
+static TESTS: AtomicUsize = AtomicUsize::new(0);
 
 /// What the fake server was asked.
 #[derive(Debug, Clone, PartialEq)]
@@ -224,7 +227,11 @@ struct Server {
 
 impl Server {
     fn start(runtime: &Path) -> Server {
-        let name = format!("agentd-nt-{}", std::process::id());
+        let name = format!(
+            "agentd-nt-{}-{}",
+            std::process::id(),
+            runtime.file_name().unwrap().to_string_lossy()
+        );
         let mut s = Server {
             name,
             socket: String::new(),
@@ -299,6 +306,24 @@ impl Server {
         child.wait().unwrap();
     }
 
+    /// `agentd ctl stop`; waits for the daemon to exit.
+    fn ctl_stop(&mut self) {
+        let status = Command::new(env!("CARGO_BIN_EXE_agentd"))
+            .args(["ctl", "stop"])
+            .env("TMUX", format!("{},{},0", self.socket, self.pid))
+            .env_remove("TMUX_PANE")
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        self.daemon.take().unwrap().wait().unwrap();
+    }
+
+    fn saved_notifications(&self) -> Value {
+        let saved: Value = serde_json::from_slice(&fs::read(&self.paths.state).unwrap()).unwrap();
+        saved["notifications"].clone()
+    }
+
     fn hook(&self, pane: &str, event: Value) {
         let pane_pid: u32 = self
             .tmux(&["display", "-p", "-t", pane, "#{pane_pid}"])
@@ -357,15 +382,21 @@ fn ev(name: &str, fields: Value) -> Value {
     e
 }
 
+/// A folder of this test's own, short (socket paths).
+fn temp_dir() -> TempDir {
+    TempDir(PathBuf::from(format!(
+        "/tmp/agentd-nt-{}-{}",
+        std::process::id(),
+        TESTS.fetch_add(1, Ordering::SeqCst)
+    )))
+}
+
 #[test]
 fn n1_n3_over_a_private_bus() {
     if Command::new("tmux").arg("-V").output().is_err() {
         return;
     }
-    let tmp = TempDir(PathBuf::from(format!(
-        "/tmp/agentd-nt-{}",
-        std::process::id()
-    )));
+    let tmp = temp_dir();
     let dir = tmp.0.clone();
     fs::create_dir_all(dir.join("bin")).unwrap();
     let Some(bus) = Bus::start(&dir) else { return };
@@ -451,6 +482,84 @@ fn n1_n3_over_a_private_bus() {
     assert_eq!(bus.wait_calls(5)[4], Call::Close(3));
     // No pane option carries it (C3).
     assert!(!server.tmux(&["show", "-p", "-t", &pane]).contains("notify"));
+
+    drop(server);
+    drop(bus);
+    drop(tmp);
+}
+
+#[test]
+fn t5_7_a_stop_for_good_closes_what_is_open() {
+    if Command::new("tmux").arg("-V").output().is_err() {
+        return;
+    }
+    let tmp = temp_dir();
+    let dir = tmp.0.clone();
+    fs::create_dir_all(dir.join("state/tmux-agents")).unwrap();
+    let off = dir.join("state/tmux-agents/agentd.off");
+    let Some(bus) = Bus::start(&dir) else { return };
+    let mut server = Server::start(&dir);
+    server.tmux(&["set", "-g", "@agent_sound", "off"]);
+    let first = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    let second = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "main:",
+        "sleep 600",
+    ]);
+    let needs = |tool_id: &str| {
+        ev(
+            "PermissionRequest",
+            json!({"tool_name": "Bash", "tool_use_id": tool_id, "detail": "ls"}),
+        )
+    };
+    server.start_daemon(&bus);
+    server.hook(&first, needs("a"));
+    server.hook(&second, needs("b"));
+    bus.wait_calls(2);
+
+    // An upgrade: stopped without agentd.off, it keeps them for the next one.
+    server.stop_daemon();
+    assert_eq!(bus.calls().len(), 2, "{:?}", bus.calls());
+    assert_eq!(
+        server.saved_notifications(),
+        json!({first.clone(): 1, second.clone(): 2})
+    );
+
+    // The way back: agentd.off, then `ctl stop`. Each is closed before it exits.
+    server.start_daemon(&bus);
+    fs::write(&off, "").unwrap();
+    server.ctl_stop();
+    let mut closed: Vec<Call> = bus.calls()[2..].to_vec();
+    closed.sort_by_key(|c| format!("{c:?}"));
+    assert_eq!(closed, [Call::Close(1), Call::Close(2)]);
+    assert_eq!(server.saved_notifications(), json!({}));
+
+    // SIGTERM with agentd.off: the same.
+    fs::remove_file(&off).unwrap();
+    server.start_daemon(&bus);
+    // Out of needs (nothing open to close) and into it again.
+    server.hook(
+        &first,
+        ev(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_use_id": "a"}),
+        ),
+    );
+    server.hook(&first, needs("c"));
+    let calls = bus.wait_calls(5);
+    assert!(
+        matches!(calls[4], Call::Notify { replaces: 0, .. }),
+        "{calls:?}"
+    );
+    fs::write(&off, "").unwrap();
+    server.stop_daemon();
+    assert_eq!(bus.calls()[5..], [Call::Close(3)]);
+    assert_eq!(server.saved_notifications(), json!({}));
 
     drop(server);
     drop(bus);

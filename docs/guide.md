@@ -303,7 +303,8 @@ tmux set -gu @agentd
 
 `agentd.off` lasts: while it exists, the hooks go to bash (even from agents
 that still call agentd), no daemon starts, the tmux config doesn't turn agentd
-on, and `setup.sh` registers the bash hook. To return to agentd, delete it,
+on, and `setup.sh` registers the bash hook. The last step closes the
+notifications agentd had open (a plain `ctl stop`, for an update, keeps them). To return to agentd, delete it,
 run `setup.sh` and reload the config (`prefix R`).
 
 ## Troubleshooting

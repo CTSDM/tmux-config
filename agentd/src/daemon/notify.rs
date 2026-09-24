@@ -144,6 +144,15 @@ impl Notifier {
         }
     }
 
+    /// Closes every open notification: the daemon goes for good (rollback),
+    /// and nobody would close them when their panes are seen.
+    pub async fn close_all(&self) {
+        let panes: Vec<String> = self.ids.borrow().keys().cloned().collect();
+        for pane in panes {
+            self.close(&pane).await;
+        }
+    }
+
     /// The session bus, connected on first use, with its signals watched
     /// from before the first notification (a quick click is not missed).
     /// Without a bus, connecting is tried again on a later call, at most
