@@ -104,7 +104,7 @@ Subscriptions (`refresh-client -B`) are left out: with control mode the
 blink's refresh (`list-panes -a` every 6 frames) is cheap. Revisit if a
 measurement shows polling.
 
-## Phase 5: cutover (with the user)
+## Phase 5: cutover (with the user) — done
 
 Everything up to the last step happens off the live system. The last step,
 switching the live setup, is done with the user, who decides when.
@@ -117,7 +117,7 @@ switching the live setup, is done with the user, who decides when.
 | T5.4 | implementador | done (6f4fa3c) | **Docs:** README, docs/guide.md (what the user sees: nothing changes, `agentd ctl status`, how to go back), docs/internals.md (agentd: shape, switch, transport, observation, state file, debugging with `AGENTD_TRANSPORT=spawn` and the debug log). |
 | T5.5 | tester | done (8135ef2, ff5495a; green twice on e42d79f) | **Rehearsal** on an isolated server with the daemon branch's full `tmux.conf`: fake agents started with the bash hook, then the switch (install `--agentd`, `@agentd` set): old agents keep working through `agent-hook` → `agentd hook` (one owner: no bash Codex bookkeeping, no second animator, pre-cutover notifications close when seen); new agents use `agentd hook`. Then the rollback (`agentd.off`, `--bash`, `@agentd` unset, `ctl stop`): back to bash with the same checks. Real `setup.sh` into a temp `HOME`. |
 | T5.7 | implementador | done (7cc82d1) | **Rollback leaves no daemon notification open** (T5.5's finding): when the daemon stops (`ctl stop`, SIGTERM) and `agentd.off` exists, it closes every notification it has open before exiting, since no daemon will come back to close them when seen. Without `agentd.off` (an upgrade) it keeps them: the next daemon reads their ids from the state file. |
-| T5.6 | arquitecto + user | ready | **The switch, live:** merge `daemon` into `main`, `setup.sh`, `agents/install --agentd ~/.local/bin/agentd`, reload tmux, check with `agentd ctl status` and real sessions; rollback steps ready. Only when the user says so. |
+| T5.6 | arquitecto + user | done (2026-09-24 09:38: main at 2266297, agentd live, transport control) | **The switch, live:** merge `daemon` into `main`, `setup.sh`, `agents/install --agentd ~/.local/bin/agentd`, reload tmux, check with `agentd ctl status` and real sessions; rollback steps ready. Only when the user says so. |
 
 Phases 6 (spaces, optional) and 7 (deleting bash, after a while live) later.
 
@@ -137,3 +137,8 @@ Phases 6 (spaces, optional) and 7 (deleting bash, after a while live) later.
    going working → needs → done here, a notification and its close,
    `@agent_bg` on a background shell.
 5. If anything is off: rollback per docs/guide.md, "Going back to bash".
+
+Done live without the whole `setup.sh`: `~/.tmuxifier` did not exist and
+`setup.sh` would have cloned it, which was not part of this. Its steps 3a and
+3b ran by hand (the same commands). Settings before the switch: copies kept
+outside the repo.
