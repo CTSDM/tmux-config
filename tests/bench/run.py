@@ -37,7 +37,6 @@ from harness.codex import Codex, Rollout  # noqa: E402
 from harness.impl import IMPL  # noqa: E402
 from harness.tmux import TmuxServer  # noqa: E402
 
-TICK = 100  # clock ticks per second (getconf CLK_TCK)
 AGENT_COMMS = ("claude", "codex", "node")
 BG_SHELL = "source /x/shell-snapshots/snapshot-bash-1.sh 2>/dev/null; sleep 600; exit 0"
 
@@ -210,18 +209,18 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def cpu_split(server: TmuxServer, agents: list[FakeAgent], seconds: float) -> dict[str, float]:
     """CPU % of one core over `seconds`: the implementation's processes
-    (their reaped children included) and the tmux server."""
+    (their reaped children included) and the tmux server, from schedstat."""
     def impl_pids() -> list[int]:
         return [r["pid"] for r in resident(server, agents)]
 
-    before_impl = procs.cpu_ticks(impl_pids())
-    before_tmux = procs.cpu_ticks([server.pid])
+    before_impl = procs.cpu_ns(impl_pids())
+    before_tmux = procs.cpu_ns([server.pid])
     time.sleep(seconds)
-    after_impl = procs.cpu_ticks(impl_pids())
-    after_tmux = procs.cpu_ticks([server.pid])
+    after_impl = procs.cpu_ns(impl_pids())
+    after_tmux = procs.cpu_ns([server.pid])
     impl = sum(t - before_impl.get(p, 0) for p, t in after_impl.items())
     tmux = sum(t - before_tmux.get(p, 0) for p, t in after_tmux.items())
-    return {"impl_pct": 100 * impl / TICK / seconds, "tmux_pct": 100 * tmux / TICK / seconds}
+    return {"impl_pct": 100 * impl / 1e9 / seconds, "tmux_pct": 100 * tmux / 1e9 / seconds}
 
 
 def blink_cpu(fakes: dict[str, Path], seconds: float) -> dict[str, dict[str, float]]:

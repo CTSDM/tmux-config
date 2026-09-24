@@ -72,6 +72,9 @@ class TmuxServer:
     The focus is fixed before any agent or daemon starts: they inherit it.
     conf: source the implementation's tmux configuration (IMPL.conf).
     theme: source theme.conf first, as tmux.conf does (the bar), with mouse on.
+    agentd: with Rust, start the daemon as a configuration load does (set
+      @agentd). False leaves it off until start_agentd(), e.g. to compare the
+      server before and after the daemon attaches (contract Z1).
     """
 
     def __init__(
@@ -82,6 +85,7 @@ class TmuxServer:
         focus: Focus = "none",
         conf: bool = True,
         theme: bool = False,
+        agentd: bool = True,
         impl: Impl = IMPL,
     ) -> None:
         self.root = root
@@ -93,6 +97,8 @@ class TmuxServer:
         self.player_log = root / "tripwire-player.log"
         self.agents: list[FakeAgent] = []
         self.client: Client | Terminal | None = None
+        self.terminals = 0  # outer servers of Terminal clients, for their names
+        self.extra: list[Terminal] = []
         self._controls = itertools.count(1)
         self._killed = False
 
@@ -142,7 +148,7 @@ class TmuxServer:
                     f"set -g @agents_bin '{impl.bin}'",
                     # The switch (design.md): agents.conf and the bash entry points
                     # hand over to agentd when it names the binary.
-                    *([f"set -g @agentd '{impl.agentd}'"] if impl.agentd else []),
+                    *([f"set -g @agentd '{impl.agentd}'"] if impl.agentd and agentd else []),
                     "",
                 ]
             )
@@ -167,7 +173,7 @@ class TmuxServer:
             if conf:
                 # With @agentd set, it runs `agentd ensure` on load.
                 self.tmux("source-file", str(impl.conf))
-            else:
+            elif agentd:
                 # What agents.conf would do; after the focus is fixed, since
                 # the daemon reads the seams from its environment once.
                 self.ensure()
@@ -222,6 +228,19 @@ class TmuxServer:
         argv = self.impl.ensure_argv()
         if argv is not None:
             self.run_tool(argv)
+
+    def start_agentd(self) -> None:
+        """Turn the switch on and start the daemon, as loading agents.conf
+        with @agentd does (Rust only)."""
+        if self.impl.agentd is not None:
+            self.set_global("@agentd", str(self.impl.agentd))
+            self.ensure()
+
+    def control_clients(self) -> list[tuple[str, str]]:
+        """(name, session) of the control-mode clients: the daemon's own."""
+        rows = self.tmux("list-clients", "-F", "#{client_control_mode}" + US + "#{client_name}" + US
+                         + "#{client_session}").splitlines()
+        return [(n, sess) for c, n, sess in (r.split(US) for r in rows) if c == "1"]
 
     def _setenv(self, name: str, value: str | None) -> None:
         """Global environment: inherited by panes (and so agents, hooks and
@@ -344,12 +363,20 @@ class TmuxServer:
 
     # --- teardown ------------------------------------------------------------
 
+    def terminal(self, session: str | None) -> "Terminal":
+        """Another real client, rendered (killed with the server)."""
+        term = Terminal(self, session)
+        self.extra.append(term)
+        return term
+
     def kill(self) -> list[int]:
         """Kill this server by name, then every process carrying its marker.
         Returns the pids that were still running after the server went away."""
         if self._killed:
             return []
         self._killed = True
+        for term in self.extra:
+            term.close()
         if self.client is not None:
             self.client.close()
         subprocess.run(
@@ -444,17 +471,20 @@ class Terminal:
     outer tmux server (`<name>-outer`) that renders it: its screen can be
     read (capture-pane) and clicked (SGR mouse reports sent as input)."""
 
-    def __init__(self, server: TmuxServer, session: str, cols: int = 200, rows: int = 50) -> None:
+    def __init__(self, server: TmuxServer, session: str | None, cols: int = 200, rows: int = 50) -> None:
+        """session None: a plain `tmux attach`, tmux picks the session."""
         self.server = server
-        self.outer = f"{server.name}-outer"
+        server.terminals += 1
+        self.outer = f"{server.name}-outer{server.terminals}"
+        target = ["-t", session] if session is not None else []
         self._outer("-f", "/dev/null", "new-session", "-d", "-s", "t", "-x", str(cols), "-y", str(rows),
                     "--", "env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-L", server.name, "attach",
-                    "-t", session)
+                    *target)
         self._outer("set", "-g", "status", "off")
         # The client's name is its terminal: the outer pane's tty.
         self.name = self._outer("display", "-p", "-t", "t", "#{pane_tty}")
-        self._last_click = 0.0
         self.pane = self._outer("display", "-p", "-t", "t", "#{pane_id}")
+        self._last_click = 0.0
         eventually(
             lambda: server.tmux("list-clients", "-F", "#{client_name}").splitlines(),
             lambda names: self.name in names,
@@ -490,6 +520,10 @@ class Terminal:
             if name == self.name:
                 return rest
         raise RuntimeError(f"client {self.name} is gone")
+
+    def keys(self, *keys: str) -> None:
+        """Keys typed in the terminal (tmux key names, e.g. C-b, s, Escape)."""
+        self._outer("send-keys", "-t", self.pane, *keys)
 
     def switch(self, target: str) -> None:
         self.server.tmux("switch-client", "-c", self.name, "-t", target)
