@@ -8,10 +8,11 @@ def rule(*ids: str) -> pytest.MarkDecorator:
     return pytest.mark.rule(*ids)
 
 
-def change(rule_id: str) -> pytest.MarkDecorator:
-    """A CHANGE rule: bash keeps the old behavior, so the test must fail there."""
+def change(rule_id: str, *, racy: bool = False) -> pytest.MarkDecorator:
+    """A CHANGE rule: bash keeps the old behavior, so the test must fail there.
+    `racy`: bash only fails when it loses a race, so it may pass (non-strict)."""
     return pytest.mark.xfail(
         IMPL.name == "bash",
         reason=f"{rule_id} is an intentional change; bash keeps the old behavior",
-        strict=True,
+        strict=not racy,
     )

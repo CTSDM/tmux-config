@@ -18,6 +18,7 @@ contract suite. Prints a Markdown report; `--json` writes the raw numbers.
 
 import argparse
 import json
+import os
 import shutil
 import statistics
 import sys
@@ -69,6 +70,9 @@ def claude_turns(server: TmuxServer, turns: int) -> Samples:
     samples: Samples = {}
     agent = server.agent("claude")
     h = agent.hook
+    # Calibration: starting a process that does nothing, the same way.
+    for _ in range(turns):
+        timed(samples, "(calibration: /bin/true)", lambda: agent.run_hook("{}", argv=["/bin/true"]))
     timed(samples, "SessionStart", lambda: h("SessionStart", source="startup", model="m"))
     for i in range(turns):
         timed(samples, "UserPromptSubmit", lambda: h("UserPromptSubmit"))
@@ -245,6 +249,7 @@ def main() -> None:
     parser.add_argument("--json", type=Path, help="also write the raw numbers here")
     args = parser.parse_args()
 
+    load_before = os.getloadavg()[0]
     fakes_dir = Path(tempfile.mkdtemp(prefix="agt-fakes-", dir="/tmp"))
     try:
         fakes = make_fakes(fakes_dir)
@@ -258,7 +263,10 @@ def main() -> None:
     finally:
         shutil.rmtree(fakes_dir, ignore_errors=True)
 
-    out = [f"## Benchmarks: {IMPL.name} ({time.strftime('%Y-%m-%d')})", ""]
+    load_after = os.getloadavg()[0]
+    out = [f"## Benchmarks: {IMPL.name} ({time.strftime('%Y-%m-%d')})", "",
+           f"Load average (1 min) {load_before:.1f} before, {load_after:.1f} after, "
+           f"{os.cpu_count()} CPUs.", ""]
     for kind, table in (("Claude", claude), ("Codex", codex)):
         out += [f"Hook latency, {kind} (ms, {args.turns} turns):", "",
                 "| Event | n | p50 | p90 | p99 | max |", "|---|---|---|---|---|---|"]
@@ -276,7 +284,7 @@ def main() -> None:
     print("\n".join(out))
     if args.json:
         args.json.write_text(json.dumps(
-            {"impl": IMPL.name, "claude": claude, "codex": codex, "steady": steady, "waits": waits,
+            {"impl": IMPL.name, "load": [load_before, load_after], "claude": claude, "codex": codex, "steady": steady, "waits": waits,
              "blink": blink}, indent=2))
 
 

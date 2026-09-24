@@ -168,6 +168,21 @@ def sample(server: TmuxServer, target: str, scope: str, seconds: float) -> list[
     return samples
 
 
+def sample_both(
+    server: TmuxServer, sessions: tuple[str, str], seconds: float
+) -> tuple[list[tuple[float, str, str]], list[tuple[float, str, str]]]:
+    """sample() of two sessions in the same loop, so both see the same load."""
+    fmt = f"#{{@blink-s-lit}}{US}#{{@blink-s-rest}}"
+    first: list[tuple[float, str, str]] = []
+    second: list[tuple[float, str, str]] = []
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        for session, into in ((sessions[0], first), (sessions[1], second)):
+            lit, _, rest = server.tmux("display", "-p", "-t", session, fmt).partition(US)
+            into.append((time.monotonic(), lit, rest))
+    return first, second
+
+
 def allowed_lengths(n: int) -> set[int]:
     return {math.ceil(n * (f + 1) / 6) for f in range(6)} | {n, 0}
 
@@ -189,6 +204,7 @@ def check_frames(samples: list[tuple[float, str, str]], text: str) -> None:
     assert {0, len(text)} <= lengths
 
 
+@pytest.mark.xdist_group("blink-frames")
 @rule("K3", "K4")
 def test_K3_session_text_and_frames(server: TmuxServer) -> None:
     name = "a-rather-long-session-name"
@@ -202,6 +218,7 @@ def test_K3_session_text_and_frames(server: TmuxServer) -> None:
     check_frames(sample(server, name, "s", 2.5), text)
 
 
+@pytest.mark.xdist_group("blink-frames")
 @rule("K3", "K4")
 @pytest.mark.parametrize(("narrow", "width"), [(False, 22), (True, 14)])
 def test_K3_window_text_and_frames(server: TmuxServer, narrow: bool, width: int) -> None:
@@ -218,25 +235,41 @@ def test_K3_window_text_and_frames(server: TmuxServer, narrow: bool, width: int)
     check_frames(sample(server, window, "w", 2.5), text)
 
 
+# A 12-frame cycle takes 0.84 s at 70 ms a frame and 1.68 s at 140 ms. A
+# loaded machine only makes frames late, so the bounds tell the two speeds
+# apart (at their midpoint, 1.26 s) and leave room above.
+FAST = (0.6, 1.26)
+SLOW = (1.26, 2.6)
+
+
+def between(value: float, bounds: tuple[float, float]) -> bool:
+    return bounds[0] <= value <= bounds[1]
+
+
 @rule("K4", "K5")
+@pytest.mark.xdist_group("blink-frames")
 def test_K4_needs_cycle_is_12_frames_of_70_ms(server: TmuxServer) -> None:
     agents = [server.agent("claude") for _ in range(3)]
     for agent in agents:  # three triggers: still one animator
         working(agent)
         ask(agent, "Bash", "a")
     wait_session(server, "main", "needs")
-    assert cycle(sample(server, "main", "s", 4)) == pytest.approx(0.84, rel=0.3)
+    period = cycle(sample(server, "main", "s", 4))
+    assert between(period, FAST), period
 
 
 @rule("K4")
+@pytest.mark.xdist_group("blink-frames")
 def test_K4_unseen_only_cycle_is_half_speed(server: TmuxServer) -> None:
     agent = server.agent("claude")
     done(agent)
     wait_session(server, "main", "unseen")
-    assert cycle(sample(server, "main", "s", 6)) == pytest.approx(1.68, rel=0.3)
+    period = cycle(sample(server, "main", "s", 6))
+    assert between(period, SLOW), period
 
 
 @rule("K4")
+@pytest.mark.xdist_group("blink-frames")
 def test_K4_unseen_next_to_needs_advances_every_other_frame(server: TmuxServer) -> None:
     server.session("other")
     finished, waiting = server.agent("claude"), server.agent("claude", "other")
@@ -245,7 +278,9 @@ def test_K4_unseen_next_to_needs_advances_every_other_frame(server: TmuxServer) 
     ask(waiting, "Bash", "a")
     wait_session(server, "other", "needs")
     wait_session(server, "main", "unseen")
-    assert cycle(sample(server, "main", "s", 6)) == pytest.approx(1.68, rel=0.3)
+    fast, slow = sample_both(server, ("other", "main"), 6)
+    ratio = cycle(slow) / cycle(fast)
+    assert between(cycle(fast), FAST) and 1.6 <= ratio <= 2.5, (cycle(fast), cycle(slow))
 
 
 # --- K5 life -----------------------------------------------------------------------------

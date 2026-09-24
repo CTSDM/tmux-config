@@ -394,34 +394,43 @@ def test_H11_session_end_clears_the_pane(server: TmuxServer) -> None:
     assert agent.options() == {}  # internal options too
 
 
+# Bash loses these races only when its detached agent-notify is slower than
+# the next hook, which load can turn around: several tries, non-strict.
+RACE_TRIES = 5
+
+
 @rule("H11", "N3", "O3", "P1", "C5")
-@change("C5")
+@change("C5", racy=True)
 def test_H11_session_end_right_after_needs(server: TmuxServer) -> None:
     """SessionEnd before the needs notification went out: once things settle,
     no notification is left open and the pane has no agent option left."""
-    agent = server.agent("claude")
-    working(agent)
-    ask(agent, "Bash", "a", command="ls")
-    agent.hook("SessionEnd")
+    agents = [server.agent("claude") for _ in range(RACE_TRIES)]
+    for agent in agents:
+        working(agent)
+        ask(agent, "Bash", "a", command="ls")
+        agent.hook("SessionEnd")
     time.sleep(2)
-    effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
-    assert effects in ([], ["notify", "notify-close"]), effects
-    assert agent.options() == {}
+    for agent in agents:
+        effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
+        assert effects in ([], ["notify", "notify-close"]), effects
+        assert agent.options() == {}
 
 
 @rule("H5", "N3", "O3", "C5")
-@change("C5")
+@change("C5", racy=True)
 def test_H5_answer_right_after_needs(server: TmuxServer) -> None:
     """The wait ends before its notification went out: once things settle,
     no notification is left open."""
-    agent = server.agent("claude")
-    working(agent)
-    ask(agent, "Bash", "a", command="ls")
-    post(agent, "Bash", "a")
+    agents = [server.agent("claude") for _ in range(RACE_TRIES)]
+    for agent in agents:
+        working(agent)
+        ask(agent, "Bash", "a", command="ls")
+        post(agent, "Bash", "a")
     time.sleep(2)
-    effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
-    assert effects in ([], ["notify", "notify-close"]), effects
-    assert state(agent) == "working"
+    for agent in agents:
+        effects = [line["effect"] for line in server.sink.lines() if line.get("pane") == agent.pane]
+        assert effects in ([], ["notify", "notify-close"]), effects
+        assert state(agent) == "working"
 
 
 @rule("H11", "A3")

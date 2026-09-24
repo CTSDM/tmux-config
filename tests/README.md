@@ -7,7 +7,7 @@ against the bash implementation (the reference) and against `agentd`.
 ```sh
 cd tests
 uv run pytest                          # bash: ../agents/bin/agent-hook
-uv run pytest -n 4                     # in parallel (pytest-xdist): ~2 min instead of ~8
+uv run pytest -n 4 --dist loadgroup    # in parallel (pytest-xdist): ~3 min instead of ~11
 AGENT_IMPL=rust AGENTD=../agentd/target/release/agentd uv run pytest
 uv run pyright                         # strict
 ```

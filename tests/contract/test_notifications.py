@@ -344,12 +344,19 @@ def test_C1_one_reminder_per_pane(server: TmuxServer) -> None:
     """Two waits within one second share @agent_since: only the reminder
     armed last may fire, so there is one."""
     server.set_global("@agent_remind_after", str(REMIND))
-    agent = server.agent("claude")
-    working(agent)
-    next_second()
-    ask(agent, "Bash", "a")
-    post(agent, "Bash", "a")
-    ask(agent, "Bash", "b")
+    for _ in range(3):  # the premise: both waits within one second
+        agent = server.agent("claude")
+        working(agent)
+        next_second()
+        ask(agent, "Bash", "a")
+        first = agent.option("@agent_since")
+        post(agent, "Bash", "a")
+        ask(agent, "Bash", "b")
+        if agent.option("@agent_since") == first:
+            break
+        agent.hook("SessionEnd")
+    else:
+        pytest.skip("the machine is too slow for two waits within one second")
     assert agent.option("@agent_state") == "needs"
     time.sleep(REMIND + 3)
     assert len(reminders(server, agent)) == 1

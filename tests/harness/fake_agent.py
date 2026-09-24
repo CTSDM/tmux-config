@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -44,30 +45,41 @@ def wrapped(argv: list[str], depth: int) -> list[str]:
 
 
 def hook(req: Json) -> Json:
+    """Run a hook; `ns` is from its start to its exit. Popen.wait(timeout)
+    polls (up to 50 ms), so a thread waits for the exit without reaping it."""
     argv = wrapped(list(req["argv"]), int(req.get("wrap", 0)))
     start = time.perf_counter_ns()
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=environment(req.get("env", {})),
+    )
+    exited: list[int] = []
+
+    def watch() -> None:
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        exited.append(time.perf_counter_ns())
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    timed_out = False
     try:
-        done = subprocess.run(
-            argv,
-            input=str(req.get("stdin", "")).encode(),
-            capture_output=True,
-            env=environment(req.get("env", {})),
-            timeout=float(req.get("timeout", 10)),
-        )
-    except subprocess.TimeoutExpired as expired:
-        return {
-            "rc": None,
-            "timeout": True,
-            "stdout": (expired.stdout or b"").decode(errors="replace"),
-            "stderr": (expired.stderr or b"").decode(errors="replace"),
-            "ns": time.perf_counter_ns() - start,
-        }
+        # Also waits for EOF: a detached child holding the hook's stdout
+        # would keep the agent waiting too.
+        out, err = process.communicate(str(req.get("stdin", "")).encode(), timeout=float(req.get("timeout", 10)))
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        process.kill()
+        out, err = b"", b""
+    watcher.join(timeout=1)
     return {
-        "rc": done.returncode,
-        "timeout": False,
-        "stdout": done.stdout.decode(errors="replace"),
-        "stderr": done.stderr.decode(errors="replace"),
-        "ns": time.perf_counter_ns() - start,
+        "rc": None if timed_out else process.returncode,
+        "timeout": timed_out,
+        "stdout": out.decode(errors="replace"),
+        "stderr": err.decode(errors="replace"),
+        "ns": (exited[0] if exited else time.perf_counter_ns()) - start,
     }
 
 

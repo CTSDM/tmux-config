@@ -132,6 +132,8 @@ class TmuxServer:
                     "set -g default-size 200x50",
                     "set -g focus-events on",
                     "set -wg remain-on-exit on",
+                    # agents.conf sets it too; agentd finds the bash helpers by it (phase 1).
+                    f"set -g @agents_bin '{impl.bin}'",
                     "",
                 ]
             )
