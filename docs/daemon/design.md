@@ -137,7 +137,7 @@ entry points follow it, so tests, cutover and rollback use one config:
   `agent-hook` or `agentd hook` into the Claude and Codex settings (phase 5),
   since a hook that asked tmux first would lose the latency we gained.
 
-Rollback: unset `@agentd`, reinstall the bash hooks.
+Rollback: see the end of the next paragraph.
 
 **Agents already running at cutover.** Claude Code and Codex read their hook
 commands when they start: agents running when `agents/install` switches to
@@ -148,7 +148,13 @@ not happen, so `agent-hook` itself follows the switch: with `@agentd` set it
 hands the event to `agentd hook` (`exec`, one extra tmux call, only for the
 agents started before cutover). From the moment `@agentd` is set every pane
 has one owner, the daemon. Phase 5 designs the reverse (rollback) the same
-way.
+way, with one persistent file, `${XDG_STATE_HOME:-~/.local/state}/tmux-agents/agentd.off`
+(on disk: a rollback survives a reboot). While it exists, `agentd hook` gives
+its events to the bash `agent-hook` (one `stat` per event), the daemon
+doesn't start, `tmux.conf` leaves `@agentd` unset and `setup.sh` installs the
+bash hooks. Rollback, in order: create that file, `agents/install --bash`,
+`tmux set -gu @agentd` on each server, `agentd ctl stop`. Back to agentd:
+delete it, run `setup.sh`, reload tmux.
 
 ## Test seams (both implementations)
 

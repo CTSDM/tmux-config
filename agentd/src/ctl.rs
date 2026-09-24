@@ -2,11 +2,10 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::client;
-use crate::identity;
 use crate::proto::{CtlRequest, Request, VERSION};
 
 /// tmux.conf runs `ensure` on load; waiting a little lets it report failure.
@@ -40,27 +39,21 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
     let Some(tmux) = tmux_var() else {
         return ExitCode::FAILURE;
     };
-    // Until phase 4 the blink is still bash (design.md, "Migration").
-    if command == "blink-demo" {
-        let mut demo = vec!["--demo".to_string()];
-        demo.extend_from_slice(args);
-        return helper(&tmux, "agent-blink", &demo);
-    }
     let Some(paths) = client::paths(&tmux) else {
         return ExitCode::FAILURE;
     };
-    // Reconcile runs on config load, seen on focus: maybe before any hook
-    // started us.
-    let (stream, timeout) = if command == "reconcile" || command == "seen" {
-        (
+    // Reconcile and blink run on config load, seen on focus, the blink demo
+    // from prefix+Q: maybe before any hook started us.
+    let (stream, timeout) = match command {
+        "reconcile" | "seen" => (
             client::connect_or_start(&paths, ENSURE_BUDGET),
             RECONCILE_TIMEOUT,
-        )
-    } else {
-        (
+        ),
+        "blink" | "blink-demo" => (client::connect_or_start(&paths, ENSURE_BUDGET), CTL_TIMEOUT),
+        _ => (
             std::os::unix::net::UnixStream::connect(&paths.socket).ok(),
             CTL_TIMEOUT,
-        )
+        ),
     };
     let Some(stream) = stream else {
         eprintln!("agentd ctl: no daemon for this tmux server");
@@ -89,28 +82,5 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
             eprintln!("agentd ctl {command}: {e}");
             ExitCode::FAILURE
         }
-    }
-}
-
-/// Runs a bash helper of `@agents_bin` and waits for it.
-fn helper(tmux: &OsString, name: &str, args: &[String]) -> ExitCode {
-    let Some(socket) = identity::server_socket(tmux) else {
-        return ExitCode::FAILURE;
-    };
-    let bin = Command::new("tmux")
-        .arg("-S")
-        .arg(socket)
-        .args(["show", "-gqv", "@agents_bin"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    if bin.is_empty() {
-        eprintln!("agentd ctl: @agents_bin is not set");
-        return ExitCode::FAILURE;
-    }
-    match Command::new(format!("{bin}/{name}")).args(args).status() {
-        Ok(status) if status.success() => ExitCode::SUCCESS,
-        _ => ExitCode::FAILURE,
     }
 }

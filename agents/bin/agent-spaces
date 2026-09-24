@@ -376,7 +376,7 @@ bind_menu() {
     "#{?#{==:#{@agent_sound},off},Turn sounds on,Turn sounds off}" s
     "set -gF @agent_sound '#{?#{==:#{@agent_sound},off},on,off}'"
     "Preview the turn signal here (10 s)" t
-    "run-shell -b \"$AG_BIN/agent-blink --demo '#{session_name}' '#{window_id}' 10\"")
+    "run-shell -b \"#{?@agentd,#{@agentd} ctl blink-demo,$AG_BIN/agent-blink --demo} '#{session_name}' '#{window_id}' 10\"")
   ((${#spaces[@]})) && args+=("")
   i=1
   for space in "${spaces[@]}"; do

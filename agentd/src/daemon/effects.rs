@@ -1,12 +1,7 @@
-//! Effects. Sounds and notifications are in-process; of the bash helpers of
-//! `@agents_bin` only agent-blink is left, until phase 4 (design.md,
-//! "Migration"). Reminders and background shells are the daemon's own
-//! (mod.rs).
+//! Effects: sounds and notifications, in-process. Reminders, background
+//! shells and the blink are the daemon's own (mod.rs, blink.rs).
 
-use std::process::Stdio;
 use std::rc::Rc;
-
-use tokio::process::Command;
 
 use super::notify::Notifier;
 use super::sound;
@@ -24,7 +19,7 @@ pub struct Ctx {
     pub pane: String,
     /// `@agents_bin`, read with the event.
     pub bin: String,
-    /// `$TMUX` for the helpers.
+    /// `$TMUX` for agent-jump, which a notification's click runs.
     pub tmux_env: String,
     /// `@agent_sound` is not `off`, and `@agent_sound_volume`.
     pub sound_on: bool,
@@ -45,29 +40,7 @@ pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
                 .await
         }
         Effect::NotifyClose => env.notifier.close(&ctx.pane).await,
-        Effect::Blink if !ctx.bin.is_empty() => {
-            spawn(ctx, &format!("{}/agent-blink", ctx.bin), &[])
-        }
-        // Handled by the daemon before the ack, or no helpers to run.
+        // Handled by the daemon before the ack.
         _ => {}
-    }
-}
-
-/// Starts a helper out of the daemon's process group (like `setsid -f` in
-/// bash) and lets it run; it is reaped when it ends.
-fn spawn(ctx: &Ctx, program: &str, args: &[&str]) {
-    let child = Command::new(program)
-        .args(args)
-        .env("TMUX", &ctx.tmux_env)
-        .env_remove("TMUX_PANE")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn();
-    if let Ok(mut child) = child {
-        tokio::task::spawn_local(async move {
-            let _ = child.wait().await;
-        });
     }
 }
