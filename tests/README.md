@@ -28,7 +28,15 @@ keep margins for that; none is retried.
 
 Layout: `harness/` (fixtures' machinery), `selftest/` (the harness itself),
 `contract/` (one module per contract section, tests named and marked with the
-rule ids they cover), `bench/` (latency, memory, CPU).
+rule ids they cover), `bench/` (latency, memory, CPU), `rehearsal/` (the
+cutover and rollback, T5.5).
+
+`uv run pytest rehearsal` is not in the default run: it clones this repo at
+`COMMIT` (default: the phase 5 merge) into a temporary HOME, runs the real
+`setup.sh` there (it builds agentd with the machine's cargo, offline, and
+clones TPM and tmuxifier from GitHub) and loads that `tmux.conf` in a test
+server. `TMUX_TMPDIR` is temporary as well: TPM's install runs a bare
+`tmux`, which would otherwise reach the default socket.
 
 ## What a test gets
 
