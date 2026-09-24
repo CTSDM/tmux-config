@@ -9,11 +9,13 @@ Three scenes, each `--turns` × (UserPromptSubmit, PreToolUse):
   claude + codex watched  a Claude agent while a Codex pane in the same
                           server has an open turn
 
-A thread polls the children of the agentd process every ~1 ms: in phase 2
-the daemon spawns `tmux` for each batch, so a child alive when a hook
-starts means the daemon was busy with something else (the tick). For the
-hooks over the threshold it reports how many started while the daemon was
-busy, next to the same share for all hooks.
+A thread polls the agentd process every ~0.2 ms: its children (the `tmux`
+it spawns) and whether one of its threads is running (state R). For the
+hooks over the threshold it reports how many met background work of the
+daemon (begun while no hook ran), and when the background CPU bursts came.
+
+Then, with no hooks at all, what the daemon reads and spends per 2 s tick
+(/proc/<agentd>/io, 10 s): with only Claude, and with a Codex turn open.
 """
 
 import argparse
@@ -207,6 +209,46 @@ def scene(fakes: dict[str, Path], name: str, turns: int, threshold: float) -> li
     return lines
 
 
+def tick_cost(fakes: dict[str, Path], seconds: float = 10) -> list[str]:
+    """Reads and CPU of the daemon per 2 s with no hooks, without and with
+    a Codex observation."""
+    def io(pid: int) -> tuple[int, int]:
+        fields = dict(line.split(": ") for line in Path(f"/proc/{pid}/io").read_text().splitlines())
+        return int(fields["syscr"]), int(fields["rchar"])
+
+    def cpu(pid: int) -> int:
+        fields = procs.stat(pid) or []
+        return int(fields[11]) + int(fields[12]) if fields else 0
+
+    rows: list[str] = []
+    root = Path(tempfile.mkdtemp(prefix="agt-tail-", dir="/tmp"))
+    server = TmuxServer(root, fakes)
+    try:
+        for name in ("Claude only (no observation)", "a Codex turn open"):
+            if name.startswith("Claude"):
+                agent = server.agent("claude")
+                agent.hook("SessionStart", source="startup")
+                agent.hook("UserPromptSubmit")
+            else:
+                Codex(server.agent("codex"), Rollout(root / "rollout.jsonl")).start()
+            time.sleep(1)
+            pid = agentd_pid(server)
+            (r0, b0), c0, t0 = io(pid), cpu(pid), time.monotonic()
+            time.sleep(seconds)
+            (r1, b1), c1, t1 = io(pid), cpu(pid), time.monotonic()
+            per = 2 / (t1 - t0)
+            processes = sum(1 for e in Path("/proc").iterdir() if e.name.isdigit())
+            rows.append(f"| {name} | {(r1 - r0) * per:.0f} | {(b1 - b0) * per / 1024:.0f} KiB | "
+                        f"{(c1 - c0) * per * 1000 / TICKS:.0f} ms | {processes} |")
+    finally:
+        server.kill()
+        shutil.rmtree(root, ignore_errors=True)
+    return rows
+
+
+TICKS = os.sysconf("SC_CLK_TCK")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--turns", type=int, default=300)
@@ -221,6 +263,7 @@ def main() -> None:
         rows: list[str] = []
         for name in ("claude alone", "codex", "claude + codex watched"):
             rows += scene(fakes, name, args.turns, args.threshold)
+        cost = tick_cost(fakes)
     finally:
         shutil.rmtree(fakes_dir, ignore_errors=True)
     print(f"Load average (1 min) {load:.1f} before, {os.getloadavg()[0]:.1f} after.\n")
@@ -231,6 +274,9 @@ def main() -> None:
     print("\n".join(r for r in rows if r.startswith("|")))
     print("\nBackground work (the daemon started a child while no hook ran), and when the slow hooks came:\n")
     print("\n".join(r for r in rows if r.startswith("- ")))
+    print("\nThe daemon per 2 s with no hooks (/proc/<agentd>/io, 10 s):\n")
+    print("| Scene | Read syscalls | Read | CPU | Processes on the machine |\n|---|---|---|---|---|")
+    print("\n".join(cost))
 
 
 if __name__ == "__main__":
