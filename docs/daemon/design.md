@@ -79,7 +79,10 @@ the daemon with `chain`, since the daemon knows each pane's `pane_pid`.
   - Phase 4 moves to control mode with the spike's recipe (case k): the
     daemon's own session `_peek-agentd` (`destroy-unattached on`), flags
     `no-output,ignore-size`, size `1000x100`, reattach after `%exit` while
-    the server lives. The session name alone is not enough protection: every
+    the server lives. Always `tmux -u`: a daemon started without a UTF-8
+    locale would otherwise get a client tmux treats as ASCII, and every
+    control character (our separators) and non-ASCII character (`✳`, `…`)
+    would come back as `_`. `AGENTD_TRANSPORT=spawn` turns control mode off. The session name alone is not enough protection: every
     client consumer also skips `client_control_mode` clients (Rust visibility,
     `agent-spaces layout`, `agent-jump`, `ag_focused_client`). Output is not
     escaped: match `%end`/`%error` by command number, and never read
