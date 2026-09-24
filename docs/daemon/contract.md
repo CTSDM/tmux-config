@@ -67,7 +67,7 @@ values are part of the contract.
 | `@agent_needs_id` | id of the call that is waiting; only while `needs` |
 | `@agent_since` | epoch seconds of the last state **change** |
 | `@agent_prev` | state before compaction |
-| `@agent_tool` | last tool label, `#` written as `##` |
+| `@agent_tool` | last tool label, `#` written as `##` (**CHANGE C9**: every value is stored whole; bash loses a trailing `;`, which tmux reads as a command separator) |
 | `@agent_msg` | last reply (done) or error text, `#` written as `##` |
 | `@agent_subs` | running subagents; `0` and unset mean the same |
 | `@agent_subtypes` | e.g. `2 Explore, 1 Plan`; unset when none |
