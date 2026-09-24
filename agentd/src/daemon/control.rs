@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 /// Our session: `_peek-` keeps it out of the bar, the board, the session
 /// search, agent-next and the blink; destroy-unattached removes it when we go.
@@ -38,7 +38,8 @@ pub struct Control {
 impl Control {
     /// Attaches: our session (created if needed, gone when we detach), no
     /// pane output, never sizing a window, never the narrowest client.
-    pub fn start(socket: &Path) -> std::io::Result<Control> {
+    /// `sessions_changed` is told when a session is created or closed.
+    pub fn start(socket: &Path, sessions_changed: Rc<Notify>) -> std::io::Result<Control> {
         let mut child = Command::new("tmux")
             // UTF-8 whatever the locale: a client tmux takes for ASCII gets
             // `_` for every control character and non-ASCII letter.
@@ -103,6 +104,7 @@ impl Control {
                         ok,
                         lines,
                     }) => deliver(&reader_pending, ok, lines),
+                    Some(Event::SessionsChanged) => sessions_changed.notify_one(),
                     Some(Event::Exit) => break,
                     _ => {}
                 }
@@ -180,6 +182,7 @@ enum Event {
         ok: bool,
         lines: Vec<String>,
     },
+    SessionsChanged,
     Exit,
 }
 
@@ -201,6 +204,8 @@ impl Parser {
                     None
                 } else if line == "%exit" || line.starts_with("%exit ") {
                     Some(Event::Exit)
+                } else if line == "%sessions-changed" {
+                    Some(Event::SessionsChanged)
                 } else {
                     None // a notification
                 }
@@ -256,7 +261,7 @@ mod tests {
         let mut p = Parser::default();
         let events = feed(
             &mut p,
-            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
+            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%sessions-changed\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
         );
         assert_eq!(
             events,
@@ -266,6 +271,7 @@ mod tests {
                     ok: true,
                     lines: vec![]
                 },
+                Event::SessionsChanged,
                 // A forged end (another number) is content.
                 Event::Block {
                     ours: true,

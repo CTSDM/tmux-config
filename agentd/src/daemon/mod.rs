@@ -183,6 +183,7 @@ async fn serve(
     spawn_local(daemon.clone().saver());
     // Phase 4: attach our control client now (spike-control-mode.md, case k).
     daemon.tmux.attach();
+    spawn_local(daemon.clone().sessions());
     // K5: whatever needed you before we started blinks again.
     daemon.blink();
 
@@ -1115,6 +1116,15 @@ impl Daemon {
         if let Some(r) = self.reminders.borrow_mut().remove(pane) {
             r.timer.abort();
             self.save.notify_one();
+        }
+    }
+
+    /// Z1: whenever sessions come and go, ours closes if it is the last one.
+    async fn sessions(self: Rc<Self>) {
+        let changed = self.tmux.sessions_changed();
+        loop {
+            changed.notified().await;
+            self.tmux.close_if_alone().await;
         }
     }
 
