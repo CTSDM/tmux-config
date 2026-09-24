@@ -175,3 +175,17 @@ def test_hook_smoke(server: TmuxServer) -> None:
     assert options["@agent_state"] == "ready"
     assert options["@agent_session"] == agent.session_id
     assert options["@agent_model"] == "test-model"
+
+
+def test_the_tmux_under_test(server: TmuxServer, tmp_path: Path) -> None:
+    """The server, the harness and the hooks all run the same tmux (AGENT_TMUX when set)."""
+    import shutil as sh
+
+    from harness.tmux import TMUX_BIN
+
+    tmux = str(TMUX_BIN or sh.which("tmux"))
+    expected = subprocess.run([tmux, "-V"], capture_output=True, text=True).stdout.split()[-1]
+    assert server.tmux("display", "-p", "#{version}") == expected
+    _, env = probe(server.agent("claude"), tmp_path)
+    found = subprocess.run(["sh", "-c", "command -v tmux"], env=env, capture_output=True, text=True).stdout.strip()
+    assert Path(found).resolve() == Path(tmux).resolve()

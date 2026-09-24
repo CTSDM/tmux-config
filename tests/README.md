@@ -21,6 +21,7 @@ uv run pyright                         # strict
 | `AG_TEST_TMPDIR` | where temp dirs go (default `/tmp`; Unix socket paths must stay short) |
 | `AG_TEST_KEEP=1` | keep each test's temp dir (sink, logs, `state/tmux-agents/`) |
 | `AGENTD_*` | passed on to the test servers, so agentd sees them (e.g. `AGENTD_TRANSPORT=spawn`, the fallback) |
+| `AGENT_TMUX` | a tmux binary to test instead of the one in PATH: first in the test servers' PATH, so the harness, the hooks and agentd all run it; the report header names it |
 
 Every test has its own server, runtime dir and sound debounce, so tests
 are independent and the suite must pass the same in series and with `-n`.

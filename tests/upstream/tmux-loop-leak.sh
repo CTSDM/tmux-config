@@ -3,7 +3,7 @@
 # leaks a little memory each time the status line is drawn. The server's RSS
 # grows linearly with redraws; the same line without loops stays flat.
 #
-#   ./tmux-loop-leak.sh [loop|plain] [redraws]
+#   ./tmux-loop-leak.sh [loop|plain|<format>] [redraws]
 #
 # Vanilla tmux, isolated servers (-L), no config; both killed by name at the end.
 set -u
@@ -12,11 +12,17 @@ name=loop-leak-$$
 t() { env -u TMUX -u TMUX_PANE tmux -L "$name" "$@"; }
 term() { env -u TMUX -u TMUX_PANE tmux -L "$name-term" "$@"; }
 
-if [[ $kind == loop ]]; then unit='#{S:x}'; else unit='#{session_name}'; fi
+case $kind in
+  loop) unit='#{S:x}' ;;
+  plain) unit='#{session_name}' ;;
+  *) unit=$kind ;; # any format, e.g. '#{W:x}'
+esac
 line=$(for _ in $(seq 100); do printf '%s' "$unit"; done)
 
 t -f /dev/null new-session -d -s main -x 200 -y 50 'sleep 600'
 t new-session -d -s other 'sleep 600'
+for _ in 1 2 3; do t new-window -d -t main: 'sleep 600'; done # windows and panes to loop over
+t split-window -d -t main: 'sleep 600'; t split-window -d -t main: 'sleep 600'
 t set -g 'status-format[0]' "$line"
 # A real client, so that the status line is drawn: attached from a pane of a
 # second server, which plays the terminal.

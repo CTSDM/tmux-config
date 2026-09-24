@@ -42,6 +42,8 @@ SOUNDS = (
     "fight-like-a-man",
 )
 SPACE = "test"
+# A tmux to test instead of the one in PATH (e.g. a build of a newer release).
+TMUX_BIN: Path | None = Path(os.environ["AGENT_TMUX"]).resolve() if os.environ.get("AGENT_TMUX") else None
 _servers = itertools.count(1)
 
 type Focus = Literal["none", "client", "flag", "terminal"]
@@ -118,6 +120,12 @@ class TmuxServer:
 
         keep = ("PATH", "USER", "LOGNAME", "TZ")
         self.env: dict[str, str] = {k: os.environ[k] for k in keep if k in os.environ}
+        if TMUX_BIN is not None:
+            # AGENT_TMUX: this tmux first in PATH, for the harness (subprocess
+            # looks programs up in the PATH it is given), the hooks and agentd.
+            (root / "bin").mkdir(exist_ok=True)
+            (root / "bin" / "tmux").symlink_to(TMUX_BIN)
+            self.env["PATH"] = f"{root / 'bin'}:{self.env.get('PATH', '')}"
         self.env.update(uv_dirs())
         # The implementation's own knobs, e.g. AGENTD_TRANSPORT=spawn.
         self.env.update({k: v for k, v in os.environ.items() if k.startswith("AGENTD_") and v})
