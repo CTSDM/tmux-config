@@ -136,6 +136,17 @@ entry points follow it, so tests, cutover and rollback use one config:
 
 Rollback: unset `@agentd`, reinstall the bash hooks.
 
+**Agents already running at cutover.** Claude Code and Codex read their hook
+commands when they start: agents running when `agents/install` switches to
+`agentd hook` keep calling the bash `agent-hook` until restarted. Two owners
+for their panes (the bash Codex bookkeeping next to the daemon's observer and
+reconcile) and two animators (bash `agent-blink` and the daemon's blink) must
+not happen, so `agent-hook` itself follows the switch: with `@agentd` set it
+hands the event to `agentd hook` (`exec`, one extra tmux call, only for the
+agents started before cutover). From the moment `@agentd` is set every pane
+has one owner, the daemon. Phase 5 designs the reverse (rollback) the same
+way.
+
 ## Test seams (both implementations)
 
 Needed so the same black-box suite runs against bash and Rust without
