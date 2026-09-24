@@ -4,6 +4,9 @@ AG_BIN=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 AG_RUN=${XDG_RUNTIME_DIR:-/tmp}/tmux-agents                  # running subagents, per session
 AG_STATE=${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agents   # debug logs (touch $AG_STATE/debug)
 US=$'\x1f'   # field separator for tmux output: unlike a tab, empty fields survive `read`
+# `list-clients -f` for the clients of people: agentd's own control-mode
+# client (session _peek-agentd) never counts as one.
+AG_USER_CLIENTS='#{==:#{client_control_mode},0}'
 
 [[ -e $AG_STATE/debug ]] && exec 2>>"$AG_STATE/errors.log"
 
@@ -67,7 +70,7 @@ ag_focused_client() {
     printf '%s\n' "$AG_FOCUS_CLIENT"
     return 0
   fi
-  clients=$(tmux list-clients -F "#{client_name}$US#{client_pid}$US#{client_flags}") || return 1
+  clients=$(tmux list-clients -f "$AG_USER_CLIENTS" -F "#{client_name}$US#{client_pid}$US#{client_flags}") || return 1
   win=$(ag_hyprctl activewindow -j 2>/dev/null | jq -r '.pid // empty' 2>/dev/null)
   while IFS=$US read -r name pid flags; do
     if [[ -n $win ]]; then
