@@ -148,7 +148,11 @@ not happen, so `agent-hook` itself follows the switch: with `@agentd` set it
 hands the event to `agentd hook` (`exec`, one extra tmux call, only for the
 agents started before cutover). From the moment `@agentd` is set every pane
 has one owner, the daemon. Phase 5 designs the reverse (rollback) the same
-way.
+way: `agentd hook` gives its events to the bash `agent-hook` while
+`$XDG_RUNTIME_DIR/tmux-agents/agentd.off` exists (one `stat` per event), and
+the daemon doesn't start then. Rollback, in order: create that file,
+`agents/install --bash`, unset `@agentd` (and drop it from `tmux.conf`),
+`agentd ctl stop`.
 
 ## Test seams (both implementations)
 

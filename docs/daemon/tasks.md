@@ -104,4 +104,18 @@ Subscriptions (`refresh-client -B`) are left out: with control mode the
 blink's refresh (`list-panes -a` every 6 frames) is cheap. Revisit if a
 measurement shows polling.
 
-Phase 5 (cutover) is written when phase 4 closes.
+## Phase 5: cutover (with the user)
+
+Everything up to the last step happens off the live system. The last step,
+switching the live setup, is done with the user, who decides when.
+
+| Id | Owner | Status | Task |
+|---|---|---|---|
+| T5.1 | implementador | todo | **`agent-hook` follows the switch** (design.md, "Agents already running at cutover"): after I1, if `@agentd` is set and executable, `exec "$agentd" hook "$kind"` with the same stdin. Bash Codex observers of before (`--observe`) then end up in `agentd hook`, where I4 drops them (not the agent's descendants): check it. `pane-focus-in[41]` goes back to closing `@agent_notify_id` in both modes (only bash sets it, C3), so notifications shown before cutover still close when seen. |
+| T5.2 | implementador | todo | **Rollback switch for `agentd hook`:** if `$XDG_RUNTIME_DIR/tmux-agents/agentd.off` exists, the hook client runs the bash `agent-hook <kind>` next to it (`@agents_bin` is not needed: the path comes from the same install) with the payload it read, waits, exits 0; and `agentd daemon`/`ensure` exit at once. One `stat` per event. |
+| T5.3 | implementador | todo | **Install:** `setup.sh` builds `agentd` (`cargo build --release --locked`) and installs it atomically to `~/.local/bin/agentd` (temp file + rename, so a running daemon keeps its inode); `agentd ctl stop` (the daemon saves its state, clears its blink options and exits; the next hook starts the new one). `agents/install --agentd <path>` writes `<path> hook claude\|codex` into every Claude profile and Codex (same timeouts, backups, `--print`), `agents/install --bash` writes `agent-hook` back. `tmux.conf`: `if-shell 'test -x "$HOME/.local/bin/agentd"'` → `set -g @agentd` before `agents.conf` is sourced, so a machine without the build stays on bash. |
+| T5.4 | implementador | todo | **Docs:** README, docs/guide.md (what the user sees: nothing changes, `agentd ctl status`, how to go back), docs/internals.md (agentd: shape, switch, transport, observation, state file, debugging with `AGENTD_TRANSPORT=spawn` and the debug log). |
+| T5.5 | tester | todo | **Rehearsal** on an isolated server with the daemon branch's full `tmux.conf`: fake agents started with the bash hook, then the switch (install `--agentd`, `@agentd` set): old agents keep working through `agent-hook` → `agentd hook` (one owner: no bash Codex bookkeeping, no second animator, pre-cutover notifications close when seen); new agents use `agentd hook`. Then the rollback (`agentd.off`, `--bash`, `@agentd` unset, `ctl stop`): back to bash with the same checks. Real `setup.sh` into a temp `HOME`. |
+| T5.6 | arquitecto + user | todo | **The switch, live:** merge `daemon` into `main`, `setup.sh`, `agents/install --agentd ~/.local/bin/agentd`, reload tmux, check with `agentd ctl status` and real sessions; rollback steps ready. Only when the user says so. |
+
+Phases 6 (spaces, optional) and 7 (deleting bash, after a while live) later.
