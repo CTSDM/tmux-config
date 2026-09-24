@@ -11,11 +11,14 @@ git clone <this repo> ~/.config/tmux
 ~/.config/tmux/setup.sh
 ```
 
-`setup.sh` installs TPM and the plugins, enables the commit leak guard and runs
-`agents/install`, which registers the agent hook with every Claude Code profile
-(`~/.claude`, `~/.config/claude/*/`) and with Codex (`~/.codex/hooks.json`).
-`agents/install --uninstall` removes it again. Needs `jq`, `python3`, `fzf`, `uv`, a
-notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
+`setup.sh` installs TPM and the plugins, enables the commit leak guard, builds
+`agentd` (the agent layer's daemon, in Rust) into `~/.local/bin/agentd` and
+runs `agents/install`, which registers the agent hook with every Claude Code
+profile (`~/.claude`, `~/.config/claude/*/`) and with Codex
+(`~/.codex/hooks.json`): `agentd hook`, or the bash `agent-hook` when agentd
+could not be built. `agents/install --uninstall` removes it again. Needs `jq`,
+`python3`, `fzf`, `uv`, a notification daemon (mako, dunst, ...), for sounds
+PipeWire's `pw-play`, and for agentd a Rust toolchain (`cargo`).
 
 ## Documentation
 
@@ -23,7 +26,9 @@ notification daemon (mako, dunst, ...) and, for sounds, PipeWire's `pw-play`.
   agent states, notifications, sounds, spaces, moving between sessions,
   mission control, troubleshooting.
 - [docs/internals.md](docs/internals.md): how it works, for changing it,
-  including the pitfalls we hit.
+  including agentd and the pitfalls we hit.
+- [docs/daemon/](docs/daemon/): agentd's design, the behavior contract both
+  implementations keep, and its task log.
 
 At a glance: a two-row bar (your space's sessions, then this session's
 windows) with a glyph per agent (`●` working, `▲` needs you, `✓` done, `○`
@@ -32,6 +37,21 @@ work spaces that never mix, and `prefix a` / `prefix u` / `prefix e` to get
 anywhere.
 
 ## Development
+
+agentd's checks (format, lints, unit and integration tests against isolated
+tmux servers, dependency audit):
+
+```sh
+agentd/check.sh
+```
+
+The contract suite runs the same black-box tests against either
+implementation (`tests/README.md`):
+
+```sh
+cd tests && uv run pytest                                  # bash
+AGENT_IMPL=rust AGENTD=../agentd/target/release/agentd uv run pytest
+```
 
 Codex integration tests (isolated tmux server, no API calls):
 

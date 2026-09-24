@@ -267,12 +267,44 @@ git clone <this repo> ~/.config/tmux
 ```
 
 `setup.sh` installs the plugins, enables the commit leak guard, creates
-`spaces.conf` from `spaces.example` and the sounds folder, and runs
-`agents/install`, which adds the hook to every Claude Code profile
-(`~/.claude`, `~/.config/claude/*/`) and to Codex (`~/.codex/hooks.json`),
-keeping a `.pre-agents.bak` of each file. `agents/install --uninstall` removes
-it. Needs `jq`, `python3` (for Codex observation), `fzf`, `uv` (for notifications), a notification daemon (mako)
-and PipeWire's `pw-play` (for sounds).
+`spaces.conf` from `spaces.example` and the sounds folder, builds agentd into
+`~/.local/bin/agentd`, and runs `agents/install`, which adds the hook to every
+Claude Code profile (`~/.claude`, `~/.config/claude/*/`) and to Codex
+(`~/.codex/hooks.json`), keeping a `.pre-agents.bak` of each file.
+`agents/install --uninstall` removes it. Needs `jq`, `python3` (for Codex
+observation), `fzf`, `uv` (for notifications), a notification daemon (mako),
+PipeWire's `pw-play` (for sounds) and a Rust toolchain (`cargo`, for agentd).
+
+### agentd
+
+agentd is the program behind all of the above: one small daemon per tmux
+server, started by itself (from the tmux config or the first hook) and gone
+with its server. Nothing you see changes with it; it answers the agents'
+hooks faster and blinks for a fraction of the CPU. Without `cargo`,
+`setup.sh` leaves everything on the bash scripts in `agents/bin`, which do the
+same.
+
+- **Is it running?** `~/.local/bin/agentd ctl status` (inside tmux) prints its
+  pid, how it talks to tmux (`control`, normally) and what it tracks.
+- **After updating the repo:** run `setup.sh` again, then
+  `~/.local/bin/agentd ctl stop` in each tmux server; the next hook starts the
+  new binary. Nothing is lost: it saves its state first.
+- **Agents started before you installed it** keep calling the bash hook until
+  they restart; the bash hook hands their events to agentd.
+
+**Going back to bash,** in this order:
+
+```sh
+mkdir -p ~/.local/state/tmux-agents && touch ~/.local/state/tmux-agents/agentd.off
+~/.config/tmux/agents/install --bash
+tmux set -gu @agentd
+~/.local/bin/agentd ctl stop
+```
+
+`agentd.off` lasts: while it exists, the hooks go to bash (even from agents
+that still call agentd), no daemon starts, the tmux config doesn't turn agentd
+on, and `setup.sh` registers the bash hook. To return to agentd, delete it,
+run `setup.sh` and reload the config (`prefix R`).
 
 ## Troubleshooting
 
@@ -287,6 +319,8 @@ and PipeWire's `pw-play` (for sounds).
   `~/.config/tmux/agents/bin/agent-notify "$TMUX_PANE" normal test hello`.
 - **No sounds:** is the file there, with the right name? Sounds off or space
   muted (`prefix Q`)? Test: `~/.config/tmux/agents/bin/agent-sound enemy-down`.
-- **Anything else:** `touch ~/.local/state/tmux-agents/debug` logs every hook
-  event (with your prompts) and script errors into that folder. Delete the
-  `debug` file when done.
+- **Anything else:** `touch ~/.local/state/tmux-agents/debug` makes the bash
+  hook log every event (with your prompts) and the scripts log their errors
+  into that folder; agentd writes its errors to `errors.log` there too, as
+  `agentd[<pid>] ...`. Delete the `debug` file when done. `agentd ctl status` shows what agentd tracks; if it
+  seems stuck, `agentd ctl stop` (the next hook starts it again).
