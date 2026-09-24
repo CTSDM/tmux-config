@@ -522,3 +522,52 @@ fn b1_background_shells_are_counted_on_the_tick() {
         server.status()["background"] == json!({})
     });
 }
+
+#[test]
+fn t4_1_control_mode_session_of_its_own() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    assert_eq!(server.status()["transport"], "control");
+    let sessions = |server: &Server| server.tmux(&["list-sessions", "-F", "#{session_name}"]);
+    assert!(
+        sessions(&server).lines().any(|s| s == "_peek-agentd"),
+        "{}",
+        sessions(&server)
+    );
+    assert_eq!(
+        server.tmux(&["show", "-t", "=_peek-agentd:", "-v", "destroy-unattached"]),
+        "on"
+    );
+    let clients = server.tmux(&[
+        "list-clients",
+        "-F",
+        "#{client_control_mode} #{client_session} #{client_flags}",
+    ]);
+    assert!(clients.starts_with("1 _peek-agentd "), "{clients}");
+    assert!(
+        clients.contains("ignore-size")
+            && clients.contains("no-output")
+            && clients.contains("UTF-8"),
+        "{clients}"
+    );
+    // Killed from outside: it attaches again, and answers meanwhile.
+    server.tmux(&["kill-session", "-t", "=_peek-agentd"]);
+    let pane = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    server.hook(&pane, ev("SessionStart"));
+    wait_for("attached again", || {
+        server.hook(&pane, ev("UserPromptSubmit"));
+        sessions(&server).lines().any(|s| s == "_peek-agentd")
+    });
+    assert_eq!(
+        server.tmux(&["show", "-p", "-t", &pane, "-qv", "@agent_state"]),
+        "working"
+    );
+    // Gone with the daemon.
+    server.stop_daemon();
+    wait_for("its session gone", || {
+        !sessions(&server).lines().any(|s| s == "_peek-agentd")
+    });
+    assert!(sessions(&server).lines().any(|s| s == "main"));
+}

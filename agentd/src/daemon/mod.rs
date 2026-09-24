@@ -7,6 +7,7 @@
 //! that runs for weeks doesn't keep every pane it has seen. Everything runs
 //! on one thread.
 
+mod control;
 mod effects;
 mod notify;
 mod procs;
@@ -179,6 +180,8 @@ async fn serve(
         daemon.arm(&pane, left, r.since);
     }
     spawn_local(daemon.clone().saver());
+    // Phase 4: attach our control client now (spike-control-mode.md, case k).
+    daemon.tmux.attach();
 
     let server_gone = loop {
         tokio::select! {
@@ -320,6 +323,7 @@ impl Daemon {
             "status" => Reply::data(json!({
                 "pid": std::process::id(),
                 "tmux": self.tmux.env(),
+                "transport": self.tmux.transport(),
                 "started_ms": self.started_ms,
                 "state": &*self.state.borrow(),
                 "reminders": self.reminders.borrow().iter()
@@ -514,7 +518,16 @@ impl Daemon {
         let (kind, ev) = (request.kind, request.event.ev.as_str());
         let want_vis = core::may_need_visibility(kind, ev);
         let want_panes = core::may_need_panes(kind, ev);
-        let read = self.tmux.read(&request.pane, want_vis, want_panes).await?;
+        let read = match self.tmux.read(&request.pane, want_vis, want_panes).await {
+            Ok(read) => read,
+            Err(missing) => {
+                log(&format!(
+                    "{} {}: read failed ({missing:?})",
+                    request.pane, request.event.ev
+                ));
+                return Err(missing);
+            }
+        };
         if want_panes {
             self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
         }
@@ -882,7 +895,12 @@ impl Daemon {
             let fmt = "#{pane_id}\x1f#{@agent}";
             match self
                 .tmux
-                .run(&["list-panes".into(), "-a".into(), "-F".into(), fmt.into()])
+                .run(&[vec![
+                    "list-panes".into(),
+                    "-a".into(),
+                    "-F".into(),
+                    fmt.into(),
+                ]])
                 .await
             {
                 Ok(out) => out
