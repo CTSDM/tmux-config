@@ -1,4 +1,3 @@
-use std::io;
 use std::process::ExitCode;
 
 use agentd::cli::{self, Command};
@@ -11,10 +10,8 @@ fn main() -> ExitCode {
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
     match cli::parse(&args) {
-        Some(Command::Hook(_kind)) => {
-            // Not implemented yet. Read the event anyway, so the agent's write
-            // never fails, and stay silent (contract I2).
-            let _ = io::copy(&mut io::stdin().lock(), &mut io::sink());
+        Some(Command::Hook(kind)) => {
+            agentd::hook::run(kind);
             ExitCode::SUCCESS
         }
         Some(command) => {

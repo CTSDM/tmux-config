@@ -3,5 +3,9 @@
 //! is in docs/daemon/contract.md.
 
 pub mod cli;
+pub mod client;
 pub mod core;
+pub mod hook;
 pub mod identity;
+pub mod procfs;
+pub mod proto;
