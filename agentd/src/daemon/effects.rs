@@ -58,7 +58,7 @@ pub async fn run(ctx: &Ctx, effect: &Effect) {
         ),
         Effect::Blink => spawn(ctx, &helper("agent-blink"), &[]),
         // Handled by the daemon before the ack.
-        Effect::Options(_) | Effect::RemindArm { .. } | Effect::RemindCancel => {}
+        Effect::Options(_) | Effect::RemindArm { .. } | Effect::RemindCancel | Effect::Watch => {}
     }
 }
 

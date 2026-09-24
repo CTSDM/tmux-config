@@ -120,6 +120,7 @@ pub fn event_from_json(json: &Value) -> Option<Event> {
         source: field("source"),
         model: field("model"),
         transcript: field("transcript_path"),
+        ..Event::default()
     })
 }
 

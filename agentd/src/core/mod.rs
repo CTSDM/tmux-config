@@ -3,14 +3,16 @@
 //! visibility and everything read from tmux or /proc arrive in [`Facts`].
 //! Rule ids in comments and test names are those of docs/daemon/contract.md.
 
-mod claude;
+pub mod codex;
+mod events;
 mod text;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-pub use text::{escape_hashes, notify_title, subtypes};
+pub use codex::CodexFacts;
+pub use text::{escape_hashes, line, notify_title, subtypes};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -55,6 +57,14 @@ pub struct Event {
     pub model: String,
     #[serde(rename = "transcript_path")]
     pub transcript: String,
+    /// Codex: `turn_id`.
+    #[serde(rename = "turn_id")]
+    pub turn: String,
+    /// Codex: the call's fingerprint (X2), computed by the hook so no tool
+    /// input leaves it (X8).
+    pub fingerprint: String,
+    /// Codex: `tool_response.accepted` is true (X4).
+    pub accepted: bool,
 }
 
 /// One hook call that passed ownership (I4).
@@ -65,8 +75,11 @@ pub struct Input {
     pub event: Event,
     /// `CLAUDE_CONFIG_DIR` of the agent, if set (H14).
     pub config_dir: Option<String>,
-    /// The agent process found by the ownership walk.
+    /// The agent process found by the ownership walk (or, observing, the
+    /// one the pane tracks).
     pub agent_pid: u32,
+    /// A Codex observation made by the daemon, not a hook (X5).
+    pub observing: bool,
 }
 
 /// The pane as tmux has it when the event is handled (P2), plus what
@@ -87,6 +100,15 @@ pub struct Pane {
     pub space: String,
     /// `@agent_mute_<space>` is `on`.
     pub muted: bool,
+    /// `@agent`, `@agent_turn`, `@agent_transcript`, `@agent_pid`,
+    /// `@agent_pid_start`, `@agent_bg`, `@agent_bg_watch`.
+    pub agent: String,
+    pub turn: String,
+    pub transcript: String,
+    pub agent_pid: String,
+    pub agent_pid_start: String,
+    pub bg: String,
+    pub bg_watch: String,
 }
 
 /// Another pane of the server, for rounds (R).
@@ -110,6 +132,8 @@ pub enum Visibility {
 /// [`may_need_visibility`] says so, `others` when [`may_need_panes`] does.
 #[derive(Debug, Clone)]
 pub struct Facts {
+    /// Codex events only.
+    pub codex: Option<CodexFacts>,
     pub now: i64,
     pub host: String,
     pub pane: Pane,
@@ -173,6 +197,8 @@ pub enum Effect {
     },
     /// Make sure the turn signal runs (K5).
     Blink,
+    /// Observe this Codex pane until its turn is over (X5).
+    Watch,
 }
 
 /// The daemon's own bookkeeping (P2: never seeded from options).
@@ -183,13 +209,15 @@ pub struct State {
     pub subagents: BTreeMap<String, BTreeMap<String, String>>,
     /// Rounds per space: the panes that took part (R).
     pub rounds: BTreeMap<String, BTreeSet<String>>,
+    /// Codex bookkeeping per pane (§6).
+    pub codex: BTreeMap<String, codex::CodexPane>,
 }
 
 /// Whether handling `ev` may need the pane's visibility (V1: entering
 /// `needs`, `done` or `error`). A superset: false means it never does.
 pub fn may_need_visibility(kind: Kind, ev: &str) -> bool {
-    kind == Kind::Claude
-        && matches!(
+    match kind {
+        Kind::Claude => matches!(
             ev,
             "PermissionRequest"
                 | "Notification"
@@ -197,12 +225,24 @@ pub fn may_need_visibility(kind: Kind, ev: &str) -> bool {
                 | "PostCompact"
                 | "Stop"
                 | "StopFailure"
-        )
+        ),
+        // A Codex wait can show up on almost any event (X3).
+        Kind::Codex => true,
+    }
 }
 
 /// Whether handling `ev` may need the other panes of the server (R).
 pub fn may_need_panes(kind: Kind, ev: &str) -> bool {
-    kind == Kind::Claude && ev == "Stop"
+    match kind {
+        Kind::Claude => ev == "Stop",
+        // An observation can end the turn as a Stop (X5).
+        Kind::Codex => matches!(ev, "Stop" | "CodexReconcile"),
+    }
+}
+
+/// Whether handling `ev` may count Codex command trees (X7).
+pub fn may_need_procs(kind: Kind, ev: &str) -> bool {
+    kind == Kind::Codex && matches!(ev, "Stop" | "Interrupt" | "CodexReconcile")
 }
 
 /// Whether handling `ev` may need the agent's background shells (B1).
@@ -231,12 +271,9 @@ pub fn owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32)
     None
 }
 
-/// Handles one hook event. Codex arrives in phase 2.
+/// Handles one hook event (or Codex observation).
 pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
-    match input.kind {
-        Kind::Claude => claude::handle(state, input, facts),
-        Kind::Codex => Vec::new(),
-    }
+    events::handle(state, input, facts)
 }
 
 /// The reminder fired (N4, C1, C2): what to do now that `@agent_remind_after`

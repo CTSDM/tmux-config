@@ -422,6 +422,7 @@ impl Daemon {
             event: request.event.clone(),
             config_dir: request.env.get("CLAUDE_CONFIG_DIR").cloned(),
             agent_pid,
+            observing: false,
         };
         let effects = {
             let mut state = self.state.borrow_mut();
@@ -469,6 +470,7 @@ impl Daemon {
 
     fn facts(&self, read: &Read, vis: Option<core::Visibility>, bg_shells: u32) -> Facts {
         Facts {
+            codex: None,
             now: (now_ms() / 1000) as i64,
             host: self.host.clone(),
             pane: read.pane.clone(),

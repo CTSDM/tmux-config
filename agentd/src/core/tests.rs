@@ -40,6 +40,7 @@ fn tool_ev(name: &str, tool: &str, id: &str, detail: &str) -> Event {
 
 fn facts(p: Pane) -> Facts {
     Facts {
+        codex: None,
         now: NOW,
         host: "box".into(),
         pane: p,
@@ -119,6 +120,7 @@ fn run_in(state: &mut State, pane_id: &str, event: Event, f: Facts) -> Run {
         event,
         config_dir: None,
         agent_pid: 4242,
+        observing: false,
     };
     Run(handle(state, &input, &f))
 }
@@ -487,6 +489,7 @@ fn h14_profile() {
             event: ev("UserPromptSubmit"),
             config_dir: dir.map(String::from),
             agent_pid: 1,
+            observing: false,
         };
         let r = Run(handle(&mut State::default(), &input, &facts(pane())));
         r.opt("@agent_profile").flatten().map(String::from)
