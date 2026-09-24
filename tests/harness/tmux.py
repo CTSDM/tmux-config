@@ -252,6 +252,40 @@ class TmuxServer:
             self.set_global("@agentd", str(self.impl.agentd))
             self.ensure()
 
+    def redraw_growth(self, client: str, redraws: int = 1600, warmup: int = 300) -> float:
+        """Bytes the server's RSS grows per status redraw of `client`: redraws
+        paced through one control client (no process per redraw), RSS sampled
+        every 100, least-squares slope."""
+        ctl = subprocess.Popen(["tmux", "-L", self.name, "-C", "attach"], env=self.env, stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        assert ctl.stdin is not None
+        pipe = ctl.stdin
+
+        def redraw(n: int) -> None:
+            for _ in range(n):
+                pipe.write(f"refresh-client -S -t {client}\n")
+                pipe.flush()
+                time.sleep(0.01)
+
+        def rss() -> int:
+            status = Path(f"/proc/{self.pid}/status").read_text()
+            return int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS"))) * 1024
+
+        try:
+            pipe.write("refresh-client -f no-output\n")
+            redraw(warmup)
+            xs: list[int] = []
+            ys: list[int] = []
+            for k in range(redraws // 100):
+                xs.append(k * 100)
+                ys.append(rss())
+                redraw(100)
+        finally:
+            pipe.close()
+            ctl.wait(timeout=5)
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
+
     def control_clients(self) -> list[tuple[str, str]]:
         """(name, session) of the control-mode clients: the daemon's own."""
         rows = self.tmux("list-clients", "-F", "#{client_control_mode}" + US + "#{client_name}" + US
