@@ -7,6 +7,7 @@
 //! that runs for weeks doesn't keep every pane it has seen. Everything runs
 //! on one thread.
 
+mod blink;
 mod control;
 mod effects;
 mod notify;
@@ -146,7 +147,9 @@ async fn serve(
 
     let saved = store::load(&paths.state, instance);
     let save = Rc::new(Notify::new());
+    let runtime_dir = identity::runtime_dir(env::var_os("XDG_RUNTIME_DIR").as_deref());
     let daemon = Rc::new(Daemon {
+        blink: blink::Blink::new(&runtime_dir, &socket),
         tmux: Tmux::new(socket, instance.pid),
         server: instance,
         seams: Seams::from_env(),
@@ -160,9 +163,7 @@ async fn serve(
         background: RefCell::new(HashMap::new()),
         ticking: Cell::new(false),
         effects_env: effects::Env {
-            sound: sound::Config::from_env(identity::runtime_dir(
-                env::var_os("XDG_RUNTIME_DIR").as_deref(),
-            )),
+            sound: sound::Config::from_env(runtime_dir),
             notifier: Rc::new(notify::Notifier::new(
                 env::var_os("AG_SINK")
                     .filter(|v| !v.is_empty())
@@ -182,6 +183,8 @@ async fn serve(
     spawn_local(daemon.clone().saver());
     // Phase 4: attach our control client now (spike-control-mode.md, case k).
     daemon.tmux.attach();
+    // K5: whatever needed you before we started blinks again.
+    daemon.blink();
 
     let server_gone = loop {
         tokio::select! {
@@ -202,6 +205,7 @@ async fn serve(
         let _ = fs::remove_file(&daemon.paths.state);
     } else {
         daemon.save_now();
+        daemon.stop_blink().await;
     }
     Ok(())
 }
@@ -276,6 +280,7 @@ struct Daemon {
     background: RefCell<HashMap<String, Background>>,
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
+    blink: blink::Blink,
     save: Rc<Notify>,
     effects_env: effects::Env,
     paths: Paths,
@@ -311,6 +316,11 @@ impl Daemon {
     async fn ctl(self: &Rc<Self>, request: &CtlRequest) -> Reply {
         match request.ctl.as_str() {
             "reconcile" => self.reconcile(&request.args).await,
+            "blink" => {
+                self.blink();
+                Reply::ok()
+            }
+            "blink-demo" => self.blink_demo(&request.args).await,
             "seen" => match request.args.as_slice() {
                 [pane] => {
                     let (done, written) = oneshot::channel();
@@ -334,6 +344,7 @@ impl Daemon {
                 "background": self.background.borrow().iter()
                     .map(|(pane, b)| (pane.clone(), b.count))
                     .collect::<BTreeMap<_, _>>(),
+                "blinking": self.blink.targets(),
             })),
             other => Reply::error(format!("unknown command: {other}")),
         }
@@ -1053,6 +1064,7 @@ impl Daemon {
                 }
                 Effect::RemindArm { after, since } => self.arm(pane, after, since),
                 Effect::RemindCancel => self.cancel(pane),
+                Effect::Blink => self.blink(),
                 other => rest.push(other),
             }
         }

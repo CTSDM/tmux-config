@@ -571,3 +571,46 @@ fn t4_1_control_mode_session_of_its_own() {
     });
     assert!(sessions(&server).lines().any(|s| s == "main"));
 }
+
+#[test]
+fn t4_3_blink_takes_turns_with_agent_blink() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    // agent-blink's lock, held as a running agent-blink holds it.
+    let dir = identity::runtime_dir(Some(server.runtime.as_os_str()));
+    fs::create_dir_all(&dir).unwrap();
+    let socket_name = Path::new(&server.socket).file_name().unwrap();
+    let lock = fs::File::create(dir.join(format!("blink-{}.lock", socket_name.display()))).unwrap();
+    rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+    // Left lit by an animator that is gone.
+    server.tmux(&["new-session", "-d", "-s", "old", "sleep 600"]);
+    server.tmux(&["set", "-t", "=old:", "@blink-s", "1"]);
+    let pane = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_state", "needs"]);
+    let blink = |server: &Server, session: &str| -> Vec<String> {
+        server
+            .tmux(&["show", "-t", &format!("={session}:")])
+            .lines()
+            .filter(|l| l.starts_with("@blink"))
+            .map(String::from)
+            .collect()
+    };
+
+    server.start_daemon();
+    sleep(Duration::from_millis(1500));
+    assert_eq!(
+        blink(&server, "main"),
+        [] as [String; 0],
+        "agent-blink draws"
+    );
+    drop(lock);
+    wait_for("the daemon takes over", || {
+        blink(&server, "main").contains(&"@blink-s-kind needs".to_string())
+    });
+    assert_eq!(blink(&server, "old"), [] as [String; 0]);
+    assert!(server.status()["blinking"].to_string().contains("main"));
+    // Stopped: nothing left lit.
+    server.stop_daemon();
+    assert_eq!(blink(&server, "main"), [] as [String; 0]);
+}
