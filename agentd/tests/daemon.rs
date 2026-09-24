@@ -35,6 +35,32 @@ fn tmux_available() -> bool {
 
 impl Server {
     fn start() -> Option<Server> {
+        Server::start_with(&[
+            "-f",
+            "/dev/null",
+            "new-session",
+            "-d",
+            "-s",
+            "main",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "sleep 600",
+        ])
+    }
+
+    /// A server that stays without sessions (exit-empty off), as while tmux
+    /// loads its configuration before the first one.
+    fn start_empty() -> Option<Server> {
+        let conf = env::temp_dir().join(format!("agentd-it-{}-empty.conf", std::process::id()));
+        fs::write(&conf, "set -g exit-empty off\n").unwrap();
+        let server = Server::start_with(&["-f", conf.to_str().unwrap(), "start-server"]);
+        let _ = fs::remove_file(&conf);
+        server
+    }
+
+    fn start_with(first: &[&str]) -> Option<Server> {
         if !tmux_available() {
             eprintln!("tmux not found: skipped");
             return None;
@@ -51,19 +77,7 @@ impl Server {
             runtime,
             daemon: None,
         };
-        server.tmux(&[
-            "-f",
-            "/dev/null",
-            "new-session",
-            "-d",
-            "-s",
-            "main",
-            "-x",
-            "80",
-            "-y",
-            "24",
-            "sleep 600",
-        ]);
+        server.tmux(first);
         server.socket = server.tmux(&["display", "-p", "#{socket_path}"]);
         server.pid = server.tmux(&["display", "-p", "#{pid}"]).parse().unwrap();
         let dir = identity::runtime_dir(Some(server.runtime.as_os_str()));
@@ -884,4 +898,212 @@ fn t4_5_back_when_the_user_has_a_session_again() {
             .lines()
             .any(|s| s == "_peek-agentd")
     );
+}
+
+/// Bash's hook in this checkout.
+const BASH_HOOK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../agents/bin/agent-hook");
+
+impl Server {
+    /// What panes and hooks inherit: this test's runtime and state, the
+    /// sink, no desktop.
+    fn safe_env(&self) {
+        let state = self.runtime.join("state");
+        fs::create_dir_all(state.join("tmux-agents")).unwrap();
+        for (name, value) in [
+            ("XDG_RUNTIME_DIR", self.runtime.clone()),
+            ("XDG_STATE_HOME", state),
+            ("HOME", self.runtime.join("home")),
+            ("AG_SINK", self.runtime.join("sink.jsonl")),
+            ("AG_FOCUS_CLIENT", "none".into()),
+            ("AG_SOUND_PLAYER", "/bin/true".into()),
+        ] {
+            self.tmux(&["set-environment", "-g", name, value.to_str().unwrap()]);
+        }
+        for name in [
+            "DBUS_SESSION_BUS_ADDRESS",
+            "WAYLAND_DISPLAY",
+            "DISPLAY",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "CLAUDE_CONFIG_DIR",
+            "CODEX_HOME",
+        ] {
+            self.tmux(&["set-environment", "-gu", name]);
+        }
+    }
+
+    fn off_file(&self) -> PathBuf {
+        self.runtime.join("state/tmux-agents/agentd.off")
+    }
+
+    /// A pane whose agent (a fake `claude`) runs `<hook> claude` for each
+    /// line written to the fifo it returns: the hook is its child, as with
+    /// Claude Code.
+    fn agent_running(&self, hook: &str) -> (String, PathBuf) {
+        let fake = self.runtime.join("claude");
+        if !fake.exists() {
+            fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
+        }
+        let fifo = self
+            .runtime
+            .join(format!("events-{}", SERVERS.fetch_add(1, Ordering::SeqCst)));
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let script = format!(
+            "while read -r event < {fifo}; do printf '%s\\n' \"$event\" | {hook} claude; done; sleep 600",
+            fifo = fifo.display()
+        );
+        // Separate words: tmux runs it without a shell in between.
+        let pane = self.tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "main:",
+            fake.to_str().unwrap(),
+            "-c",
+            &script,
+        ]);
+        (pane, fifo)
+    }
+}
+
+fn send_event(fifo: &Path, event: Value) {
+    let mut f = fs::OpenOptions::new().write(true).open(fifo).unwrap();
+    writeln!(f, "{event}").unwrap();
+}
+
+#[test]
+fn t5_1_agent_hook_hands_over_to_agentd() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.safe_env();
+    server.tmux(&["set", "-g", "@agentd", env!("CARGO_BIN_EXE_agentd")]);
+    server.start_daemon();
+    // An agent started before the switch: its hook is still bash's.
+    let (pane, fifo) = server.agent_running(BASH_HOOK);
+    send_event(&fifo, ev("UserPromptSubmit"));
+    wait_for("working", || {
+        server.tmux(&["show", "-p", "-t", &pane, "-qv", "@agent_state"]) == "working"
+    });
+    assert!(
+        server.panes().contains(&pane),
+        "the daemon's: {}",
+        server.status()
+    );
+}
+
+#[test]
+fn t5_1_old_bash_codex_observers_are_dropped() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.safe_env();
+    server.tmux(&["set", "-g", "@agentd", env!("CARGO_BIN_EXE_agentd")]);
+    server.start_daemon();
+    let pane = server.new_pane();
+    // What a bash `agent-codex watch` of before runs: detached, not a
+    // descendant of the agent.
+    let mut observer = Command::new("setsid")
+        .args([BASH_HOOK, "codex", "--observe"])
+        .env("TMUX", format!("{},{},0", server.socket, server.pid))
+        .env("TMUX_PANE", &pane)
+        .env("XDG_RUNTIME_DIR", &server.runtime)
+        .env("XDG_STATE_HOME", server.runtime.join("state"))
+        .env("AG_SINK", server.runtime.join("sink.jsonl"))
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let payload =
+        json!({"hook_event_name": "UserPromptSubmit", "session_id": "c1", "turn_id": "t1"});
+    writeln!(observer.stdin.take().unwrap(), "{payload}").unwrap();
+    assert!(observer.wait().unwrap().success());
+    // It reached agentd, whose process-tree check (I4) dropped it.
+    wait_for("the daemon saw it", || server.panes().contains(&pane));
+    assert_eq!(server.pane_options(&pane), [] as [String; 0]);
+    // And bash kept no Codex bookkeeping for it.
+    let bash_files: Vec<_> = fs::read_dir(server.runtime.join("tmux-agents"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with("agentd-") && !n.starts_with("blink-"))
+        .collect();
+    assert_eq!(bash_files, [] as [String; 0]);
+}
+
+#[test]
+fn t5_2_agentd_off_hands_hooks_to_bash_and_starts_nothing() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    server.safe_env();
+    // @agentd still set: bash must not hand the event back.
+    server.tmux(&["set", "-g", "@agentd", env!("CARGO_BIN_EXE_agentd")]);
+    fs::write(server.off_file(), "").unwrap();
+    let (pane, fifo) = server.agent_running(&format!("{} hook", env!("CARGO_BIN_EXE_agentd")));
+    send_event(&fifo, ev("UserPromptSubmit"));
+    wait_for("working, by bash", || {
+        server.tmux(&["show", "-p", "-t", &pane, "-qv", "@agent_state"]) == "working"
+    });
+    assert!(!server.paths.socket.exists(), "no daemon started");
+
+    let env = |c: &mut Command| {
+        c.env("TMUX", format!("{},{},0", server.socket, server.pid))
+            .env("XDG_RUNTIME_DIR", &server.runtime)
+            .env("XDG_STATE_HOME", server.runtime.join("state"))
+            .env_remove("TMUX_PANE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+    };
+    let mut daemon = Command::new(env!("CARGO_BIN_EXE_agentd"));
+    daemon.arg("daemon");
+    env(&mut daemon);
+    let started = Instant::now();
+    assert!(daemon.status().unwrap().success());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let mut ensure = Command::new(env!("CARGO_BIN_EXE_agentd"));
+    ensure.arg("ensure");
+    env(&mut ensure);
+    assert!(ensure.status().unwrap().success());
+    assert!(!server.paths.socket.exists(), "no daemon started");
+}
+
+#[test]
+fn t5_3_ctl_stop_saves_and_exits() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    server.hook(&pane, ev("SessionStart"));
+    let out = server.ctl(&["stop"]);
+    assert!(out.status.success(), "{out:?}");
+    let daemon = server.daemon.as_mut().unwrap();
+    wait_for("the daemon gone", || daemon.try_wait().unwrap().is_some());
+    assert!(server.paths.state.exists(), "state saved");
+    assert!(!server.paths.socket.exists());
+    // Nothing runs: still fine.
+    assert!(server.ctl(&["stop"]).status.success());
+}
+
+#[test]
+fn t4_5_a_daemon_before_the_first_session_stays() {
+    let Some(mut server) = Server::start_empty() else {
+        return;
+    };
+    // Started while tmux loads its configuration: ours is the only session.
+    server.start_daemon();
+    sleep(Duration::from_millis(300));
+    server.tmux(&["new-session", "-d", "-s", "main", "sleep 600"]);
+    sleep(Duration::from_millis(1000));
+    assert_eq!(server.status()["transport"], "control");
+    let sessions = server.tmux(&["list-sessions", "-F", "#{session_name}"]);
+    assert!(sessions.lines().any(|s| s == "_peek-agentd"), "{sessions}");
 }

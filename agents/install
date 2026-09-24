@@ -1,19 +1,36 @@
 #!/usr/bin/env bash
-# agents/install [--uninstall | --print claude|codex]: register agent-hook
-# with Claude Code and Codex.
+# agents/install [--bash | --agentd <path>] [--print claude|codex]
+# agents/install --uninstall
+#   Registers the agent hook with Claude Code and Codex: bash's agent-hook
+#   (the default, or --bash) or `<path> hook claude|codex` (--agentd, the
+#   agentd binary, e.g. ~/.local/bin/agentd).
 #
 #   Claude Code  settings.json of every profile: ~/.claude and each
 #                ~/.config/claude/<profile>/ (or $CLAUDE_CONFIG_DIR)
 #   Codex        ${CODEX_HOME:-~/.codex}/hooks.json. Codex asks you to review
 #                new hooks the next time it starts.
 #
-# Idempotent: hook entries that run agent-hook are replaced, all others are
-# kept. The first run saves each file as <file>.pre-agents.bak.
+# Idempotent: hook entries that run agent-hook or agentd are replaced, all
+# others are kept. The first run saves each file as <file>.pre-agents.bak.
 # --print shows the hooks block without writing anything.
 set -euo pipefail
 
+usage() { sed -n '2,15p' "$0" >&2; exit 2; }
 command -v jq >/dev/null || { echo "install: jq is required" >&2; exit 1; }
-hook=$(cd "${BASH_SOURCE[0]%/*}" && pwd)/bin/agent-hook
+bash_hook=$(cd "${BASH_SOURCE[0]%/*}" && pwd)/bin/agent-hook
+hook=$bash_hook mode=install print=
+while (($#)); do
+  case $1 in
+    --bash) hook=$bash_hook; shift ;;
+    --agentd)
+      [[ -n ${2:-} && -x ${2:-} && ! -d ${2:-} ]] || { echo "install: --agentd needs the agentd binary" >&2; exit 1; }
+      hook="$(cd "$(dirname "$2")" && pwd)/$(basename "$2") hook"
+      shift 2 ;;
+    --uninstall) mode=uninstall; shift ;;
+    --print) print=${2:-}; [[ $print == claude || $print == codex ]] || usage; shift 2 ;;
+    *) usage ;;
+  esac
+done
 hook=${hook/#$HOME/\$HOME} # hooks run through a shell, which expands $HOME
 
 CLAUDE_EVENTS=(SessionStart SessionEnd UserPromptSubmit PreToolUse PostToolUse
@@ -29,7 +46,7 @@ rewrite() {
   if [[ $2 == claude ]]; then events=("${CLAUDE_EVENTS[@]}"); else events=("${CODEX_EVENTS[@]}"); fi
   jq --arg mode "$1" --arg kind "$2" --arg cmd "$hook $2" \
     --argjson events "$(printf '%s\n' "${events[@]}" | jq -R . | jq -s .)" '
-    def ours: (.command // "") | contains("agents/bin/agent-hook");
+    def ours: (.command // "") | contains("agents/bin/agent-hook") or test("(^|/)agentd hook (claude|codex)$");
     .hooks = ((.hooks // {})
       | map_values(map(.hooks |= map(select(ours | not))) | map(select(.hooks | length > 0)))
       | with_entries(select(.value | length > 0)))
@@ -60,12 +77,10 @@ apply() { # <mode> <kind> <file>
   echo "  ${mode}ed  ${file/#$HOME/\~}"
 }
 
-case ${1:-} in
-  --print) echo '{}' | rewrite install "${2:?--print claude|codex}"; exit ;;
-  --uninstall) mode=uninstall ;;
-  "") mode=install ;;
-  *) sed -n '2,13p' "$0" >&2; exit 2 ;;
-esac
+if [[ -n $print ]]; then
+  echo '{}' | rewrite install "$print"
+  exit
+fi
 
 claude_files=()
 [[ -n ${CLAUDE_CONFIG_DIR:-} ]] && claude_files+=("${CLAUDE_CONFIG_DIR%/}/settings.json")

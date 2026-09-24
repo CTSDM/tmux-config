@@ -5,22 +5,33 @@ How the agent-aware tmux setup works, for changing it. For using it, see
 
 ## The idea
 
-Agents report, tmux draws. Claude Code and Codex call `agents/bin/agent-hook`
-on their lifecycle events; the hook writes facts into **pane options** of the
-agent's pane (`@agent_state`, `@agent_needs`, ...). The tmux config turns those
+Agents report, tmux draws. Claude Code and Codex call a hook on their
+lifecycle events; the hook writes facts into **pane options** of the agent's
+pane (`@agent_state`, `@agent_needs`, ...). The tmux config turns those
 options into the bar and the borders with formats: tmux redraws when an option
-changes. Short-lived observers repair missing Codex events and count background
-processes. Everything else (notifications, sounds,
-spaces, mission control) reads the same options.
+changes. Observers repair missing Codex events and count background
+processes. Everything else (notifications, sounds, spaces, mission control)
+reads the same options.
+
+There are two implementations of the hook side, with the same behavior
+(`docs/daemon/contract.md`): **agentd**, a Rust daemon per tmux server that
+the hooks talk to (`agentd hook`, see [agentd](#agentd)), and the bash scripts
+in `agents/bin` (`agent-hook` and its helpers), the reference and the way back.
+The rest of this page describes the behavior through the bash scripts, which
+spell it out; agentd does the same in one process.
 
 ## Files
 
 | file | role |
 | --- | --- |
-| `tmux.conf` | general options and keys; sources the two files below, then TPM |
+| `tmux.conf` | general options and keys; sets `@agentd` when agentd is installed; sources the two files below, then TPM |
 | `theme.conf` | colors (Catppuccin Mocha), status rows, window tabs, borders, menus, popups; the templates of the space line |
 | `agents/agents.conf` | agent formats (glyphs, labels, task names), hooks (seen/unseen, re-checks, relayout), keys |
-| `agents/install` | registers `agent-hook` in every Claude Code profile and in Codex |
+| `agents/install` | registers the hook (`agentd hook` with `--agentd <path>`, `agent-hook` with `--bash`) in every Claude Code profile and in Codex |
+| `setup.sh` | installs everything; builds agentd into `~/.local/bin/agentd` (a new file renamed over the old) |
+| `agentd/` | agentd, the Rust daemon: `src/core` (states, pure), `src/daemon` (tmux transport, effects, blink, observation), `src/hook.rs` (the hook client); `check.sh` |
+| `docs/daemon/` | agentd's design, the behavior contract, its tasks and the control-mode spike |
+| `tests/` | the contract suite, run against either implementation |
 | `agents/bin/agent-hook` | the hook: event JSON on stdin → pane options, notifications, sounds |
 | `agents/bin/agent-codex` | Codex turn/call correlation, incremental rollout reader and execution observer (Python standard library) |
 | `agents/bin/agent-lib.sh` | shared helpers: process tree, Hyprland, focused client, per-client formats, visibility |
@@ -39,8 +50,9 @@ spaces, mission control) reads the same options.
 | `spaces.conf` | folders → spaces; local, git-ignored |
 
 Runtime state lives outside the repo: `$XDG_RUNTIME_DIR/tmux-agents/` (running
-subagents per session, sound debounce, rounds) and
-`~/.local/state/tmux-agents/` (debug logs, only with the `debug` file).
+subagents per session, sound debounce, rounds; agentd's socket, lock and state
+file per tmux server) and `~/.local/state/tmux-agents/` (debug logs, only with
+the `debug` file; `agentd.off`, the way back to bash).
 
 ## Pane options
 
@@ -56,7 +68,7 @@ subagents per session, sound debounce, rounds) and
 | `@agent_subs`, `@agent_subtypes` | hook | running subagents |
 | `@agent_session`, `@agent_transcript`, `@agent_model`, `@agent_mode`, `@agent_profile` | hook | identity |
 | `@agent_prev` | hook | state before compacting |
-| `@agent_notify_id`, `@agent_notify_pid` | agent-notify | the pane's notification and its waiter |
+| `@agent_notify_id`, `@agent_notify_pid` | agent-notify | the pane's notification and its waiter (bash only; agentd keeps its ids in its state file) |
 | `@agent_tests_sound_at` | hook | last "fight like a man" |
 | `@agent_bg`, `@agent_bg_watch` | agent-bgwatch | background shells, and the watcher's pid |
 | `@agent_turn`, `@agent_outcome` | agent-codex | current Codex turn and its terminal result |
@@ -223,7 +235,69 @@ titles). The summary chooses words or glyphs by comparing its plain length to
 Moving between sessions (`next`, `prev`, `go`, the search) uses the same
 list, sorted by name, that the top row draws with `#{S/n:}`.
 
+## agentd
+
+**Shape.** One binary, four commands: `agentd hook claude|codex` (what the
+agents run: reads the event, keeps the fields the contract uses, sends them
+with its parent process chain to the daemon, waits for the ack; never prints,
+always exits 0), `agentd daemon`, `agentd ensure` (start it unless it runs)
+and `agentd ctl status|seen|reconcile|blink|blink-demo|stop`. One daemon per
+tmux server: its files are `agentd-<socket name>-<hash>.{sock,lock,state.json}`
+in `$XDG_RUNTIME_DIR/tmux-agents/`; the lock makes a second one exit at once,
+and a pidfd on the tmux server makes it exit with the server. A hook that
+finds no daemon starts one and waits up to 300 ms. Inside, one thread: each
+pane has an event queue (its events in order; the ack goes out once its
+options are written) and an effect queue (sounds, notifications), and the
+state machine (`src/core`) is pure: event and facts in, option writes and
+effects out.
+
+**The switch.** `tmux.conf` sets the global option `@agentd` to
+`~/.local/bin/agentd` when that file is executable and `agentd.off` doesn't
+exist, and unsets it otherwise. Everything else follows it: `agents.conf`
+starts the daemon (`ensure`), routes focus (`ctl seen`), the reconcile, the
+blink and prefix+Q's preview to it; the bash `agent-hook` and
+`agent-reconcile` hand over to it (agents started before the switch keep
+calling `agent-hook`; old Codex observers end up in `agentd hook` too, where
+the process-tree check drops them). `agentd.off` in
+`~/.local/state/tmux-agents/` turns it all back: `agentd hook` hands each
+event to the bash `agent-hook` of the checkout it was built from (else
+`~/.config/tmux/agents/bin/agent-hook`), and no daemon starts.
+
+**Talking to tmux.** A control-mode client of its own (`tmux -u -C`),
+attached to its own session `_peek-agentd` (`destroy-unattached`, flags
+`no-output,ignore-size`): commands go in as lines, answers come back in
+`%begin`/`%end` blocks matched by their tag. It stays out of sight (contract
+§16): `_peek-*` sessions are skipped by the bar, the board and the searches,
+control-mode clients by every client choice, `prefix s`/`w`/`D` filter both,
+a `client-session-changed` hook moves a user's client that lands in
+`_peek-agentd` (a plain `tmux attach`) to their most recent session, and when
+its session is the last one it closes it and doesn't come back, so the server
+exits as it would without it. If the client goes away the daemon spawns one
+`tmux` per request until it attaches again; `AGENTD_TRANSPORT=spawn` (in the
+daemon's environment) never uses control mode.
+
+**In process.** Sounds (same files and debounce as `agent-sound`), D-Bus
+notifications (a click runs `agent-jump`), reminders (timers), the blink (it
+takes `agent-blink`'s lock, so the two never draw at once, and writes only
+what changes from frame to frame), Codex observation and background shells
+(one 2 s tick, only while something is observed). The state file keeps the
+state machine's memory, reminders and notification ids; it belongs to one
+tmux server instance (pid and start time) and goes when that server dies.
+
+**Debugging.** `agentd ctl status` prints the pid, the transport (`control`
+or `spawn`), its state, reminders, queues, observed panes and what blinks.
+With `~/.local/state/tmux-agents/debug`, errors go to `errors.log` there as
+`agentd[<pid>] ...`. `agentd ctl stop` saves, clears the blink and exits (the
+next hook starts the installed binary). To rule out control mode, stop it and
+start it by hand from a shell in that tmux server:
+`AGENTD_TRANSPORT=spawn setsid -f ~/.local/bin/agentd daemon`.
+
 ## Testing
+
+agentd: `agentd/check.sh` (format, clippy, unit tests, integration tests on
+isolated tmux servers, `cargo deny`). The contract suite in `tests/` runs the
+same black-box tests against either implementation (`tests/README.md`);
+`tests/bench/` measures hook latency, memory and CPU.
 
 Run the Codex lifecycle, concurrency, incremental-reader and real tmux/process
 regressions without an API connection or changes to user configuration:

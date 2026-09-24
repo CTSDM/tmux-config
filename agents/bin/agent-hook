@@ -21,6 +21,14 @@
 kind=${1:-}
 [[ ($kind == claude || $kind == codex) && -n ${TMUX:-} && -n ${TMUX_PANE:-} ]] || exit 0
 payload=$(cat)
+# With agentd (the global option @agentd names its binary) every pane is the
+# daemon's: agents started before the switch still call this script, and bash
+# Codex observers of before end up there too, where the process-tree check
+# (not the agent's descendants) drops them. Not while agentd.off says bash
+# handles everything (rollback): agentd would hand the event back.
+agentd=$(tmux show -gqv @agentd 2>/dev/null)
+[[ -n $agentd && -x $agentd && ! -e ${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agents/agentd.off ]] &&
+  exec "$agentd" hook "$kind" <<<"$payload" >/dev/null 2>&1
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 0
 if [[ -e $AG_STATE/debug ]]; then
   exec >/dev/null 2>>"$AG_STATE/errors.log"

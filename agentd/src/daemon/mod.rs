@@ -22,7 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::UnixListener as StdListener;
@@ -44,6 +44,7 @@ use tokio::time::{sleep, timeout};
 
 use crate::core::codex::{self, After, CodexFacts, Procs};
 use crate::core::{self, Effect, Event, Facts, Input, Kind};
+use crate::debug::log;
 use crate::identity::{self, Paths};
 use crate::procfs;
 use crate::proto::{CtlRequest, HookRequest, Reply, Request};
@@ -74,6 +75,10 @@ pub fn run() -> ExitCode {
 }
 
 fn start() -> io::Result<()> {
+    // Switched off (rollback): bash handles everything.
+    if identity::off() {
+        return Ok(());
+    }
     let tmux_var = env::var_os("TMUX")
         .filter(|v| !v.is_empty())
         .ok_or_else(|| io::Error::other("TMUX is not set"))?;
@@ -175,6 +180,7 @@ async fn serve(
         save,
         paths,
         started_ms: now_ms(),
+        stop: Notify::new(),
     });
     for (pane, r) in saved.reminders {
         let left = r.due_ms.saturating_sub(now_ms()) as f64 / 1000.0;
@@ -199,6 +205,7 @@ async fn serve(
             _ = server.readable() => break true,
             _ = term.recv() => break false,
             _ = int.recv() => break false,
+            _ = daemon.stop.notified() => break false,
         }
     };
     if server_gone {
@@ -286,6 +293,8 @@ struct Daemon {
     effects_env: effects::Env,
     paths: Paths,
     started_ms: u64,
+    /// `ctl stop`: exit as on SIGTERM, once the reply is out.
+    stop: Notify,
 }
 
 impl Daemon {
@@ -293,10 +302,14 @@ impl Daemon {
         let (read, mut write) = stream.into_split();
         let mut line = String::new();
         let mut reader = BufReader::new(read.take(MAX_REQUEST));
+        let mut stop = false;
         let reply = match timeout(REQUEST_TIMEOUT, reader.read_line(&mut line)).await {
             Ok(Ok(n)) if n > 0 => match serde_json::from_str::<Request>(&line) {
                 Ok(Request::Hook(h)) => self.hook(h).await,
-                Ok(Request::Ctl(c)) => self.ctl(&c).await,
+                Ok(Request::Ctl(c)) => {
+                    stop = c.ctl == "stop";
+                    self.ctl(&c).await
+                }
                 Err(e) => Reply::error(format!("bad request: {e}")),
             },
             _ => return,
@@ -304,6 +317,9 @@ impl Daemon {
         if let Ok(mut out) = serde_json::to_vec(&reply) {
             out.push(b'\n');
             let _ = write.write_all(&out).await;
+        }
+        if stop {
+            self.stop.notify_one();
         }
     }
 
@@ -322,6 +338,8 @@ impl Daemon {
                 Reply::ok()
             }
             "blink-demo" => self.blink_demo(&request.args).await,
+            // T5.3: after an upgrade; the next hook starts the new binary.
+            "stop" => Reply::ok(),
             "seen" => match request.args.as_slice() {
                 [pane] => {
                     let (done, written) = oneshot::channel();
@@ -1124,7 +1142,11 @@ impl Daemon {
         let changed = self.tmux.sessions_changed();
         loop {
             changed.notified().await;
-            self.tmux.close_if_alone().await;
+            // Not yet (the user's first session may be on its way): again
+            // after a while, or at the next change.
+            while let Some(wait) = self.tmux.close_if_alone().await {
+                let _ = timeout(wait, changed.notified()).await;
+            }
         }
     }
 
@@ -1159,26 +1181,4 @@ fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
-}
-
-/// Like the bash scripts: errors go to a log only while
-/// `$XDG_STATE_HOME/tmux-agents/debug` exists.
-fn log(message: &str) {
-    let state = env::var_os("XDG_STATE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")));
-    let Some(dir) = state.map(|s| s.join("tmux-agents")) else {
-        return;
-    };
-    if !dir.join("debug").exists() {
-        return;
-    }
-    if let Ok(mut f) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("errors.log"))
-    {
-        let _ = writeln!(f, "agentd[{}] {message}", std::process::id());
-    }
 }

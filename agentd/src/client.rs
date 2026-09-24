@@ -3,6 +3,7 @@
 
 use std::env;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Command, Stdio};
@@ -27,8 +28,12 @@ pub fn paths(tmux: &OsStr) -> Option<Paths> {
 
 /// Starts `agentd daemon` in the background, detached from our stdio (the
 /// hook's stdout is the agent's pipe). The daemon makes itself a session
-/// leader, and a second one exits at once (lock).
+/// leader, and a second one exits at once (lock). Never while agentd is
+/// switched off.
 pub fn start_daemon() -> io::Result<()> {
+    if identity::off() {
+        return Err(io::Error::other("agentd.off"));
+    }
     Command::new(env::current_exe()?)
         .arg("daemon")
         .env_remove("TMUX_PANE")
@@ -54,6 +59,23 @@ pub fn connect_or_start(paths: &Paths, budget: Duration) -> Option<UnixStream> {
         }
     }
     None
+}
+
+/// Waits up to `budget` for the daemon to exit: its lock is free.
+pub fn wait_gone(paths: &Paths, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    loop {
+        let free = File::open(&paths.lock).is_ok_and(|f| {
+            rustix::fs::flock(&f, rustix::fs::FlockOperation::NonBlockingLockShared).is_ok()
+        });
+        if free {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Sends one request and waits up to `timeout` for the reply.
