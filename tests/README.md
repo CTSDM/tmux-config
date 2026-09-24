@@ -38,7 +38,10 @@ rule ids they cover), `bench/` (latency, memory, CPU).
   `"client"` attaches a real client to `main` on a pty and names it in
   `AG_FOCUS_CLIENT`; `"flag"` attaches it but leaves `AG_FOCUS_CLIENT` unset,
   so tmux's `focused` flag decides (`client.focus_in()` / `focus_out()` send
-  the terminal's focus reports).
+  the terminal's focus reports). `"terminal"` attaches it from a pane of a
+  second tmux server, which renders it: `client.screen()` reads it and
+  `client.click(x, y)` sends an SGR mouse click (the bar tests, with
+  `theme=True`, which sources theme.conf and turns the mouse on).
 - `server.agent("claude" | "codex", session, shell=..., split=...)`: a
   `FakeAgent` in a new pane. It is a copy of the Python interpreter named
   `claude` or `codex` (so `/proc/<pid>/comm` matches) running
