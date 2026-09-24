@@ -151,6 +151,9 @@ class TmuxServer:
                     self._setenv("AG_FOCUS_CLIENT", None)
             if conf:
                 self.tmux("source-file", str(impl.conf))
+            # What tmux.conf does on load; after the focus is fixed, since the
+            # daemon reads the seams from its environment once.
+            self.ensure()
         except BaseException:
             self.kill()
             raise

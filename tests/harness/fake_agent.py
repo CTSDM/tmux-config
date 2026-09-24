@@ -142,10 +142,10 @@ def handle(req: Json) -> Json:
 def main() -> None:
     path = sys.argv[sys.argv.index("--control") + 1]
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    # Bind under a temporary name, then rename: the path appears ready.
+    # Bind and listen under a temporary name, then rename: the path appears ready.
     server.bind(path + ".tmp")
-    os.rename(path + ".tmp", path)
     server.listen(8)
+    os.rename(path + ".tmp", path)
     server.settimeout(0.1)
     while True:
         # Reap finished children, as a real agent does.
