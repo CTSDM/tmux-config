@@ -202,6 +202,8 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
                 None => {
                     bg_shells = facts.bg_shells;
                     if bg_shells > 0 {
+                        // Counted now; the daemon keeps it up to date (B1).
+                        w.set("@agent_bg", bg_shells.to_string());
                         effects.push(Effect::Bgwatch {
                             agent_pid: input.agent_pid,
                         });

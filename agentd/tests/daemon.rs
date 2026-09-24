@@ -452,3 +452,73 @@ fn t2_6_bash_reconcile_hands_over_to_agentd() {
     let status = server.status();
     assert!(status["panes"].as_array().unwrap().is_empty() || status["panes"] == json!([pane]));
 }
+
+#[test]
+fn b1_background_shells_are_counted_on_the_tick() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    // A fake claude that left one shell in the background, as Claude's Bash
+    // tool starts them (its command line holds the snapshot path).
+    let fake = server.runtime.join("claude");
+    fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
+    let script = "sh -c 'sleep 600; :' shell-snapshots/snapshot-x & sleep 600; :";
+    let command = format!("{} -c \"{script}\"", fake.display());
+    let pane = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "main:",
+        &command,
+    ]);
+    let pane_pid: u32 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    let mut agent = 0;
+    wait_for("the fake claude", || {
+        agent = agentd::procfs::agent_of(pane_pid).unwrap_or(0);
+        agent != 0
+    });
+    let shell = || {
+        agentd::procfs::children(agent).into_iter().find(|p| {
+            agentd::procfs::entries(*p, "cmdline")
+                .is_some_and(|a| a.join(" ").contains("shell-snapshots/snapshot-"))
+        })
+    };
+    wait_for("the background shell", || shell().is_some());
+    let chain = if agent == pane_pid {
+        json!([[agent, "claude", 0]])
+    } else {
+        json!([[agent, "claude", 0], [pane_pid, "sh", 0]])
+    };
+    let reply = server.call(json!({
+        "v": 1, "kind": "claude", "pane": pane, "event": {"hook_event_name": "Stop", "session_id": "s1"},
+        "chain": chain, "env": {}, "t": 0,
+    }));
+    assert_eq!(reply["ok"], true);
+    // Counted by the Stop itself, then watched.
+    let bg = || server.tmux(&["show", "-pqv", "-t", &pane, "@agent_bg"]);
+    assert_eq!(bg(), "1");
+    assert_eq!(server.status()["background"][&pane], json!(1));
+    // No bash watcher, no @agent_bg_watch (C3).
+    assert!(
+        server
+            .tmux(&["show", "-p", "-t", &pane])
+            .lines()
+            .all(|l| !l.starts_with("@agent_bg_watch"))
+    );
+    // The shell ends: a tick later @agent_bg goes, and so does the watch.
+    Command::new("kill")
+        .arg(shell().unwrap().to_string())
+        .status()
+        .unwrap();
+    wait_for("@agent_bg unset", || bg().is_empty());
+    wait_for("no longer watched", || {
+        server.status()["background"] == json!({})
+    });
+}
