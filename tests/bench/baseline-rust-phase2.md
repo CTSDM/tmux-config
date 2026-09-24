@@ -137,3 +137,40 @@ The rest of the slow hooks are ordinary scheduling noise: Claude alone,
 with no timer at all, also has 0-2 per 300, at 16-20 ms, and the
 `/bin/true` calibration shows the same kind of outliers. The burst scales
 with the number of processes on the machine, not with the agents.
+
+### After T3.6 (the tick walks the agents' trees)
+
+The same `bench/tail.py --turns 300`, twice, with the agentd of 35a8437
+(phase 3: T3.6, and control mode as the tmux transport), load ~1.3.
+First run:
+
+| Scene | Event | n | p50 | p99 | max | > 15 ms | of them, daemon busy at start | of them, background child during | of them, background CPU during | all hooks, daemon busy at start |
+|---|---|---|---|---|---|---|---|---|---|---|
+| claude alone | UserPromptSubmit | 300 | 2.1 | 3.0 | 3.1 | 0 | 0 | 0 | 0 | 0.0% |
+| claude alone | PreToolUse | 300 | 2.1 | 3.0 | 12.4 | 0 | 0 | 0 | 0 | 0.0% |
+| codex | UserPromptSubmit | 300 | 2.2 | 3.0 | 12.4 | 0 | 0 | 0 | 0 | 0.0% |
+| codex | PreToolUse | 300 | 2.3 | 3.2 | 3.8 | 0 | 0 | 0 | 0 | 0.0% |
+| claude + codex watched | UserPromptSubmit | 300 | 2.1 | 3.1 | 13.7 | 0 | 0 | 0 | 0 | 0.0% |
+| claude + codex watched | PreToolUse | 300 | 2.1 | 3.1 | 3.2 | 0 | 0 | 0 | 0 | 0.0% |
+
+| Scene | Read syscalls | Read | CPU | Processes on the machine |
+|---|---|---|---|---|
+| Claude only (no observation) | 0 | 0 KiB | 0 ms | 651 |
+| a Codex turn open | 10 | 1 KiB | 0 ms | 653 |
+Background work (the daemon started a child while no hook ran), and when the slow hooks came:
+
+The daemon per 2 s with no hooks (/proc/<agentd>/io, 10 s):
+
+| Scene | Read syscalls | Read | CPU | Processes on the machine |
+|---|---|---|---|---|
+| Claude only (no observation) | 0 | 0 KiB | 0 ms | 651 |
+| a Codex turn open | 10 | 1 KiB | 0 ms | 653 |
+
+Second run: the same picture (p99 3.0-3.3 ms, max 12.8-13.4 ms, nothing
+over 15 ms, no background CPU burst; 10 reads per tick).
+
+**Before → after:** per 2 s tick with a Codex turn open, ~3,500 reads,
+~175 KiB and ~10 ms of CPU → 10 reads, 1 KiB, 0 ms; the ~10 ms burst every
+2 s is gone, and no hook of 3,600 went over 15 ms (before: 1-7 per scene
+of 300). p99 is now ~3 ms in every scene. The background-child column no
+longer applies: over control mode the daemon spawns no `tmux`.
