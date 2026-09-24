@@ -287,8 +287,10 @@ tmux server instance (pid and start time) and goes when that server dies.
 **Debugging.** `agentd ctl status` prints the pid, the transport (`control`
 or `spawn`), its state, reminders, queues, observed panes and what blinks.
 With `~/.local/state/tmux-agents/debug`, errors go to `errors.log` there as
-`agentd[<pid>] ...`. `agentd ctl stop` saves, clears the blink and exits (the
-next hook starts the installed binary). To rule out control mode, stop it and
+`agentd[<pid>] ...`. `agentd ctl stop` (or SIGTERM) saves, clears the blink
+and exits (the next hook starts the installed binary); with `agentd.off` it
+first closes its open notifications, since no daemon will come back to close
+them when their panes are seen. To rule out control mode, stop it and
 start it by hand from a shell in that tmux server:
 `AGENTD_TRANSPORT=spawn setsid -f ~/.local/bin/agentd daemon`.
 

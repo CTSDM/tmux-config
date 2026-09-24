@@ -61,6 +61,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SAVE_DELAY: Duration = Duration::from_millis(200);
 /// B1's marker of shells started by Claude's Bash tool.
 const SNAPSHOT_SHELL: &str = "shell-snapshots/snapshot-";
+/// Closing notifications on the way out must not hold the exit up.
+const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 /// X5: Codex panes are observed about this often.
 const TICK: Duration = Duration::from_secs(2);
 
@@ -212,6 +214,12 @@ async fn serve(
         // Nothing in it can apply to another server.
         let _ = fs::remove_file(&daemon.paths.state);
     } else {
+        // Switched off (rollback): no daemon comes back to close them when
+        // their panes are seen. Otherwise (an upgrade) the next one does.
+        if identity::off() {
+            let notifier = &daemon.effects_env.notifier;
+            let _ = timeout(CLOSE_BUDGET, notifier.close_all()).await;
+        }
         daemon.save_now();
         daemon.stop_blink().await;
     }
