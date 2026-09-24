@@ -291,3 +291,13 @@ def test_I4_agent_of_another_pane_is_ignored(server: TmuxServer) -> None:
     assert_ignored(
         server, mine, lambda: other.run_hook(json.dumps(ALERTING), env={"TMUX_PANE": mine.pane})
     )
+
+
+@rule("I3", "C9")
+@change("C9")
+@pytest.mark.parametrize("value", ["echo hi;", "a ; b ;", r"find . -exec rm {} \;"])
+def test_C9_values_are_stored_whole(server: TmuxServer, value: str) -> None:
+    """A trailing `;` is part of the value, not a tmux command separator."""
+    agent = server.agent("claude")
+    assert tool_label(agent, "Bash", {"command": value}) == f"Bash: {value}"
+    assert stop_message(agent, value) == value

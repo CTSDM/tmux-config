@@ -279,8 +279,8 @@ def test_K4_unseen_next_to_needs_advances_every_other_frame(server: TmuxServer) 
     wait_session(server, "other", "needs")
     wait_session(server, "main", "unseen")
     fast, slow = sample_both(server, ("other", "main"), 6)
-    ratio = cycle(slow) / cycle(fast)
-    assert between(cycle(fast), FAST) and 1.6 <= ratio <= 2.5, (cycle(fast), cycle(slow))
+    # The speed of a frame is the test above; here, unseen takes every other one.
+    assert 1.6 <= cycle(slow) / cycle(fast) <= 2.5, (cycle(fast), cycle(slow))
 
 
 # --- K5 life -----------------------------------------------------------------------------
