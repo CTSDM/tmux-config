@@ -25,6 +25,11 @@ class Impl:
     agentd: Path | None
     conf: Path
 
+    @property
+    def theme(self) -> Path:
+        """theme.conf of the same checkout: the bar (§15)."""
+        return self.bin.parent.parent / "theme.conf"
+
     def hook_argv(self, kind: str) -> list[str]:
         if self.agentd is not None:
             return [str(self.agentd), "hook", kind]

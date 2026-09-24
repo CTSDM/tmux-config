@@ -18,6 +18,8 @@ import struct
 import subprocess
 import termios
 import threading
+import time
+import unicodedata
 from pathlib import Path
 from typing import Literal
 
@@ -42,7 +44,7 @@ SOUNDS = (
 SPACE = "test"
 _servers = itertools.count(1)
 
-type Focus = Literal["none", "client", "flag"]
+type Focus = Literal["none", "client", "flag", "terminal"]
 
 
 @functools.cache
@@ -65,8 +67,11 @@ class TmuxServer:
       "client"  a client attached to session `main`, named in AG_FOCUS_CLIENT.
       "flag"    that client, AG_FOCUS_CLIENT unset: tmux's focused flag decides
                 (there is no Hyprland socket in the temporary runtime dir).
+      "terminal" like "client", but shown in a pane of a second tmux server
+                that renders it: its screen can be read and clicked (Terminal).
     The focus is fixed before any agent or daemon starts: they inherit it.
     conf: source the implementation's tmux configuration (IMPL.conf).
+    theme: source theme.conf first, as tmux.conf does (the bar), with mouse on.
     """
 
     def __init__(
@@ -76,6 +81,7 @@ class TmuxServer:
         *,
         focus: Focus = "none",
         conf: bool = True,
+        theme: bool = False,
         impl: Impl = IMPL,
     ) -> None:
         self.root = root
@@ -86,7 +92,7 @@ class TmuxServer:
         self.sink = Sink(root / "sink.jsonl")
         self.player_log = root / "tripwire-player.log"
         self.agents: list[FakeAgent] = []
-        self.client: Client | None = None
+        self.client: Client | Terminal | None = None
         self._controls = itertools.count(1)
         self._killed = False
 
@@ -143,12 +149,18 @@ class TmuxServer:
             self.tmux("set", "-t", "main", "@space", SPACE)
             self.socket_path = self.tmux("display", "-p", "#{socket_path}")
             self.pid = int(self.tmux("display", "-p", "#{pid}"))
-            if focus != "none":
+            if focus == "terminal":
+                self.client = Terminal(self, "main")
+                self._setenv("AG_FOCUS_CLIENT", self.client.name)
+            elif focus != "none":
                 self.client = Client(self, "main")
                 if focus == "client":
                     self._setenv("AG_FOCUS_CLIENT", self.client.name)
                 else:
                     self._setenv("AG_FOCUS_CLIENT", None)
+            if theme:
+                self.tmux("source-file", str(impl.theme))
+                self.set_global("mouse", "on")
             if conf:
                 self.tmux("source-file", str(impl.conf))
             # What tmux.conf does on load; after the focus is fixed, since the
@@ -420,3 +432,78 @@ class Client:
             os.close(self.master)
         except OSError:
             pass
+
+
+class Terminal:
+    """A real client of the test server, attached from a pane of a second,
+    outer tmux server (`<name>-outer`) that renders it: its screen can be
+    read (capture-pane) and clicked (SGR mouse reports sent as input)."""
+
+    def __init__(self, server: TmuxServer, session: str, cols: int = 200, rows: int = 50) -> None:
+        self.server = server
+        self.outer = f"{server.name}-outer"
+        self._outer("-f", "/dev/null", "new-session", "-d", "-s", "t", "-x", str(cols), "-y", str(rows),
+                    "--", "env", "-u", "TMUX", "-u", "TMUX_PANE", "tmux", "-L", server.name, "attach",
+                    "-t", session)
+        self._outer("set", "-g", "status", "off")
+        # The client's name is its terminal: the outer pane's tty.
+        self.name = self._outer("display", "-p", "-t", "t", "#{pane_tty}")
+        self._last_click = 0.0
+        self.pane = self._outer("display", "-p", "-t", "t", "#{pane_id}")
+        eventually(
+            lambda: server.tmux("list-clients", "-F", "#{client_name}").splitlines(),
+            lambda names: self.name in names,
+            5,
+            f"terminal client {self.name} attached",
+        )
+
+    def _outer(self, *args: str) -> str:
+        done = subprocess.run(["tmux", "-L", self.outer, *args], env=self.server.env,
+                              capture_output=True, text=True)
+        if done.returncode != 0:
+            raise RuntimeError(f"outer tmux {' '.join(args)}: {done.stderr.strip()}")
+        return done.stdout.removesuffix("\n")
+
+    def screen(self) -> list[str]:
+        """The client's screen as text, one string per row (row 0 on top)."""
+        return self._outer("capture-pane", "-p", "-t", self.pane).split("\n")
+
+    def click(self, x: int, y: int, button: int = 0) -> None:
+        """Press and release at column x, row y (1-based), as a terminal
+        reports it in SGR mouse mode. Clicks are kept further apart than
+        tmux's double-click-time, or the second would be a DoubleClick."""
+        gap = int(self.server.global_option("double-click-time") or 300) / 1000 + 0.1
+        time.sleep(max(0.0, self._last_click + gap - time.monotonic()))
+        self._last_click = time.monotonic()
+        for end in ("M", "m"):
+            report = f"\x1b[<{button};{x};{y}{end}".encode()
+            self._outer("send-keys", "-t", self.pane, "-H", *(f"{b:02x}" for b in report))
+
+    def value(self, fmt: str) -> str:
+        for line in self.server.tmux("list-clients", "-F", "#{client_name}" + US + fmt).splitlines():
+            name, _, rest = line.partition(US)
+            if name == self.name:
+                return rest
+        raise RuntimeError(f"client {self.name} is gone")
+
+    def switch(self, target: str) -> None:
+        self.server.tmux("switch-client", "-c", self.name, "-t", target)
+
+    def focus_in(self) -> None:
+        self._outer("send-keys", "-t", self.pane, "-H", "1b", "5b", "49")
+
+    def focus_out(self) -> None:
+        self._outer("send-keys", "-t", self.pane, "-H", "1b", "5b", "4f")
+
+    def close(self) -> None:
+        subprocess.run(["tmux", "-L", self.outer, "kill-server"], env=self.server.env, capture_output=True)
+        socket = Path(f"/tmp/tmux-{os.getuid()}") / self.outer
+        if socket.is_socket():
+            socket.unlink()
+
+
+def column(row: str, text: str) -> int:
+    """1-based screen column where `text` starts in a captured row (wide
+    characters take two columns)."""
+    index = row.index(text)
+    return 1 + sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in row[:index])
