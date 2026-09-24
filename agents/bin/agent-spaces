@@ -62,6 +62,23 @@ space_for_path() {
   done
 }
 
+# With agentd (@agentd set), the top row reads plain values it keeps per
+# session (@s-glyphs, @s-unseen, @s-other-<state>) instead of looping over
+# every pane: tmux 3.6 keeps memory on every redraw of a row that does.
+lean() {
+  [[ -n ${AG_LEAN+set} ]] || AG_LEAN=$(tmux show -gqv @agentd)
+  [[ -n $AG_LEAN ]]
+}
+
+# Tells agentd the sessions' spaces may have changed (it keeps @s-other-*).
+tell_agentd() {
+  lean || return 0
+  local client
+  client=$(tmux show -gqv @agentd_client)
+  [[ -z $client ]] || tmux display-message -l -c "$client" 'agentd bar' 2>/dev/null
+  return 0
+}
+
 # Formats, evaluated per session inside #{S:} loops.
 SPACE_OF='#{?@space,#{@space},#{@space_auto}}'
 not_peek() { printf '#{!=:#{m:_peek-*,#{session_name}},1}'; }
@@ -111,7 +128,7 @@ summary() { # <space or empty for "all">
       idle) color='#{@thm-overlay1}' glyph=○ ;;
       untracked) color='#{@thm-overlay0}' glyph=◇ ;;
     esac
-    n="#{E:@cnt-$item-$key}"
+    if lean; then n="#{@s-other-$item}"; else n="#{E:@cnt-$item-$key}"; fi
     text="$n $item"
     [[ $item == needs ]] && text="$n #{?#{==:$n,1},needs,need} you"
     label=$text
@@ -130,20 +147,16 @@ summary() { # <space or empty for "all">
 
 # The pieces of a space's top line: head (label), chips (its sessions) and
 # tail (muted, summary), filled in from the templates in theme.conf.
-fleet_piece() { # <piece: head|chips|tail> <space or empty for "all"> [extra chip condition]
-  local space=$2 filter label color tpl
+fleet_piece() { # <piece: head|tail> <space or empty for "all">
+  local space=$2 label color tpl
   if [[ -n $space ]]; then
-    filter="#{==:$SPACE_OF,$space}" label=$space color=$(color_of "$space")
+    label=$space color=$(color_of "$space")
   else
-    filter=1 label=all color=$UNASSIGNED_COLOR
+    label=all color=$UNASSIGNED_COLOR
   fi
-  [[ -n ${3:-} ]] && filter="#{&&:$filter,$3}"
   tpl=$(tmux show -gv "@fleet-$1-tpl")
-  tpl=${tpl//@@FILTER@@/$filter}
   tpl=${tpl//@@LABEL@@/$label}
   tpl=${tpl//@@COLOR@@/$color}
-  local index="#{@space-index-${space:-all}}"
-  tpl=${tpl//@@INDEX@@/$index}
   local muted=""
   [[ -n $space ]] && muted="#{?#{==:#{@agent_mute_${space//[^A-Za-z0-9_-]/_}},on},#[fg=#{@thm-overlay1}]muted  ,}"
   tpl=${tpl//@@MUTED@@/$muted}
@@ -152,8 +165,49 @@ fleet_piece() { # <piece: head|chips|tail> <space or empty for "all"> [extra chi
   printf '%s' "$tpl"
 }
 
+# One session's chip from @fleet-chip-tpl (theme.conf says what each is).
+chip() { # <sid> <current> <name> <index> <blink suffix> <unseen> <glyphs>
+  local tpl=${CHIP_TPL:=$(tmux show -gv @fleet-chip-tpl)}
+  tpl=${tpl//@@SID@@/"$1"} tpl=${tpl//@@CURRENT@@/"$2"} tpl=${tpl//@@NAME@@/"$3"}
+  tpl=${tpl//@@INDEX@@/"$4"} tpl=${tpl//@@B@@/"$5"} tpl=${tpl//@@UNSEEN@@/"$6"}
+  tpl=${tpl//@@GLYPHS@@/"$7"}
+  printf '%s' "$tpl"
+}
+
+# The chips of a space's sessions, all or those numbered <from>-<to>. With
+# agentd, one chip per session with literal values and agentd's per-id options:
+# no #{S:} loop in the row (tmux 3.6 keeps memory on each redraw of what one
+# expands). Otherwise tmux's loop over the sessions.
+fleet_chips() { # <space or empty for "all"> [from to]
+  local space=$1 from=${2:-1} to=${3:-} idx="#{@space-index-${1:-all}}"
+  if lean; then
+    local sess id name sp n i=0 out=""
+    while IFS=$US read -r sess id name sp; do
+      [[ $sess == _peek-* ]] && continue
+      [[ -z $space || $sp == "$space" ]] || continue
+      i=$((i + 1))
+      ((i < from)) && continue
+      [[ -n $to ]] && ((i > to)) && break
+      # Literal inside the chip's conditionals: # , } escaped.
+      name=${name//'#'/'##'} name=${name//,/'#,'} name=${name//'}'/'#}'}
+      n=${id#\$}
+      out+=$(chip "$id" "#{==:#{session_id},$id}" "$name" "$i" "-$n" "#{@s-unseen-$n}" "#{E:@s-glyphs-$n}")
+    done < <(tmux list-sessions -F "#{session_name}$US#{session_id}$US#{=/16/…:session_name}$US$SPACE_OF")
+    printf '%s' "$out"
+    return
+  fi
+  local filter=1 tpl
+  [[ -n $space ]] && filter="#{==:$SPACE_OF,$space}"
+  [[ -n $to ]] && filter="#{&&:$filter,#{&&:#{e|>=:$idx,$from},#{e|<=:$idx,$to}}}"
+  tpl=$(tmux show -gv @fleet-chips-tpl)
+  tpl=${tpl//@@FILTER@@/"$filter"}
+  tpl=${tpl//@@CHIP@@/"$(chip '#{session_id}' '#{==:#{session_name},#{client_session}}' '#{=/16/…:session_name}' "$idx" '' \
+    '#{W:#{P:#{?#{E:@agent-unseen},x,}}}' '#{W:#{P:#{E:@agent-glyph}}}')"}
+  printf '%s' "$tpl"
+}
+
 fleet_format() { # <space or empty for "all">: the whole top line, on one row
-  printf '%s%s%s' "$(fleet_piece head "$1")" "$(fleet_piece chips "$1")" "$(fleet_piece tail "$1")"
+  printf '%s%s%s' "$(fleet_piece head "$1")" "$(fleet_chips "$1")" "$(fleet_piece tail "$1")"
 }
 
 # The sessions shown for a space, in the top bar's order: tmux lists sessions
@@ -229,6 +283,7 @@ assign() { # [session...]
     fi
   done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
   number_sessions
+  tell_agentd
   layout
 }
 
@@ -310,14 +365,12 @@ layout_session() { # <session> <width>
   local total=$((${#chip_rows[@]} + summary_own_row + (wide_windows ? 1 : ${#win_rows[@]})))
   ((total > 5 && !wide_windows)) && win_rows=("scroll") total=$((${#chip_rows[@]} + summary_own_row + 1))
 
-  local rows=() idxfmt="#{@space-index-${label}}" indent i range from to row
-  [[ -n $space ]] || idxfmt="#{@space-index-all}"
+  local rows=() indent i from to row
   indent="#[fill=#{@thm-base}]#[bg=#{@thm-base}]#[align=left]$(printf '%*s' "$label_w" '')"
   for i in "${!chip_rows[@]}"; do
     from=${chip_rows[i]%-*} to=${chip_rows[i]#*-}
-    range="#{&&:#{e|>=:$idxfmt,$from},#{e|<=:$idxfmt,$to}}"
     if ((i == 0)); then row=$(fleet_piece head "$space"); else row=$indent; fi
-    row+=$(fleet_piece chips "$space" "$range")
+    row+=$(fleet_chips "$space" "$from" "$to")
     ((i == ${#chip_rows[@]} - 1 && !summary_own_row)) && row+=$(fleet_piece tail "$space")
     rows+=("$row")
   done

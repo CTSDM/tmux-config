@@ -116,6 +116,9 @@ pub struct Tmux {
     last_attach: Cell<Option<Instant>>,
     /// A session was created or closed (`%sessions-changed`), or we attached.
     sessions_changed: Rc<Notify>,
+    /// L1: something the top row shows may have changed (an option written,
+    /// a session or window came or went).
+    bar_changed: Rc<Notify>,
     /// Z1: our session was all that was left and we closed it; no attaching
     /// until the user has a session again.
     closed: Cell<bool>,
@@ -145,6 +148,7 @@ impl Tmux {
             use_control,
             last_attach: Cell::new(None),
             sessions_changed: Rc::new(Notify::new()),
+            bar_changed: Rc::new(Notify::new()),
             closed: Cell::new(false),
             seen_user: Cell::new(false),
             messages,
@@ -159,6 +163,10 @@ impl Tmux {
 
     pub fn sessions_changed(&self) -> Rc<Notify> {
         self.sessions_changed.clone()
+    }
+
+    pub fn bar_changed(&self) -> Rc<Notify> {
+        self.bar_changed.clone()
     }
 
     pub fn env(&self) -> &str {
@@ -193,6 +201,7 @@ impl Tmux {
         match Control::start(
             &self.socket,
             self.sessions_changed.clone(),
+            self.bar_changed.clone(),
             self.messages.clone(),
         ) {
             Ok(control) => {
@@ -388,7 +397,9 @@ impl Tmux {
                 Op::Unset(name) => cmd(&["set", "-pu", "-t", pane, name]),
             })
             .collect();
-        self.run(&commands).await.map(drop)
+        let written = self.run(&commands).await.map(drop);
+        self.bar_changed.notify_one();
+        written
     }
 }
 

@@ -7,6 +7,7 @@
 //! that runs for weeks doesn't keep every pane it has seen. Everything runs
 //! on one thread.
 
+mod bar;
 mod blink;
 mod control;
 mod effects;
@@ -61,6 +62,10 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SAVE_DELAY: Duration = Duration::from_millis(200);
 /// B1's marker of shells started by Claude's Bash tool.
 const SNAPSHOT_SHELL: &str = "shell-snapshots/snapshot-";
+/// L1: the top row's values are looked at again this often without news,
+/// and this long after a change, so a burst of them makes one read.
+const BAR_POLL: Duration = Duration::from_secs(5);
+const BAR_SETTLE: Duration = Duration::from_millis(50);
 /// Closing notifications on the way out must not hold the exit up.
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 /// X5: Codex panes are observed about this often.
@@ -195,6 +200,7 @@ async fn serve(
     if let Some(messages) = daemon.tmux.messages() {
         spawn_local(daemon.clone().messages(messages));
     }
+    spawn_local(daemon.clone().bar());
     // K5: whatever needed you before we started blinks again.
     daemon.blink();
 
@@ -1154,6 +1160,11 @@ impl Daemon {
     /// `agentd seen <pane>` on focus (E1).
     async fn messages(self: Rc<Self>, mut messages: mpsc::UnboundedReceiver<String>) {
         while let Some(text) = messages.recv().await {
+            // agent-spaces, after tagging sessions or building their rows.
+            if text == "agentd bar" {
+                self.tmux.bar_changed().notify_one();
+                continue;
+            }
             let Some(pane) = text.strip_prefix("agentd seen ") else {
                 continue;
             };
@@ -1163,6 +1174,23 @@ impl Daemon {
             {
                 let (done, _) = oneshot::channel();
                 self.queue(pane, Job::Seen(done));
+            }
+        }
+    }
+
+    /// L1: keeps the values the top row reads (bar.rs) up to date: after a
+    /// change settles, and every few seconds for what nothing announces (a
+    /// `claude` started without hooks, a session's space).
+    async fn bar(self: Rc<Self>) {
+        let changed = self.tmux.bar_changed();
+        loop {
+            let _ = timeout(BAR_POLL, changed.notified()).await;
+            sleep(BAR_SETTLE).await;
+            let Ok(out) = self.tmux.run(&bar::read()).await else {
+                continue;
+            };
+            for cmds in bar::update(&out) {
+                let _ = self.tmux.run(&cmds).await;
             }
         }
     }
