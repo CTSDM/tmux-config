@@ -75,6 +75,15 @@ pub struct Read {
     pub others: Vec<OtherPane>,
 }
 
+/// Why a read found nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Missing {
+    /// tmux answered that the pane does not exist.
+    Pane,
+    /// tmux failed otherwise, or did not answer in time.
+    Tmux,
+}
+
 pub struct Tmux {
     socket: PathBuf,
     /// `$TMUX` for the helpers, which run plain `tmux`.
@@ -92,7 +101,7 @@ impl Tmux {
     }
 
     /// Runs `tmux -S <socket> <args>`; its output if it succeeded.
-    pub async fn run(&self, args: &[Cow<'_, str>]) -> Option<String> {
+    pub async fn run(&self, args: &[Cow<'_, str>]) -> Result<String, Missing> {
         let child = Command::new("tmux")
             .arg("-S")
             .arg(&self.socket)
@@ -101,18 +110,25 @@ impl Tmux {
             .env_remove("TMUX_PANE")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .output();
-        let out = timeout(TIMEOUT, child).await.ok()?.ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        let out = match timeout(TIMEOUT, child).await {
+            Ok(Ok(out)) => out,
+            _ => return Err(Missing::Tmux),
+        };
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else if String::from_utf8_lossy(&out.stderr).contains("no such pane") {
+            Err(Missing::Pane)
+        } else {
+            Err(Missing::Tmux)
+        }
     }
 
     /// One `tmux` for the pane (P2 options, V2 facts, space, mute, §13
     /// globals), and when asked the clients (V1) and every pane (R).
-    pub async fn read(&self, pane: &str, clients: bool, panes: bool) -> Option<Read> {
+    pub async fn read(&self, pane: &str, clients: bool, panes: bool) -> Result<Read, Missing> {
         let mut args: Vec<Cow<str>> = vec![
             "display".into(),
             "-p".into(),
@@ -164,7 +180,7 @@ impl Tmux {
                 }
             }
         }
-        self.run(&args).await.is_some()
+        self.run(&args).await.is_ok()
     }
 }
 
@@ -178,7 +194,8 @@ fn protect_semicolon(value: &str) -> Cow<'_, str> {
     }
 }
 
-fn parse(out: &str) -> Option<Read> {
+/// A pane that is gone still "displays", with every field empty.
+fn parse(out: &str) -> Result<Read, Missing> {
     let mut read = None;
     let mut clients = Vec::new();
     let mut others = Vec::new();
@@ -191,10 +208,13 @@ fn parse(out: &str) -> Option<Read> {
             "D" => {
                 let f: Vec<&str> = rest.splitn(PANE_FIELDS.len(), US).collect();
                 if f.len() != PANE_FIELDS.len() {
-                    return None;
+                    return Err(Missing::Tmux);
+                }
+                if f[0].is_empty() {
+                    return Err(Missing::Pane);
                 }
                 read = Some(Read {
-                    pane_pid: f[1].parse().ok()?,
+                    pane_pid: f[1].parse().map_err(|_| Missing::Tmux)?,
                     pane: Pane {
                         state: f[2].into(),
                         since: f[3].into(),
@@ -243,10 +263,10 @@ fn parse(out: &str) -> Option<Read> {
             _ => {}
         }
     }
-    let mut read = read?;
+    let mut read = read.ok_or(Missing::Tmux)?;
     read.clients = clients;
     read.others = others;
-    Some(read)
+    Ok(read)
 }
 
 #[cfg(test)]
@@ -296,6 +316,7 @@ mod tests {
     #[test]
     fn mute_needs_a_space() {
         let mut d = vec![""; 19];
+        d[0] = "%1";
         d[1] = "1";
         d[14] = "on";
         assert!(!parse(&record('D', &d)).unwrap().pane.muted);
@@ -303,8 +324,13 @@ mod tests {
 
     #[test]
     fn no_pane_no_read() {
-        assert!(parse("").is_none());
-        assert!(parse(&record('C', &["c", "1", "", "s", "0"])).is_none());
+        assert_eq!(parse(""), Err(Missing::Tmux));
+        assert_eq!(
+            parse(&record('C', &["c", "1", "", "s", "0"])),
+            Err(Missing::Tmux)
+        );
+        // tmux 3.6 "displays" a pane that is gone, with every field empty.
+        assert_eq!(parse(&record('D', &[""; 19])), Err(Missing::Pane));
     }
 
     #[test]

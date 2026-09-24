@@ -2,16 +2,18 @@
 //!
 //! Each pane has an event queue (O2: its events in arrival order; the ack
 //! goes out once the options are written, O1) and an effect queue (O3: its
-//! effects in the order of the events that caused them). Everything runs on
-//! one thread.
+//! effects in the order of the events that caused them). Both go once they
+//! are drained and the pane is gone or its agent session ended, so a daemon
+//! that runs for weeks doesn't keep every pane it has seen. Everything runs
+//! on one thread.
 
 mod effects;
 mod store;
 mod tmux;
 mod visibility;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -38,8 +40,8 @@ use crate::core::{self, Effect, Facts, Input};
 use crate::identity::{self, Paths};
 use crate::procfs;
 use crate::proto::{CtlRequest, HookRequest, Reply, Request};
-use store::{Saved, SavedReminder};
-use tmux::{Read, Tmux};
+use store::{Saved, SavedReminder, Server};
+use tmux::{Missing, Read, Tmux};
 use visibility::Seams;
 
 /// A request line bigger than this is not ours.
@@ -101,13 +103,20 @@ fn start() -> io::Result<()> {
 
     let pid = Pid::from_raw(server_pid as i32).ok_or_else(|| io::Error::other("bad server pid"))?;
     let server = pidfd_open(pid, PidfdFlags::empty())?;
+    // Which instance of the server: a restarted one gets the same socket.
+    let instance = Server {
+        pid: server_pid,
+        start: procfs::stat(server_pid)
+            .ok_or_else(|| io::Error::other("tmux server gone"))?
+            .starttime,
+    };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let result = LocalSet::new().block_on(
         &runtime,
-        serve(paths.clone(), socket, server_pid, listener, server),
+        serve(paths.clone(), socket, instance, listener, server),
     );
     let _ = fs::remove_file(&paths.socket);
     drop(lock);
@@ -117,7 +126,7 @@ fn start() -> io::Result<()> {
 async fn serve(
     paths: Paths,
     socket: PathBuf,
-    server_pid: u32,
+    instance: Server,
     listener: StdListener,
     server: OwnedFd,
 ) -> io::Result<()> {
@@ -126,17 +135,17 @@ async fn serve(
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
 
-    let saved = store::load(&paths.state);
+    let saved = store::load(&paths.state, instance);
     let daemon = Rc::new(Daemon {
-        tmux: Tmux::new(socket, server_pid),
+        tmux: Tmux::new(socket, instance.pid),
+        server: instance,
         seams: Seams::from_env(),
         host: fs::read_to_string("/proc/sys/kernel/hostname")
             .map(|h| h.trim().to_string())
             .unwrap_or_default(),
         state: RefCell::new(saved.core),
         reminders: RefCell::new(HashMap::new()),
-        events: RefCell::new(HashMap::new()),
-        effects: RefCell::new(HashMap::new()),
+        panes: RefCell::new(HashMap::new()),
         save: Notify::new(),
         paths,
         started_ms: now_ms(),
@@ -147,7 +156,7 @@ async fn serve(
     }
     spawn_local(daemon.clone().saver());
 
-    loop {
+    let server_gone = loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
@@ -156,13 +165,17 @@ async fn serve(
                 // Out of descriptors, say: don't spin.
                 Err(_) => sleep(Duration::from_millis(50)).await,
             },
-            // The tmux server exited.
-            _ = server.readable() => break,
-            _ = term.recv() => break,
-            _ = int.recv() => break,
+            _ = server.readable() => break true,
+            _ = term.recv() => break false,
+            _ = int.recv() => break false,
         }
+    };
+    if server_gone {
+        // Nothing in it can apply to another server.
+        let _ = fs::remove_file(&daemon.paths.state);
+    } else {
+        daemon.save_now();
     }
-    daemon.save_now();
     Ok(())
 }
 
@@ -182,14 +195,24 @@ struct Reminder {
     timer: JoinHandle<()>,
 }
 
+/// A pane's two queues.
+struct PaneQueues {
+    events: mpsc::UnboundedSender<Job>,
+    effects: mpsc::UnboundedSender<Queued>,
+    /// Jobs and effect batches sent and not finished yet.
+    pending: Cell<usize>,
+    /// The last job found the pane gone, or ended its agent session.
+    retire: Cell<bool>,
+}
+
 struct Daemon {
     tmux: Tmux,
+    server: Server,
     seams: Seams,
     host: String,
     state: RefCell<core::State>,
     reminders: RefCell<HashMap<String, Reminder>>,
-    events: RefCell<HashMap<String, mpsc::UnboundedSender<Job>>>,
-    effects: RefCell<HashMap<String, mpsc::UnboundedSender<Queued>>>,
+    panes: RefCell<HashMap<String, PaneQueues>>,
     save: Notify,
     paths: Paths,
     started_ms: u64,
@@ -230,56 +253,158 @@ impl Daemon {
                 "state": &*self.state.borrow(),
                 "reminders": self.reminders.borrow().iter()
                     .map(|(pane, r)| (pane.clone(), r.saved))
-                    .collect::<std::collections::BTreeMap<_, _>>(),
-                "panes": self.events.borrow().keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+                    .collect::<BTreeMap<_, _>>(),
+                "panes": self.panes.borrow().keys().cloned().collect::<BTreeSet<_>>(),
             })),
             other => Reply::error(format!("unknown command: {other}")),
         }
     }
 
-    /// The pane's event queue, started on first use.
-    fn queue(self: &Rc<Self>, pane: &str, job: Job) {
-        let mut queues = self.events.borrow_mut();
-        let sender = queues.entry(pane.to_string()).or_insert_with(|| {
-            let (tx, rx) = mpsc::unbounded_channel();
-            spawn_local(self.clone().pane_events(pane.to_string(), rx));
-            tx
+    /// Runs `f` on the pane's queues, starting them on first use.
+    fn with_queues<T>(self: &Rc<Self>, pane: &str, f: impl FnOnce(&PaneQueues) -> T) -> T {
+        let mut panes = self.panes.borrow_mut();
+        let queues = panes.entry(pane.to_string()).or_insert_with(|| {
+            let (events, jobs) = mpsc::unbounded_channel();
+            let (effects, batches) = mpsc::unbounded_channel();
+            spawn_local(self.clone().pane_events(pane.to_string(), jobs));
+            spawn_local(self.clone().pane_effects(pane.to_string(), batches));
+            PaneQueues {
+                events,
+                effects,
+                pending: Cell::new(0),
+                retire: Cell::new(false),
+            }
         });
-        let _ = sender.send(job);
+        f(queues)
+    }
+
+    fn queue(self: &Rc<Self>, pane: &str, job: Job) {
+        self.with_queues(pane, |q| {
+            q.pending.set(q.pending.get() + 1);
+            let _ = q.events.send(job);
+        });
     }
 
     async fn pane_events(self: Rc<Self>, pane: String, mut jobs: mpsc::UnboundedReceiver<Job>) {
         while let Some(job) = jobs.recv().await {
-            match job {
+            let retire = match job {
                 Job::Hook(request, ack) => {
-                    let done = self.on_hook(&request).await;
+                    let (done, retire) = self.on_hook(&request).await;
                     let _ = ack.send(Reply::ok());
                     if let Some((ctx, effects)) = done {
                         self.run_effects(ctx, effects);
                     }
+                    retire
                 }
-                Job::Reminder { since } => {
-                    if let Some((ctx, effects)) = self.on_reminder(&pane, since).await {
+                Job::Reminder { since } => match self.on_reminder(&pane, since).await {
+                    Ok(Some((ctx, effects))) => {
                         self.run_effects(ctx, effects);
+                        false
                     }
-                }
+                    Ok(None) => false,
+                    Err(missing) => missing == Missing::Pane,
+                },
+            };
+            self.finished(&pane, Some(retire));
+        }
+    }
+
+    async fn pane_effects(
+        self: Rc<Self>,
+        pane: String,
+        mut batches: mpsc::UnboundedReceiver<Queued>,
+    ) {
+        while let Some((ctx, effects, done)) = batches.recv().await {
+            for effect in &effects {
+                effects::run(&ctx, effect).await;
             }
+            if let Some(done) = done {
+                let _ = done.send(());
+            }
+            self.finished(&pane, None);
+        }
+    }
+
+    /// A job (with its verdict on the pane) or an effect batch is done; the
+    /// pane's queues go if nothing is pending and the pane is retired.
+    fn finished(&self, pane: &str, retire: Option<bool>) {
+        let mut panes = self.panes.borrow_mut();
+        let Some(q) = panes.get(pane) else { return };
+        q.pending.set(q.pending.get().saturating_sub(1));
+        if let Some(retire) = retire {
+            q.retire.set(retire);
+        }
+        if q.retire.get() && q.pending.get() == 0 {
+            // Dropping the senders ends both queues' tasks.
+            panes.remove(pane);
+            drop(panes);
+            self.cancel(pane);
+        }
+    }
+
+    /// Panes that no longer exist (from a full pane list): their queues go
+    /// once drained, and their reminders now.
+    fn sweep(&self, existing: &HashSet<&str>) {
+        let gone: Vec<String> = self
+            .panes
+            .borrow()
+            .keys()
+            .filter(|p| !existing.contains(p.as_str()))
+            .cloned()
+            .collect();
+        for pane in gone {
+            let idle = {
+                let panes = self.panes.borrow();
+                panes.get(&pane).is_some_and(|q| {
+                    q.retire.set(true);
+                    q.pending.get() == 0
+                })
+            };
+            if idle {
+                self.panes.borrow_mut().remove(&pane);
+            }
+        }
+        let orphans: Vec<String> = self
+            .reminders
+            .borrow()
+            .keys()
+            .filter(|p| !existing.contains(p.as_str()))
+            .cloned()
+            .collect();
+        for pane in orphans {
+            self.cancel(&pane);
+        }
+    }
+
+    /// One hook event, and whether its pane's queues can go (the pane is
+    /// gone, or its agent session ended).
+    async fn on_hook(self: &Rc<Self>, request: &HookRequest) -> (Option<Batch>, bool) {
+        match self.handle_hook(request).await {
+            Ok(Some(batch)) => {
+                let e = &request.event;
+                (Some(batch), e.ev == "SessionEnd" && e.agent_id.is_empty())
+            }
+            Ok(None) => (None, false),
+            Err(missing) => (None, missing == Missing::Pane),
         }
     }
 
     /// Read, ownership, core, write: everything before the ack.
-    async fn on_hook(self: &Rc<Self>, request: &HookRequest) -> Option<Batch> {
+    async fn handle_hook(self: &Rc<Self>, request: &HookRequest) -> Result<Option<Batch>, Missing> {
         let (kind, ev) = (request.kind, request.event.ev.as_str());
         let want_vis = core::may_need_visibility(kind, ev);
-        let read = self
-            .tmux
-            .read(&request.pane, want_vis, core::may_need_panes(kind, ev))
-            .await?;
+        let want_panes = core::may_need_panes(kind, ev);
+        let read = self.tmux.read(&request.pane, want_vis, want_panes).await?;
+        if want_panes {
+            self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
+        }
         let chain = request
             .chain
             .iter()
             .map(|(pid, comm, _)| (*pid, comm.as_str()));
-        let agent_pid = core::owner(chain, read.pane_pid)?; // I4
+        let Some(agent_pid) = core::owner(chain, read.pane_pid) else {
+            return Ok(None); // I4
+        };
         let vis = if want_vis {
             Some(self.visibility(&read).await)
         } else {
@@ -319,15 +444,19 @@ impl Daemon {
             self.queue_effects(ctx.clone(), vec![Effect::NotifyClose], Some(done));
             let _ = finished.await;
         }
-        Some((ctx, self.apply(&request.pane, effects).await))
+        Ok(Some((ctx, self.apply(&request.pane, effects).await)))
     }
 
-    async fn on_reminder(self: &Rc<Self>, pane: &str, since: i64) -> Option<Batch> {
+    async fn on_reminder(
+        self: &Rc<Self>,
+        pane: &str,
+        since: i64,
+    ) -> Result<Option<Batch>, Missing> {
         // Replaced or cancelled after it was queued: not ours any more.
         {
             let mut reminders = self.reminders.borrow_mut();
             if reminders.get(pane).map(|r| r.saved.since) != Some(since) {
-                return None;
+                return Ok(None);
             }
             reminders.remove(pane);
         }
@@ -335,7 +464,7 @@ impl Daemon {
         let read = self.tmux.read(pane, true, false).await?;
         let vis = self.visibility(&read).await;
         let effects = core::reminder(since, &self.facts(&read, Some(vis), 0));
-        Some((self.ctx(pane, &read), effects))
+        Ok(Some((self.ctx(pane, &read), effects)))
     }
 
     fn facts(&self, read: &Read, vis: Option<core::Visibility>, bg_shells: u32) -> Facts {
@@ -388,30 +517,18 @@ impl Daemon {
         }
     }
 
-    /// The pane's effect queue, started on first use; `done` is told when
-    /// the batch has run.
+    /// Into the pane's effect queue; `done` is told when the batch has run.
     fn queue_effects(
-        &self,
+        self: &Rc<Self>,
         ctx: effects::Ctx,
         effects: Vec<Effect>,
         done: Option<oneshot::Sender<()>>,
     ) {
-        let mut queues = self.effects.borrow_mut();
-        let sender = queues.entry(ctx.pane.clone()).or_insert_with(|| {
-            let (tx, mut rx) = mpsc::unbounded_channel::<Queued>();
-            spawn_local(async move {
-                while let Some((ctx, effects, done)) = rx.recv().await {
-                    for effect in &effects {
-                        effects::run(&ctx, effect).await;
-                    }
-                    if let Some(done) = done {
-                        let _ = done.send(());
-                    }
-                }
-            });
-            tx
+        let pane = ctx.pane.clone();
+        self.with_queues(&pane, |q| {
+            q.pending.set(q.pending.get() + 1);
+            let _ = q.effects.send((ctx, effects, done));
         });
-        let _ = sender.send((ctx, effects, done));
     }
 
     /// C1: one reminder per pane; arming replaces the previous one.
@@ -452,6 +569,7 @@ impl Daemon {
     fn save_now(&self) {
         let saved = Saved {
             v: 1,
+            server: Some(self.server),
             core: self.state.borrow().clone(),
             reminders: self
                 .reminders
