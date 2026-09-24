@@ -136,7 +136,6 @@ def look_at(server: TmuxServer, client: Client, agent: FakeAgent, session: str) 
 def test_cutover_and_rollback(make_server: Callable[..., TmuxServer]) -> None:
     server = make_install_server(make_server)
     inst = Install(server)
-    problems: list[str] = []  # checks that should not stop the later stages
     client = server.client
     assert isinstance(client, Client)
     for profile in (inst.home / ".claude", inst.home / ".config" / "claude" / "work"):
@@ -233,6 +232,8 @@ def test_cutover_and_rollback(make_server: Callable[..., TmuxServer]) -> None:
     stop = inst.run(inst.agentd, "ctl", "stop", tmux=True)
     assert stop.returncode == 0, stop.stderr
     eventually(lambda: daemons(server), lambda d: d == [], 5, "agentd stopped")
+    # With agentd.off, stopping closes what it showed: bash could not.
+    assert notes(server, late.pane, "notify-close"), "agentd's notification outlives the rollback"
     eventually(lambda: sessions(server), lambda s: "_peek-agentd" not in s, 5, "its session gone")
     run = Path(server.env["XDG_RUNTIME_DIR"]) / "tmux-agents"
     assert not list(run.glob("agentd-*.sock")), "agentd socket left"
@@ -258,11 +259,6 @@ def test_cutover_and_rollback(make_server: Callable[..., TmuxServer]) -> None:
     mark = server.sink.mark()
     look_at(server, client, new, "new")
     assert notes(server, new.pane, "notify-close", mark), "notification not closed when seen"
-    # The daemon's notification from before the rollback: closed at `ctl stop`, or when seen.
-    look_at(server, client, late, "new")
-    if not notes(server, late.pane, "notify-close"):
-        problems.append("a notification agentd showed before the rollback is closed neither by "
-                        "`ctl stop` nor when seen afterwards")
 
     # 3. setup.sh and prefix R while agentd.off is there: bash.
     output = inst.setup_sh()
@@ -280,12 +276,28 @@ def test_cutover_and_rollback(make_server: Callable[..., TmuxServer]) -> None:
     assert server.global_option("@agentd") == str(inst.agentd)
     eventually(lambda: daemons(server), lambda d: len(d) == 1, 5, "agentd back")
 
-    # 5. The server goes: nothing is left.
+    # 5. An update: `ctl stop` without agentd.off keeps what agentd showed
+    # open; the next daemon closes it when it is seen.
+    shown = server.agent("claude", "new")
+    shown.hook("SessionStart", source="startup", _argv=agentd_hook("claude"))
+    shown.hook("UserPromptSubmit", _argv=agentd_hook("claude"))
+    shown.hook("Stop", last_assistant_message="shown before the update", _argv=agentd_hook("claude"))
+    eventually(lambda: notes(server, shown.pane, "notify"), lambda n: len(n) == 1, 5, "agentd notification")
+    stop = inst.run(inst.agentd, "ctl", "stop", tmux=True)
+    assert stop.returncode == 0, stop.stderr
+    eventually(lambda: daemons(server), lambda d: d == [], 5, "agentd stopped for the update")
+    time.sleep(1)
+    assert not notes(server, shown.pane, "notify-close"), "an update closed agentd's notification"
+    new.hook("UserPromptSubmit", _argv=agentd_hook("claude"))  # the next hook starts the new daemon
+    eventually(lambda: daemons(server), lambda d: len(d) == 1, 5, "the new agentd")
+    look_at(server, client, shown, "new")
+    assert notes(server, shown.pane, "notify-close"), "the new agentd did not close it when seen"
+
+    # 6. The server goes: nothing is left.
     pid = daemons(server)[0]
     server.tmux("kill-server", check=False)
     eventually(lambda: procs.alive(pid), lambda alive: not alive, 5, "agentd exits with its server")
     assert not list(run.glob("agentd-*.sock")), "agentd socket left"
-    assert problems == []
 
 
 def make_install_server(make_server: Callable[..., TmuxServer]) -> TmuxServer:
