@@ -5,9 +5,11 @@ use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
+use tokio::sync::Notify;
 use tokio::time::timeout;
 
 use super::control::{self, Control};
@@ -106,6 +108,11 @@ pub struct Tmux {
     control: RefCell<Option<Control>>,
     use_control: bool,
     last_attach: Cell<Option<Instant>>,
+    /// A session was created or closed (`%sessions-changed`), or we attached.
+    sessions_changed: Rc<Notify>,
+    /// Z1: our session was all that was left and we closed it; no attaching
+    /// until the user has a session again.
+    closed: Cell<bool>,
 }
 
 /// One tmux command, word by word.
@@ -125,7 +132,13 @@ impl Tmux {
             control: RefCell::new(None),
             use_control,
             last_attach: Cell::new(None),
+            sessions_changed: Rc::new(Notify::new()),
+            closed: Cell::new(false),
         }
+    }
+
+    pub fn sessions_changed(&self) -> Rc<Notify> {
+        self.sessions_changed.clone()
     }
 
     pub fn env(&self) -> &str {
@@ -143,7 +156,10 @@ impl Tmux {
     /// Our control client, attached (again) when needed: after `%exit`
     /// while the server lives, at most once a second.
     pub fn attach(&self) {
-        if !self.use_control || self.control.borrow().as_ref().is_some_and(Control::alive) {
+        if !self.use_control
+            || self.closed.get()
+            || self.control.borrow().as_ref().is_some_and(Control::alive)
+        {
             return;
         }
         if self
@@ -154,15 +170,68 @@ impl Tmux {
             return;
         }
         self.last_attach.set(Some(Instant::now()));
-        match Control::start(&self.socket) {
-            Ok(control) => *self.control.borrow_mut() = Some(control),
+        match Control::start(&self.socket, self.sessions_changed.clone()) {
+            Ok(control) => {
+                *self.control.borrow_mut() = Some(control);
+                // Maybe ours is all there is (the last user session closed meanwhile).
+                self.sessions_changed.notify_one();
+            }
             Err(e) => super::log(&format!("control mode: {e}; spawning tmux")),
+        }
+    }
+
+    /// Z1: when our session is all that is left, it goes and we stay away,
+    /// so the server exits (`exit-empty`) as it would without us.
+    pub async fn close_if_alone(&self) {
+        if self.closed.get() || !self.use_control {
+            return;
+        }
+        let list = [cmd(&["list-sessions", "-F", "#{session_name}"])];
+        let Ok(sessions) = self.run(&list).await else {
+            return;
+        };
+        if sessions.lines().any(|s| s != control::SESSION) {
+            return;
+        }
+        self.closed.set(true);
+        // Our client goes, and destroy-unattached takes the session with it;
+        // unless someone else is in it.
+        self.control.borrow_mut().take();
+        let kill = [cmd(&[
+            "kill-session",
+            "-t",
+            &format!("={}:", control::SESSION),
+        ])];
+        let _ = self.spawn(&kill).await;
+    }
+
+    /// After closing: attach again once the user has a session (a server
+    /// kept by `exit-empty off`, and a new session later). Never while the
+    /// server is going away: then no session is left.
+    async fn reopen(&self) {
+        if self
+            .last_attach
+            .get()
+            .is_some_and(|t| t.elapsed() < REATTACH)
+        {
+            return;
+        }
+        self.last_attach.set(Some(Instant::now()));
+        let list = [cmd(&["list-sessions", "-F", "#{session_name}"])];
+        if let Ok(sessions) = self.spawn(&list).await
+            && sessions.lines().any(|s| s != control::SESSION)
+        {
+            self.closed.set(false);
+            self.last_attach.set(None);
         }
     }
 
     /// Runs the commands, in order, as one request; the output of them all.
     /// Through the control client when attached, else a spawned `tmux`.
     pub async fn run(&self, commands: &[Cmd]) -> Result<String, Missing> {
+        if self.closed.get() {
+            self.reopen().await;
+        }
         self.attach();
         let answer = {
             let control = self.control.borrow();
