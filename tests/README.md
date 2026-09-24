@@ -7,6 +7,7 @@ against the bash implementation (the reference) and against `agentd`.
 ```sh
 cd tests
 uv run pytest                          # bash: ../agents/bin/agent-hook
+uv run pytest -n 4 --dist loadgroup    # in parallel (pytest-xdist): ~3 min instead of ~11
 AGENT_IMPL=rust AGENTD=../agentd/target/release/agentd uv run pytest
 uv run pyright                         # strict
 ```
@@ -19,6 +20,11 @@ uv run pyright                         # strict
 | `AGENT_CONF` | tmux configuration sourced into each test server (default `agents.conf` next to the bash bin directory) |
 | `AG_TEST_TMPDIR` | where temp dirs go (default `/tmp`; Unix socket paths must stay short) |
 | `AG_TEST_KEEP=1` | keep each test's temp dir (sink, logs, `state/tmux-agents/`) |
+
+Every test has its own server, runtime dir and sound debounce, so tests
+are independent and the suite must pass the same in series and with `-n`.
+Timing-sensitive tests (debounce, blink frames, reminders, Codex ticks)
+keep margins for that; none is retried.
 
 Layout: `harness/` (fixtures' machinery), `selftest/` (the harness itself),
 `contract/` (one module per contract section, tests named and marked with the

@@ -3,7 +3,7 @@ name = "agent-contract-tests"
 version = "0"
 description = "Black-box contract suite for the tmux agent layer (bash and agentd)"
 requires-python = ">=3.12"
-dependencies = ["pytest>=8.3"]
+dependencies = ["pytest>=8.3", "pytest-xdist>=3.6"]
 
 [dependency-groups]
 dev = ["pyright>=1.1.400"]

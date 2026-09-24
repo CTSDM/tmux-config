@@ -120,6 +120,7 @@ class TmuxServer:
                 "AG_SOUND_PLAYER": str(root / "tripwire-player"),
                 "AG_SPACES_FILE": str(root / "spaces.conf"),
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "UV_OFFLINE": "1",  # agent-notify starts from the cache or fails, never downloads
                 procs.MARKER_VAR: self.marker,
             }
         )
@@ -131,6 +132,8 @@ class TmuxServer:
                     "set -g default-size 200x50",
                     "set -g focus-events on",
                     "set -wg remain-on-exit on",
+                    # agents.conf sets it too; agentd finds the bash helpers by it (phase 1).
+                    f"set -g @agents_bin '{impl.bin}'",
                     "",
                 ]
             )
@@ -177,6 +180,18 @@ class TmuxServer:
     def run_tool(self, argv: list[str], timeout: float = 30) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             argv, env=self.tool_env(), capture_output=True, text=True, timeout=timeout
+        )
+
+    def start_tool(self, argv: list[str]) -> None:
+        """Start a command in the background, like `run-shell -b` (it carries
+        the marker, so teardown stops it)."""
+        subprocess.Popen(
+            argv,
+            env=self.tool_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
     def reconcile(self, *panes: str) -> None:
