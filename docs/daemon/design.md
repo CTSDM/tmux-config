@@ -137,7 +137,7 @@ entry points follow it, so tests, cutover and rollback use one config:
   `agent-hook` or `agentd hook` into the Claude and Codex settings (phase 5),
   since a hook that asked tmux first would lose the latency we gained.
 
-Rollback: unset `@agentd`, reinstall the bash hooks.
+Rollback: see the end of the next paragraph.
 
 **Agents already running at cutover.** Claude Code and Codex read their hook
 commands when they start: agents running when `agents/install` switches to
