@@ -37,6 +37,8 @@ and neither null nor `false` (jq's `//`: an empty string or `0` counts, and
 wins); none → empty. A `tool_input` that is null or `false` gives an empty
 detail; any other non-object is the detail itself (as JSON text if not a
 string). Tool label: `tool` alone when detail is empty, else `tool: detail`.
+How a number is spelled in that JSON text is not part of the contract (jq
+keeps the literal `1.50`, serde writes `1.5`).
 
 **I4. Ownership.** Only the pane's own agent counts. Walk from the hook's
 parent process up through its ancestors until reaching the pane's
