@@ -1,6 +1,6 @@
 # Reproducers for tmux upstream (L2)
 
-Two tmux 3.6 bugs this setup ran into, reproduced on vanilla tmux (the
+Two tmux 3.6 bugs and one 3.7c bug this setup ran into, reproduced on vanilla tmux (the
 `tmux` first in PATH, `-f /dev/null`), on isolated servers (`-L`) killed by
 name at the end. Nothing of this repo is loaded.
 
@@ -46,4 +46,25 @@ out clean: no crash, flat.
 ./tmux-loop-leak.sh '#{W:x}' 2000   # any format
 ./tmux-loop-leak.sh plain 2000
 PATH=/path/to/tmux-3.7/bin:$PATH ./tmux-loop-leak.sh loop 2000
+```
+
+## tmux-popup-overlay.sh: a popup's top rows lost (3.7c)
+
+With the status line at the top, a pane that prints under a popup paints
+over the popup's first rows, one per status line: here (2 lines) its border
+with the title and the blank row under it, the `prefix N` form losing its
+" new session " header now and then. The damage stays until the next full
+redraw. `screen_redraw_draw_pane` asks which cells the popup covers with the
+pane row's position in the window (`wy`), where `tty_check_overlay_range`
+wants the position on the terminal (`py`, computed just above); the two
+differ by the status lines at the top. Status at the bottom: no bug.
+
+tmux master has replaced popups with floating panes, so no 3.7 release is
+expected to fix it: `tmux-3.7c-popup-overlay.patch` (one line) goes on the
+3.7c release tarball before building. The tarball needs a `yacc` (bison).
+
+```sh
+./tmux-popup-overlay.sh          # 3.7c: 10/10 lost; patched: 0/10
+./tmux-popup-overlay.sh 1 10     # one status line at the top
+PATH=/path/to/patched/tmux/dir:$PATH ./tmux-popup-overlay.sh
 ```
