@@ -1346,3 +1346,72 @@ fn f2_a_switch_lays_out_only_for_another_width() {
     sleep(Duration::from_millis(300));
     assert_eq!(layouts(), before + 3);
 }
+
+#[test]
+fn l1_the_top_rows_values_follow_the_panes() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    for s in ["alpha", "zulu"] {
+        server.tmux(&["new-session", "-d", "-s", s, "sleep 600"]);
+    }
+    for (s, space) in [("main", "work"), ("alpha", "work"), ("zulu", "home")] {
+        server.tmux(&["set", "-t", &format!("={s}:"), "@space_auto", space]);
+    }
+    server.start_daemon();
+    let get = |target: &str, option: &str| server.tmux(&["show", "-qv", "-t", target, option]);
+    let alpha = server.tmux(&["display", "-p", "-t", "alpha", "#{pane_id}"]);
+    server.hook(&alpha, ev("UserPromptSubmit"));
+    // Right after our write: the other session of the space counts it,
+    // the session itself shows its glyph, another space nothing.
+    wait_for("main counts alpha working", || {
+        get("main:", "@s-other-working") == "1"
+    });
+    assert_eq!(get("alpha:", "@s-glyphs"), "#[fg=#{@ac-working}]●");
+    assert_eq!(get("alpha:", "@s-other-working"), "");
+    assert_eq!(get("zulu:", "@s-other-working"), "");
+
+    // An agent without hooks (a program named claude), in a new window: our
+    // control client hears of the window.
+    let claude = server.runtime.join("claude");
+    fs::copy("/bin/sh", &claude).unwrap();
+    let untracked = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "alpha:",
+        &format!("{} -c 'sleep 600; :'", claude.display()),
+    ]);
+    wait_for("main counts it untracked", || {
+        get("main:", "@s-other-untracked") == "1"
+    });
+    let flag = server.tmux(&["show", "-pqv", "-t", &untracked, "@p-untracked"]);
+    assert_eq!(flag, "1");
+    assert_eq!(
+        get("alpha:", "@s-glyphs"),
+        "#[fg=#{@ac-working}]●#[fg=#{@ac-dim}]◇"
+    );
+
+    // A pane killed: agents.conf's hook tells our client.
+    server.tmux(&["kill-pane", "-t", &alpha]);
+    let client = server.tmux(&["show", "-gqv", "@agentd_client"]);
+    server.tmux(&["display-message", "-c", &client, "agentd bar"]);
+    wait_for("alpha's working agent gone from main's count", || {
+        get("main:", "@s-other-working").is_empty()
+    });
+    assert_eq!(get("alpha:", "@s-glyphs"), "#[fg=#{@ac-dim}]◇");
+
+    // alpha moves to zulu's space, as agent-spaces does it.
+    server.tmux(&["set", "-t", "=alpha:", "@space", "home"]);
+    let reply = server.call(json!({"v": 1, "ctl": "bar"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    wait_for("zulu counts alpha's agent", || {
+        get("zulu:", "@s-other-untracked") == "1"
+    });
+    assert_eq!(get("main:", "@s-other-untracked"), "");
+    // Ours has none of them.
+    assert_eq!(get("_peek-agentd:", "@s-other-untracked"), "");
+}

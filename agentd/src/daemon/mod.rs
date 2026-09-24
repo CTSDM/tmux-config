@@ -7,6 +7,7 @@
 //! that runs for weeks doesn't keep every pane it has seen. Everything runs
 //! on one thread.
 
+mod bar;
 mod blink;
 mod control;
 mod effects;
@@ -65,6 +66,9 @@ const SNAPSHOT_SHELL: &str = "shell-snapshots/snapshot-";
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 /// X5: Codex panes are observed about this often.
 const TICK: Duration = Duration::from_secs(2);
+/// L1: the top row's values are read this long after a write it shows, so
+/// that a burst of them (a tool call, subagents) makes one read.
+const BAR_SETTLE: Duration = Duration::from_millis(50);
 
 pub fn run() -> ExitCode {
     match start() {
@@ -197,6 +201,7 @@ async fn serve(
     if let Some(messages) = daemon.tmux.messages() {
         spawn_local(daemon.clone().messages(messages));
     }
+    spawn_local(daemon.clone().bar());
     // K5: whatever needed you before we started blinks again.
     daemon.blink();
 
@@ -355,6 +360,11 @@ impl Daemon {
                 Reply::ok()
             }
             "blink-demo" => self.blink_demo(&request.args).await,
+            // L1: agent-spaces tagged sessions (their spaces, new ones).
+            "bar" => {
+                self.tmux.bar_changed().notify_one();
+                Reply::ok()
+            }
             // T5.3: after an upgrade; the next hook starts the new binary.
             "stop" => Reply::ok(),
             "seen" => match request.args.as_slice() {
@@ -1209,9 +1219,14 @@ impl Daemon {
 
     /// F1: what agents.conf says with a message to our client instead of a
     /// `ctl` command (which would make the tmux server start a process):
-    /// `agentd seen <pane>` on focus (E1).
+    /// `agentd seen <pane>` on focus (E1), `agentd bar` when a pane closes.
     async fn messages(self: Rc<Self>, mut messages: mpsc::UnboundedReceiver<String>) {
         while let Some(text) = messages.recv().await {
+            // L1: a pane closed (agents.conf's hooks).
+            if text == "agentd bar" {
+                self.tmux.bar_changed().notify_one();
+                continue;
+            }
             let Some(pane) = text.strip_prefix("agentd seen ") else {
                 continue;
             };
@@ -1222,6 +1237,20 @@ impl Daemon {
                 let (done, _) = oneshot::channel();
                 self.queue(pane, Job::Seen(done));
             }
+        }
+    }
+
+    /// L1: keeps the values the top row reads (bar.rs) as they should be,
+    /// whenever something they come from may have changed. Nothing runs
+    /// otherwise.
+    async fn bar(self: Rc<Self>) {
+        let changed = self.tmux.bar_changed();
+        // What was there before we started.
+        changed.notify_one();
+        loop {
+            changed.notified().await;
+            sleep(BAR_SETTLE).await;
+            self.tmux.refresh_bar().await;
         }
     }
 

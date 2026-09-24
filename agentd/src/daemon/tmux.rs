@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
+use super::bar;
 use super::control::{self, Control};
 use crate::core::{Op, OtherPane, Pane};
 
@@ -124,6 +125,10 @@ pub struct Tmux {
     /// Messages to our client (`display-message -c`), for the daemon.
     messages: mpsc::UnboundedSender<String>,
     to_daemon: RefCell<Option<mpsc::UnboundedReceiver<String>>>,
+    /// L1: what the top row shows may have changed (bar.rs), and what the
+    /// last read found.
+    bar_changed: Rc<Notify>,
+    bar: RefCell<bar::Bar>,
 }
 
 /// One tmux command, word by word.
@@ -139,6 +144,8 @@ impl Tmux {
         let use_control = std::env::var("AGENTD_TRANSPORT").as_deref() != Ok("spawn");
         let (messages, to_daemon) = mpsc::unbounded_channel();
         Tmux {
+            bar_changed: Rc::new(Notify::new()),
+            bar: RefCell::default(),
             socket,
             env,
             control: RefCell::new(None),
@@ -159,6 +166,10 @@ impl Tmux {
 
     pub fn sessions_changed(&self) -> Rc<Notify> {
         self.sessions_changed.clone()
+    }
+
+    pub fn bar_changed(&self) -> Rc<Notify> {
+        self.bar_changed.clone()
     }
 
     pub fn env(&self) -> &str {
@@ -193,6 +204,7 @@ impl Tmux {
         match Control::start(
             &self.socket,
             self.sessions_changed.clone(),
+            self.bar_changed.clone(),
             self.messages.clone(),
         ) {
             Ok(control) => {
@@ -388,7 +400,23 @@ impl Tmux {
                 Op::Unset(name) => cmd(&["set", "-pu", "-t", pane, name]),
             })
             .collect();
-        self.run(&commands).await.map(drop)
+        let written = self.run(&commands).await.map(drop);
+        if self.bar.borrow().changes(pane, ops) {
+            self.bar_changed.notify_one();
+        }
+        written
+    }
+
+    /// L1: reads what the top row's values come from, and writes those
+    /// that differ.
+    pub async fn refresh_bar(&self) {
+        let Ok(out) = self.run(&[bar::read()]).await else {
+            return;
+        };
+        let writes = self.bar.borrow_mut().update(&out);
+        if !writes.is_empty() {
+            let _ = self.run(&writes).await;
+        }
     }
 }
 
