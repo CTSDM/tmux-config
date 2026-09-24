@@ -70,7 +70,7 @@ def marked(marker: str) -> list[int]:
     return found
 
 
-def _signal_marked(pid: int, marker: str, sig: int) -> None:
+def signal_marked(pid: int, marker: str, sig: int) -> None:
     """Signal after re-checking the marker, through a pidfd when this Python
     has one, so a recycled pid is never hit."""
     needle = f"{MARKER_VAR}={marker}".encode()
@@ -108,13 +108,13 @@ def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
             break
         killed += pids
         for pid in pids:
-            _signal_marked(pid, marker, signal.SIGTERM)
+            signal_marked(pid, marker, signal.SIGTERM)
         end = time.monotonic() + grace
         while time.monotonic() < end and any(alive(p) for p in pids):
             time.sleep(0.05)
         for pid in pids:
             if alive(pid):
-                _signal_marked(pid, marker, signal.SIGKILL)
+                signal_marked(pid, marker, signal.SIGKILL)
     return killed
 
 
@@ -126,3 +126,20 @@ def cpu_ticks(pids: list[int]) -> dict[int, int]:
         if fields is not None:
             ticks[pid] = sum(int(f) for f in fields[11:15])
     return ticks
+
+
+def cpu_ns(pids: list[int]) -> dict[int, int]:
+    """CPU time of each process in ns: its threads (schedstat), plus its
+    reaped children (cutime + cstime, in clock ticks)."""
+    tick_ns = 1_000_000_000 // os.sysconf("SC_CLK_TCK")
+    cpu: dict[int, int] = {}
+    for pid in pids:
+        try:
+            threads = sum(int((t / "schedstat").read_text().split()[0])
+                          for t in Path(f"/proc/{pid}/task").iterdir())
+        except (OSError, ValueError, IndexError):
+            continue
+        fields = stat(pid)
+        children = (int(fields[13]) + int(fields[14])) * tick_ns if fields else 0
+        cpu[pid] = threads + children
+    return cpu

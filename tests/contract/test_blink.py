@@ -286,15 +286,16 @@ def test_K4_unseen_next_to_needs_advances_every_other_frame(server: TmuxServer) 
 # --- K5 life -----------------------------------------------------------------------------
 
 
-def busy_ticks(server: TmuxServer, seconds: float) -> int:
-    """CPU the server's processes use over `seconds`, fake agents aside."""
-    def ticks() -> dict[int, int]:
+def busy_ns(server: TmuxServer, seconds: float) -> int:
+    """CPU the server's processes use over `seconds`, fake agents aside, in
+    ns (schedstat: an animator in the daemon uses too little for clock ticks)."""
+    def cpu() -> dict[int, int]:
         pids = [p for p in procs.marked(server.marker) if procs.comm(p) not in ("claude", "codex", "node")]
-        return procs.cpu_ticks(pids)
+        return procs.cpu_ns(pids)
 
-    before = ticks()
+    before = cpu()
     time.sleep(seconds)
-    after = ticks()
+    after = cpu()
     return sum(t - before.get(pid, 0) for pid, t in after.items())
 
 
@@ -304,11 +305,11 @@ def test_K5_nothing_runs_without_targets(server: TmuxServer) -> None:
     working(agent)
     ask(agent, "Bash", "a")
     wait_session(server, "main", "needs")
-    assert busy_ticks(server, 1) > 0  # the animator is visible to this measure
+    assert busy_ns(server, 1) > 0  # the animator is visible to this measure
     agent.hook("PostToolUse", tool_name="Bash", tool_use_id="a")
     wait_session(server, "main", None)
     time.sleep(1)
-    assert busy_ticks(server, 3) <= 1
+    assert busy_ns(server, 3) <= 500_000  # 0.5 ms in 3 s: a stray wakeup at most
 
 
 @rule("K5", "P2")
