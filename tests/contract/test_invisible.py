@@ -10,6 +10,7 @@ is) must not change when the daemon attaches, while it runs, when its
 session is killed and when it goes away; the daemon's session must not show
 in any list; when only its session is left, the server exits."""
 
+import os
 import signal
 import time
 from collections.abc import Callable
@@ -25,7 +26,10 @@ from harness.marks import rule
 from harness.tmux import US, Terminal, TmuxServer
 from harness.wait import eventually
 
-pytestmark = pytest.mark.skipif(IMPL.name != "rust", reason="bash talks to tmux without a client of its own")
+pytestmark = pytest.mark.skipif(
+    IMPL.name != "rust" or os.environ.get("AGENTD_TRANSPORT") == "spawn",
+    reason="without a tmux client of its own (bash, agentd's spawn transport) there is nothing to hide",
+)
 
 USER_SESSIONS = ("main", "work", "other")
 LAYOUT = "#{session_attached}|#{@narrow-tabs}|#{@summary-room}|#{status}|" + "|".join(

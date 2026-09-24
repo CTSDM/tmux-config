@@ -143,3 +143,47 @@ def cpu_ns(pids: list[int]) -> dict[int, int]:
         children = (int(fields[13]) + int(fields[14])) * tick_ns if fields else 0
         cpu[pid] = threads + children
     return cpu
+
+
+class ChildWatch:
+    """The children a process starts while this watches it: a thread polls
+    /proc/<pid>/task/*/children as fast as it can. Children there before
+    `start` (e.g. a tmux server's panes) do not count."""
+
+    def __init__(self, pid: int) -> None:
+        import threading
+
+        self.pid = pid
+        self.before = self._children()
+        self.new: dict[int, str] = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+
+    def _children(self) -> set[int]:
+        found: set[int] = set()
+        try:
+            for task in Path(f"/proc/{self.pid}/task").iterdir():
+                found.update(int(c) for c in (task / "children").read_text().split())
+        except OSError:
+            pass
+        return found
+
+    def _poll(self) -> None:
+        while not self._stop.is_set():
+            for child in self._children() - self.before:
+                # Right after the fork a child is still "tmux: server"; keep
+                # the command line it execs, when the watch sees it.
+                try:
+                    cmdline = Path(f"/proc/{child}/cmdline").read_bytes().replace(b"\0", b" ").decode().strip()
+                except OSError:
+                    cmdline = ""
+                if child not in self.new or (cmdline and not cmdline.startswith("tmux")):
+                    self.new[child] = cmdline or comm(child) or "?"
+
+    def __enter__(self) -> "ChildWatch":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._thread.join()
