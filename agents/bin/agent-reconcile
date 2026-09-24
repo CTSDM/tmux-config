@@ -6,7 +6,10 @@
 # gone and repair busy states from its transcript. Codex also distinguishes
 # errors and starts its observer. It starts agent-bgwatch for Claude shells
 # running in the background and no watcher (e.g. after a config reload).
+# With agentd (the global option @agentd names its binary), agentd does it.
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 1
+agentd=$(tmux show -gqv @agentd)
+[[ -n $agentd ]] && exec "$agentd" ctl reconcile "$@"
 
 # Prints "over" when Claude's last turn has ended, "busy" otherwise.
 claude_turn_status() { # <transcript>
