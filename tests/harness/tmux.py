@@ -75,6 +75,9 @@ class TmuxServer:
     agentd: with Rust, start the daemon as a configuration load does (set
       @agentd). False leaves it off until start_agentd(), e.g. to compare the
       server before and after the daemon attaches (contract Z1).
+    xdg_in_home: the XDG config, state, data and cache dirs at their default
+      places in the temporary HOME (~/.config, ~/.local/...), as on a real
+      machine, e.g. for setup.sh and the docs' own commands.
     """
 
     def __init__(
@@ -86,6 +89,7 @@ class TmuxServer:
         conf: bool = True,
         theme: bool = False,
         agentd: bool = True,
+        xdg_in_home: bool = False,
         impl: Impl = IMPL,
     ) -> None:
         self.root = root
@@ -126,6 +130,16 @@ class TmuxServer:
                 "XDG_DATA_HOME": str(root / "data"),
                 "XDG_CONFIG_HOME": str(root / "config"),
                 "XDG_CACHE_HOME": str(root / "cache"),
+                **(
+                    {
+                        "XDG_STATE_HOME": str(root / "home" / ".local" / "state"),
+                        "XDG_DATA_HOME": str(root / "home" / ".local" / "share"),
+                        "XDG_CONFIG_HOME": str(root / "home" / ".config"),
+                        "XDG_CACHE_HOME": str(root / "home" / ".cache"),
+                    }
+                    if xdg_in_home
+                    else {}
+                ),
                 "AG_SINK": str(self.sink.path),
                 "AG_FOCUS_CLIENT": "none",
                 "AG_SOUNDS": str(root / "sounds"),

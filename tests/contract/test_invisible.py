@@ -78,8 +78,9 @@ def scene(make_server: Callable[..., TmuxServer]) -> Scene:
     server.run_tool([str(server.impl.bin / "agent-spaces"), "load"])
     for sess in ("main", "work"):
         done_agent(server, sess)
-    # Lay the bars out for these windows, so the baseline is not stale: a
-    # later layout (any client-attached hook) would otherwise change it.
+    # Lay the bars out for the windows just made. Z1 lets the daemon's attach
+    # re-run the layout as long as the result is what the user's clients
+    # give; from a stale baseline that correct result would look like a change.
     server.run_tool([str(server.impl.bin / "agent-spaces"), "layout"])
     assert isinstance(server.client, Terminal)
     eventually(lambda: server.client.screen()[0] if isinstance(server.client, Terminal) else "",
