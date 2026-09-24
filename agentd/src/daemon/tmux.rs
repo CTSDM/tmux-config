@@ -365,7 +365,7 @@ impl Tmux {
                 "-a",
                 "-F",
                 &format!(
-                    "{RS}P{US}#{{pane_id}}{US}#{{@agent_state}}{US}#{{@agent_subs}}{US}{SPACE}"
+                    "{RS}P{US}#{{pane_id}}{US}#{{@agent_state}}{US}#{{@agent_subs}}{US}#{{@agent_session}}{US}{SPACE}"
                 ),
             ]));
         }
@@ -475,12 +475,13 @@ fn parse(out: &str) -> Result<Read, Missing> {
                 }
             }
             "P" => {
-                let f: Vec<&str> = rest.splitn(4, US).collect();
-                if let [pane, state, subs, space] = f[..] {
+                let f: Vec<&str> = rest.splitn(5, US).collect();
+                if let [pane, state, subs, sid, space] = f[..] {
                     others.push(OtherPane {
                         pane: pane.into(),
                         state: state.into(),
                         subs: subs.into(),
+                        sid: sid.into(),
                         space: space.into(),
                     });
                 }
@@ -526,8 +527,8 @@ mod tests {
                 &["/dev/pts/1", "77", "attached,focused,UTF-8", "api", "0"],
             )
             + &record('C', &["client-9", "9", "control-mode", "api", "1"])
-            + &record('P', &["%3", "needs", "", "work"])
-            + &record('P', &["%4", "done", "2", "home"]);
+            + &record('P', &["%3", "needs", "", "", "work"])
+            + &record('P', &["%4", "done", "2", "s4", "home"]);
         let r = parse(&out).unwrap();
         assert_eq!(r.pane_pid, 4242);
         assert_eq!(r.pane.state, "needs");
@@ -544,6 +545,8 @@ mod tests {
         assert_eq!(r.clients.len(), 2);
         assert!(r.clients[1].control);
         assert_eq!(r.others[1].subs, "2");
+        assert_eq!(r.others[1].sid, "s4");
+        assert_eq!(r.others[1].space, "home");
     }
 
     #[test]

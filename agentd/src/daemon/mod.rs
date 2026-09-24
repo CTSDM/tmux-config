@@ -168,6 +168,8 @@ async fn serve(
         panes: RefCell::new(HashMap::new()),
         watched: RefCell::new(HashMap::new()),
         background: RefCell::new(HashMap::new()),
+        missing_panes: RefCell::new(HashSet::new()),
+        missing_sids: RefCell::new(HashSet::new()),
         ticking: Cell::new(false),
         effects_env: effects::Env {
             sound: sound::Config::from_env(runtime_dir),
@@ -298,6 +300,9 @@ struct Daemon {
     panes: RefCell<HashMap<String, PaneQueues>>,
     watched: RefCell<HashMap<String, Watch>>,
     background: RefCell<HashMap<String, Background>>,
+    /// Panes and subagent sessions not listed at the last sweep (`forget`).
+    missing_panes: RefCell<HashSet<String>>,
+    missing_sids: RefCell<HashSet<String>>,
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
     blink: blink::Blink,
@@ -504,7 +509,8 @@ impl Daemon {
 
     /// Panes that no longer exist (from a full pane list): their queues go
     /// once drained, and their reminders now.
-    fn sweep(&self, existing: &HashSet<&str>) {
+    fn sweep(&self, others: &[core::OtherPane]) {
+        let existing: HashSet<&str> = others.iter().map(|o| o.pane.as_str()).collect();
         let gone: Vec<String> = self
             .panes
             .borrow()
@@ -540,6 +546,47 @@ impl Daemon {
         self.background
             .borrow_mut()
             .retain(|p, _| existing.contains(p.as_str()));
+        self.forget(others, &existing);
+    }
+
+    /// What the core and the notifier keep for panes and sessions that are
+    /// gone: a pane killed or an agent crashed never sends the SessionEnd
+    /// that would forget it (H11), and a closed pane's notification closes
+    /// as when its agent is found gone (N3).
+    fn forget(&self, others: &[core::OtherPane], existing: &HashSet<&str>) {
+        let live_sids: HashSet<&str> = others.iter().map(|o| o.sid.as_str()).collect();
+        let notified = self.effects_env.notifier.ids();
+        let (changed, gone) = {
+            let mut state = self.state.borrow_mut();
+            let panes = state
+                .codex
+                .keys()
+                .chain(state.rounds.values().flatten())
+                .chain(notified.keys())
+                .filter(|p| !existing.contains(p.as_str()));
+            let gone = second_miss(&mut self.missing_panes.borrow_mut(), panes);
+            let sids = state
+                .subagents
+                .keys()
+                .filter(|sid| !live_sids.contains(sid.as_str()));
+            let ended = second_miss(&mut self.missing_sids.borrow_mut(), sids);
+            let before = (state.codex.len(), state.rounds.len(), state.subagents.len());
+            state.codex.retain(|p, _| !gone.contains(p));
+            // A round lives while any of its panes does (R counts them all).
+            state
+                .rounds
+                .retain(|_, r| !r.iter().all(|p| gone.contains(p)));
+            state.subagents.retain(|sid, _| !ended.contains(sid));
+            let after = (state.codex.len(), state.rounds.len(), state.subagents.len());
+            (before != after, gone)
+        };
+        if changed {
+            self.save.notify_one();
+        }
+        for pane in notified.into_keys().filter(|p| gone.contains(p)) {
+            let notifier = self.effects_env.notifier.clone();
+            spawn_local(async move { notifier.close(&pane).await });
+        }
     }
 
     /// One hook event, and whether its pane's queues can go (the pane is
@@ -571,7 +618,7 @@ impl Daemon {
             }
         };
         if want_panes {
-            self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
+            self.sweep(&read.others);
         }
         let chain = request
             .chain
@@ -631,9 +678,20 @@ impl Daemon {
     ) -> (Batch, Vec<core::Op>) {
         let mut effects = {
             let mut state = self.state.borrow_mut();
-            let before = state.clone();
+            // Not the whole state: an event touches Codex bookkeeping only
+            // for its own pane, and that is the big part.
+            let before = (
+                state.subagents.clone(),
+                state.rounds.clone(),
+                state.codex.get(&input.pane).cloned(),
+            );
             let effects = core::handle(&mut state, input, facts);
-            if *state != before {
+            if (
+                &state.subagents,
+                &state.rounds,
+                state.codex.get(&input.pane),
+            ) != (&before.0, &before.1, before.2.as_ref())
+            {
                 self.save.notify_one();
             }
             effects
@@ -854,7 +912,7 @@ impl Daemon {
                 return Err(missing);
             }
         };
-        self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
+        self.sweep(&read.others);
         let Some((batch, after)) = self.observe_now(pane, &read, view, w.agent).await else {
             self.watched.borrow_mut().remove(pane);
             return Ok(None);
@@ -1205,6 +1263,19 @@ impl Daemon {
             log(&format!("saving state: {e}"));
         }
     }
+}
+
+/// What was missing at this sweep and the last one: gone for good. A single
+/// miss is not enough, since a sweep's list may predate a pane or a session
+/// whose first event is handled while the list is on its way.
+fn second_miss<'a>(
+    missing: &mut HashSet<String>,
+    now: impl Iterator<Item = &'a String>,
+) -> HashSet<String> {
+    let (gone, first): (HashSet<String>, HashSet<String>) =
+        now.cloned().partition(|k| missing.contains(k));
+    *missing = first;
+    gone
 }
 
 fn now_ms() -> u64 {

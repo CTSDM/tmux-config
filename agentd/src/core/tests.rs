@@ -642,6 +642,7 @@ fn other(pane: &str, state: &str, subs: &str, space: &str) -> OtherPane {
         pane: pane.into(),
         state: state.into(),
         subs: subs.into(),
+        sid: String::new(),
         space: space.into(),
     }
 }

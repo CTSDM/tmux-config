@@ -118,6 +118,8 @@ pub struct OtherPane {
     pub pane: String,
     pub state: String,
     pub subs: String,
+    /// `@agent_session`: which subagent sets are still live (sweep).
+    pub sid: String,
     pub space: String,
 }
 
