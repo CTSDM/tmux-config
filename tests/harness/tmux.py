@@ -119,6 +119,8 @@ class TmuxServer:
         keep = ("PATH", "USER", "LOGNAME", "TZ")
         self.env: dict[str, str] = {k: os.environ[k] for k in keep if k in os.environ}
         self.env.update(uv_dirs())
+        # The implementation's own knobs, e.g. AGENTD_TRANSPORT=spawn.
+        self.env.update({k: v for k, v in os.environ.items() if k.startswith("AGENTD_") and v})
         self.env.update(
             {
                 "HOME": str(root / "home"),
@@ -377,9 +379,9 @@ class TmuxServer:
 
     # --- teardown ------------------------------------------------------------
 
-    def terminal(self, session: str | None) -> "Terminal":
+    def terminal(self, session: str | None, cols: int = 200, rows: int = 50) -> "Terminal":
         """Another real client, rendered (killed with the server)."""
-        term = Terminal(self, session)
+        term = Terminal(self, session, cols, rows)
         self.extra.append(term)
         return term
 

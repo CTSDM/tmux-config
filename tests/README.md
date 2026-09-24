@@ -20,6 +20,7 @@ uv run pyright                         # strict
 | `AGENT_CONF` | tmux configuration sourced into each test server (default `agents.conf` next to the bash bin directory) |
 | `AG_TEST_TMPDIR` | where temp dirs go (default `/tmp`; Unix socket paths must stay short) |
 | `AG_TEST_KEEP=1` | keep each test's temp dir (sink, logs, `state/tmux-agents/`) |
+| `AGENTD_*` | passed on to the test servers, so agentd sees them (e.g. `AGENTD_TRANSPORT=spawn`, the fallback) |
 
 Every test has its own server, runtime dir and sound debounce, so tests
 are independent and the suite must pass the same in series and with `-n`.
