@@ -8,6 +8,7 @@
 //! on one thread.
 
 mod effects;
+mod notify;
 mod procs;
 mod rollout;
 mod sound;
@@ -143,6 +144,7 @@ async fn serve(
     let mut int = signal(SignalKind::interrupt())?;
 
     let saved = store::load(&paths.state, instance);
+    let save = Rc::new(Notify::new());
     let daemon = Rc::new(Daemon {
         tmux: Tmux::new(socket, instance.pid),
         server: instance,
@@ -155,12 +157,19 @@ async fn serve(
         panes: RefCell::new(HashMap::new()),
         watched: RefCell::new(HashMap::new()),
         ticking: Cell::new(false),
-        save: Notify::new(),
         effects_env: effects::Env {
             sound: sound::Config::from_env(identity::runtime_dir(
                 env::var_os("XDG_RUNTIME_DIR").as_deref(),
             )),
+            notifier: Rc::new(notify::Notifier::new(
+                env::var_os("AG_SINK")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
+                saved.notifications,
+                save.clone(),
+            )),
         },
+        save,
         paths,
         started_ms: now_ms(),
     });
@@ -208,6 +217,8 @@ enum Job {
     Observe(Rc<ProcView>),
     /// E2: reconcile the pane; told when done.
     Reconcile(oneshot::Sender<()>),
+    /// E1: the pane got focus; told once written.
+    Seen(oneshot::Sender<()>),
 }
 
 /// A Codex pane under observation (X5).
@@ -248,7 +259,7 @@ struct Daemon {
     watched: RefCell<HashMap<String, Watch>>,
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
-    save: Notify,
+    save: Rc<Notify>,
     effects_env: effects::Env,
     paths: Paths,
     started_ms: u64,
@@ -283,6 +294,15 @@ impl Daemon {
     async fn ctl(self: &Rc<Self>, request: &CtlRequest) -> Reply {
         match request.ctl.as_str() {
             "reconcile" => self.reconcile(&request.args).await,
+            "seen" => match request.args.as_slice() {
+                [pane] => {
+                    let (done, written) = oneshot::channel();
+                    self.queue(pane, Job::Seen(done));
+                    let _ = written.await;
+                    Reply::ok()
+                }
+                _ => Reply::error("usage: agentd ctl seen <pane>"),
+            },
             "status" => Reply::data(json!({
                 "pid": std::process::id(),
                 "tmux": self.tmux.env(),
@@ -349,6 +369,22 @@ impl Daemon {
                     }
                     Ok(None) => false,
                     Err(missing) => missing == Missing::Pane,
+                },
+                Job::Seen(done) => match self.tmux.read(&pane, false, false).await {
+                    Ok(read) => {
+                        let mut effects = core::seen(&read.pane);
+                        if let Some(Effect::Options(ops)) = effects.first() {
+                            self.tmux.write(&pane, ops).await;
+                        }
+                        let _ = done.send(());
+                        effects.remove(0);
+                        self.run_effects(self.ctx(&pane, &read), effects);
+                        false
+                    }
+                    Err(missing) => {
+                        let _ = done.send(());
+                        missing == Missing::Pane
+                    }
                 },
                 Job::Reconcile(done) => {
                     let retire = match self.on_reconcile(&pane).await {
@@ -519,16 +555,6 @@ impl Daemon {
             effects
         };
         let ctx = self.ctx(&input.pane, read);
-        // Phase 1: the bash notifier keeps its id in the pane. As in bash, the
-        // close comes before the writes, so SessionEnd leaves no option behind;
-        // through the effect queue, after the effects of earlier events (O3).
-        let close = effects.iter().position(|e| *e == Effect::NotifyClose);
-        if let Some(i) = close.filter(|_| ctx.notify_open) {
-            effects.remove(i);
-            let (done, finished) = oneshot::channel();
-            self.queue_effects(ctx.clone(), vec![Effect::NotifyClose], Some(done));
-            let _ = finished.await;
-        }
         let ops = match effects.first() {
             Some(Effect::Options(ops)) => ops.clone(),
             _ => Vec::new(),
@@ -829,7 +855,6 @@ impl Daemon {
         effects::Ctx {
             pane: pane.to_string(),
             bin: read.bin.clone(),
-            notify_open: !read.notify_id.is_empty(),
             tmux_env: self.tmux.env().to_string(),
             sound_on: read.sound != "off",
             volume: read.sound_volume.clone(),
@@ -924,6 +949,7 @@ impl Daemon {
                 .iter()
                 .map(|(pane, r)| (pane.clone(), r.saved))
                 .collect(),
+            notifications: self.effects_env.notifier.ids(),
         };
         if let Err(e) = store::save(&self.paths.state, &saved) {
             log(&format!("saving state: {e}"));
