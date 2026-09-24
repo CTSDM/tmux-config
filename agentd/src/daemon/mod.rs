@@ -8,6 +8,8 @@
 //! on one thread.
 
 mod effects;
+mod procs;
+mod rollout;
 mod store;
 mod tmux;
 mod visibility;
@@ -36,10 +38,12 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet, spawn_local};
 use tokio::time::{sleep, timeout};
 
-use crate::core::{self, Effect, Facts, Input};
+use crate::core::codex::{self, After, CodexFacts, Procs};
+use crate::core::{self, Effect, Event, Facts, Input, Kind};
 use crate::identity::{self, Paths};
 use crate::procfs;
 use crate::proto::{CtlRequest, HookRequest, Reply, Request};
+use procs::ProcView;
 use store::{Saved, SavedReminder, Server};
 use tmux::{Missing, Read, Tmux};
 use visibility::Seams;
@@ -52,6 +56,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SAVE_DELAY: Duration = Duration::from_millis(200);
 /// B1's marker of shells started by Claude's Bash tool.
 const SNAPSHOT_SHELL: &str = "shell-snapshots/snapshot-";
+/// X5: Codex panes are observed about this often.
+const TICK: Duration = Duration::from_secs(2);
 
 pub fn run() -> ExitCode {
     match start() {
@@ -146,6 +152,8 @@ async fn serve(
         state: RefCell::new(saved.core),
         reminders: RefCell::new(HashMap::new()),
         panes: RefCell::new(HashMap::new()),
+        watched: RefCell::new(HashMap::new()),
+        ticking: Cell::new(false),
         save: Notify::new(),
         paths,
         started_ms: now_ms(),
@@ -187,7 +195,23 @@ type Queued = (effects::Ctx, Vec<Effect>, Option<oneshot::Sender<()>>);
 
 enum Job {
     Hook(Box<HookRequest>, oneshot::Sender<Reply>),
-    Reminder { since: i64 },
+    Reminder {
+        since: i64,
+    },
+    /// X5: observe a Codex pane, with this tick's view of /proc.
+    Observe(Rc<ProcView>),
+}
+
+/// A Codex pane under observation (X5).
+#[derive(Debug, Clone)]
+struct Watch {
+    /// The agent pid to fall back on while the pane names none.
+    agent: u32,
+    session: String,
+    /// When the turn ended by hook without the rollout confirming it.
+    finished_since: Option<u64>,
+    /// An observation of this pane is queued and not done yet.
+    queued: bool,
 }
 
 struct Reminder {
@@ -213,6 +237,9 @@ struct Daemon {
     state: RefCell<core::State>,
     reminders: RefCell<HashMap<String, Reminder>>,
     panes: RefCell<HashMap<String, PaneQueues>>,
+    watched: RefCell<HashMap<String, Watch>>,
+    /// The observation tick runs (only while something is watched).
+    ticking: Cell<bool>,
     save: Notify,
     paths: Paths,
     started_ms: u64,
@@ -255,6 +282,7 @@ impl Daemon {
                     .map(|(pane, r)| (pane.clone(), r.saved))
                     .collect::<BTreeMap<_, _>>(),
                 "panes": self.panes.borrow().keys().cloned().collect::<BTreeSet<_>>(),
+                "watching": self.watched.borrow().keys().cloned().collect::<BTreeSet<_>>(),
             })),
             other => Reply::error(format!("unknown command: {other}")),
         }
@@ -304,6 +332,14 @@ impl Daemon {
                     Ok(None) => false,
                     Err(missing) => missing == Missing::Pane,
                 },
+                Job::Observe(view) => match self.observe(&pane, view).await {
+                    Ok(Some((ctx, effects))) => {
+                        self.run_effects(ctx, effects);
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(missing) => missing == Missing::Pane,
+                },
             };
             self.finished(&pane, Some(retire));
         }
@@ -339,6 +375,7 @@ impl Daemon {
             panes.remove(pane);
             drop(panes);
             self.cancel(pane);
+            self.watched.borrow_mut().remove(pane);
         }
     }
 
@@ -374,6 +411,9 @@ impl Daemon {
         for pane in orphans {
             self.cancel(&pane);
         }
+        self.watched
+            .borrow_mut()
+            .retain(|p, _| existing.contains(p.as_str()));
     }
 
     /// One hook event, and whether its pane's queues can go (the pane is
@@ -415,7 +455,17 @@ impl Daemon {
         } else {
             0
         };
-        let facts = self.facts(&read, vis, bg_shells);
+        let codex = (kind == Kind::Codex).then(|| {
+            // The agent's start time, from the chain the hook walked.
+            let start = request
+                .chain
+                .iter()
+                .find(|(pid, _, _)| *pid == agent_pid)
+                .map(|(_, _, s)| *s);
+            let view = core::may_need_procs(kind, ev).then(|| Rc::new(ProcView::scan()));
+            self.codex_facts(&request.pane, &request.event, &read, start, view)
+        });
+        let facts = self.facts(&read, vis, bg_shells, codex);
         let input = Input {
             kind,
             pane: request.pane.clone(),
@@ -424,17 +474,29 @@ impl Daemon {
             agent_pid,
             observing: false,
         };
-        let effects = {
+        let (batch, _) = self.run_core(&input, &facts, &read).await;
+        Ok(Some(batch))
+    }
+
+    /// The core on one event, then everything up to the ack: the close that
+    /// must come first, the writes, the timers, observation. Returns the
+    /// effects left for the effect queue, and the writes made.
+    async fn run_core(
+        self: &Rc<Self>,
+        input: &Input,
+        facts: &Facts,
+        read: &Read,
+    ) -> (Batch, Vec<core::Op>) {
+        let mut effects = {
             let mut state = self.state.borrow_mut();
             let before = state.clone();
-            let effects = core::handle(&mut state, &input, &facts);
+            let effects = core::handle(&mut state, input, facts);
             if *state != before {
                 self.save.notify_one();
             }
             effects
         };
-        let ctx = self.ctx(&request.pane, &read);
-        let mut effects = effects;
+        let ctx = self.ctx(&input.pane, read);
         // Phase 1: the bash notifier keeps its id in the pane. As in bash, the
         // close comes before the writes, so SessionEnd leaves no option behind;
         // through the effect queue, after the effects of earlier events (O3).
@@ -445,7 +507,158 @@ impl Daemon {
             self.queue_effects(ctx.clone(), vec![Effect::NotifyClose], Some(done));
             let _ = finished.await;
         }
-        Ok(Some((ctx, self.apply(&request.pane, effects).await)))
+        let ops = match effects.first() {
+            Some(Effect::Options(ops)) => ops.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(i) = effects.iter().position(|e| *e == Effect::Watch) {
+            effects.remove(i);
+            self.watch(&input.pane, input.agent_pid, &input.event.sid);
+        }
+        ((ctx, self.apply(&input.pane, effects).await), ops)
+    }
+
+    /// Codex's facts: the rollout read on from the pane's bookkeeping.
+    fn codex_facts(
+        &self,
+        pane: &str,
+        event: &Event,
+        read: &Read,
+        agent_start: Option<u64>,
+        view: Option<Rc<ProcView>>,
+    ) -> CodexFacts {
+        let base = codex::rollout_base(&self.state.borrow(), pane, &read.pane);
+        CodexFacts {
+            rollout: rollout::read_on(codex::rollout_path(event, &read.pane), base),
+            agent_start,
+            procs: view.map(|v| v as Rc<dyn Procs>),
+            helpers: read.bin.clone(),
+        }
+    }
+
+    /// X5: start observing a Codex pane unless it is already.
+    fn watch(self: &Rc<Self>, pane: &str, agent: u32, session: &str) {
+        self.watched
+            .borrow_mut()
+            .entry(pane.to_string())
+            .or_insert_with(|| Watch {
+                agent,
+                session: session.to_string(),
+                finished_since: None,
+                queued: false,
+            });
+        if !self.ticking.replace(true) {
+            spawn_local(self.clone().ticker());
+        }
+    }
+
+    /// One tick for all watched panes, with one scan of /proc; it stops when
+    /// nothing is watched.
+    async fn ticker(self: Rc<Self>) {
+        loop {
+            sleep(TICK).await;
+            let due: Vec<String> = {
+                let mut watched = self.watched.borrow_mut();
+                if watched.is_empty() {
+                    self.ticking.set(false);
+                    return;
+                }
+                watched
+                    .iter_mut()
+                    .filter(|(_, w)| !w.queued)
+                    .map(|(pane, w)| {
+                        w.queued = true;
+                        pane.clone()
+                    })
+                    .collect()
+            };
+            if due.is_empty() {
+                continue;
+            }
+            let view = Rc::new(ProcView::scan());
+            for pane in due {
+                self.queue(&pane, Job::Observe(view.clone()));
+            }
+        }
+    }
+
+    /// X5: what the rollout and /proc say that no hook did; then whether to
+    /// go on observing (`watch()` of agent-codex).
+    async fn observe(
+        self: &Rc<Self>,
+        pane: &str,
+        view: Rc<ProcView>,
+    ) -> Result<Option<Batch>, Missing> {
+        let Some(mut w) = self.watched.borrow_mut().get_mut(pane).map(|w| {
+            w.queued = false;
+            w.clone()
+        }) else {
+            return Ok(None);
+        };
+        let read = match self.tmux.read(pane, true, true).await {
+            Ok(read) => read,
+            Err(missing) => {
+                if missing == Missing::Pane {
+                    self.watched.borrow_mut().remove(pane);
+                }
+                return Err(missing);
+            }
+        };
+        self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
+        if read.pane.sid.is_empty() || read.pane.agent != "codex" {
+            self.watched.borrow_mut().remove(pane);
+            return Ok(None);
+        }
+        let agent = read.pane.agent_pid.parse().unwrap_or(w.agent);
+        let start = view.start_of(agent);
+        // The agent is gone when its pid and start time no longer match.
+        let gone = match start {
+            None => true,
+            Some(s) => {
+                !read.pane.agent_pid_start.is_empty() && read.pane.agent_pid_start != s.to_string()
+            }
+        };
+        let event = Event {
+            ev: if gone { "SessionEnd" } else { "CodexReconcile" }.into(),
+            sid: read.pane.sid.clone(),
+            turn: read.pane.turn.clone(),
+            transcript: read.pane.transcript.clone(),
+            ..Event::default()
+        };
+        let codex = self.codex_facts(pane, &event, &read, start, Some(view));
+        let vis = Some(self.visibility(&read).await);
+        let facts = self.facts(&read, vis, 0, Some(codex));
+        let input = Input {
+            kind: Kind::Codex,
+            pane: pane.to_string(),
+            event,
+            config_dir: None,
+            agent_pid: agent,
+            observing: true,
+        };
+        let (batch, ops) = self.run_core(&input, &facts, &read).await;
+        let after = After::from(&read.pane, &ops);
+        let keep = {
+            let state = self.state.borrow();
+            codex::keep_watching(
+                &mut w.session,
+                &after,
+                state.codex.get(pane),
+                now_ms(),
+                &mut w.finished_since,
+            )
+        };
+        let mut watched = self.watched.borrow_mut();
+        if keep {
+            if let Some(entry) = watched.get_mut(pane) {
+                entry.session = w.session;
+                entry.finished_since = w.finished_since;
+                entry.agent = agent;
+            }
+        } else {
+            watched.remove(pane);
+        }
+        Ok(Some(batch))
     }
 
     async fn on_reminder(
@@ -464,13 +677,19 @@ impl Daemon {
         self.save.notify_one();
         let read = self.tmux.read(pane, true, false).await?;
         let vis = self.visibility(&read).await;
-        let effects = core::reminder(since, &self.facts(&read, Some(vis), 0));
+        let effects = core::reminder(since, &self.facts(&read, Some(vis), 0, None));
         Ok(Some((self.ctx(pane, &read), effects)))
     }
 
-    fn facts(&self, read: &Read, vis: Option<core::Visibility>, bg_shells: u32) -> Facts {
+    fn facts(
+        &self,
+        read: &Read,
+        vis: Option<core::Visibility>,
+        bg_shells: u32,
+        codex: Option<CodexFacts>,
+    ) -> Facts {
         Facts {
-            codex: None,
+            codex,
             now: (now_ms() / 1000) as i64,
             host: self.host.clone(),
             pane: read.pane.clone(),

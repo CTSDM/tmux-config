@@ -9,6 +9,8 @@ pub struct Stat {
     pub comm: String,
     pub state: char,
     pub ppid: u32,
+    /// The Unix session.
+    pub session: u32,
     pub starttime: u64,
 }
 
@@ -24,8 +26,32 @@ pub fn parse_stat(pid: u32, text: &str) -> Option<Stat> {
         comm,
         state: rest.first()?.chars().next()?,
         ppid: rest.get(1)?.parse().ok()?,
+        session: rest.get(3)?.parse().ok()?,
         starttime: rest.get(19)?.parse().ok()?,
     })
+}
+
+/// Every process: one pass over /proc.
+pub fn all() -> Vec<Stat> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(stat)
+        .collect()
+}
+
+/// NUL-separated /proc file (environ, cmdline) as its entries.
+pub fn entries(pid: u32, file: &str) -> Option<Vec<String>> {
+    let raw = fs::read(format!("/proc/{pid}/{file}")).ok()?;
+    Some(
+        raw.split(|b| *b == 0)
+            .filter(|e| !e.is_empty())
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect(),
+    )
 }
 
 pub fn stat(pid: u32) -> Option<Stat> {
@@ -117,8 +143,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (s.comm.as_str(), s.state, s.ppid, s.starttime),
-            ("a) b (c", 'S', 1, 12345)
+            (s.comm.as_str(), s.state, s.ppid, s.session, s.starttime),
+            ("a) b (c", 'S', 1, 7, 12345)
         );
         assert!(parse_stat(7, "7 (x) S 1").is_none());
     }
@@ -136,8 +162,9 @@ mod tests {
 
     #[test]
     fn children_and_command_lines() {
-        let mut child = std::process::Command::new("sleep")
-            .args(["5", "shell-snapshots/snapshot-test"])
+        // The marker as $0 of a shell (sleep would reject it and exit).
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 5", "shell-snapshots/snapshot-test"])
             .spawn()
             .unwrap();
         let me = std::process::id();

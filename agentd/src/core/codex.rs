@@ -701,6 +701,8 @@ pub struct After {
     pub session: String,
     pub state: String,
     pub bg: String,
+    /// `@agent_pid`: the agent the pane tracks.
+    pub agent_pid: String,
 }
 
 impl After {
@@ -721,6 +723,7 @@ impl After {
             session: value("@agent_session", &pane.sid),
             state: value("@agent_state", &pane.state),
             bg: value("@agent_bg", &pane.bg),
+            agent_pid: value("@agent_pid", &pane.agent_pid),
         }
     }
 }

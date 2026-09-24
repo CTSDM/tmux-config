@@ -27,7 +27,7 @@ const SPACE: &str = "#{?@space,#{@space},#{@space_auto}}";
 const MUTE: &str = "#{E:#{s/XSPACEX/#{s/[^A-Za-z0-9_-]/_/:#{?@space,#{@space},#{@space_auto}}}/:#{l:#{@agent_mute_XSPACEX}}}}";
 
 /// The pane's fields, title last (it is the most likely to hold odd bytes).
-const PANE_FIELDS: [&str; 19] = [
+const PANE_FIELDS: [&str; 26] = [
     "#{pane_id}",
     "#{pane_pid}",
     "#{@agent_state}",
@@ -46,6 +46,13 @@ const PANE_FIELDS: [&str; 19] = [
     "#{@agent_remind_after}",
     "#{@agent_test_regex}",
     "#{@agents_bin}",
+    "#{@agent}",
+    "#{@agent_turn}",
+    "#{@agent_transcript}",
+    "#{@agent_pid}",
+    "#{@agent_pid_start}",
+    "#{@agent_bg}",
+    "#{@agent_bg_watch}",
     "#{pane_title}",
 ];
 
@@ -226,8 +233,14 @@ fn parse(out: &str) -> Result<Read, Missing> {
                         session: f[10].into(),
                         space: f[13].into(),
                         muted: !f[13].is_empty() && f[14] == "on",
-                        title: f[18].into(),
-                        ..Pane::default()
+                        agent: f[18].into(),
+                        turn: f[19].into(),
+                        transcript: f[20].into(),
+                        agent_pid: f[21].into(),
+                        agent_pid_start: f[22].into(),
+                        bg: f[23].into(),
+                        bg_watch: f[24].into(),
+                        title: f[25].into(),
                     },
                     notify_id: f[9].into(),
                     window_active: f[11] == "1",
@@ -280,7 +293,7 @@ mod tests {
 
     #[test]
     fn parses_pane_clients_and_panes() {
-        let mut d = vec![""; 19];
+        let mut d = vec![""; 26];
         d[0] = "%3";
         d[1] = "4242";
         d[2] = "needs";
@@ -292,7 +305,9 @@ mod tests {
         d[13] = "work";
         d[14] = "on";
         d[17] = "/x/bin";
-        d[18] = "✳ multi\nline";
+        d[18] = "codex";
+        d[21] = "4242";
+        d[25] = "✳ multi\nline";
         let out = record('D', &d)
             + &record(
                 'C',
@@ -309,6 +324,10 @@ mod tests {
         assert!(r.pane.muted);
         assert!(r.window_active && !r.pane_active);
         assert_eq!(r.bin, "/x/bin");
+        assert_eq!(
+            (r.pane.agent.as_str(), r.pane.agent_pid.as_str()),
+            ("codex", "4242")
+        );
         assert_eq!(r.clients.len(), 2);
         assert!(r.clients[1].control);
         assert_eq!(r.others[1].subs, "2");
@@ -316,7 +335,7 @@ mod tests {
 
     #[test]
     fn mute_needs_a_space() {
-        let mut d = vec![""; 19];
+        let mut d = vec![""; 26];
         d[0] = "%1";
         d[1] = "1";
         d[14] = "on";
@@ -331,7 +350,7 @@ mod tests {
             Err(Missing::Tmux)
         );
         // tmux 3.6 "displays" a pane that is gone, with every field empty.
-        assert_eq!(parse(&record('D', &[""; 19])), Err(Missing::Pane));
+        assert_eq!(parse(&record('D', &[""; 26])), Err(Missing::Pane));
     }
 
     #[test]
