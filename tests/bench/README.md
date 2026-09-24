@@ -29,4 +29,4 @@ What it measures (targets from [design.md](../../docs/daemon/design.md)):
   and while nothing blinks. No client is attached, so tmux does not redraw.
   Target: ≤ 1% blinking, 0 idle.
 
-[baseline-bash.md](baseline-bash.md) has the reference numbers; baseline-rust-phase*.md compare agentd with bash, phase by phase. Test a named commit: build agentd from it (`git archive <commit> agentd | tar -x`, `cargo build --release --offline --locked`) rather than a binary in a worktree that may be rebuilt meanwhile.
+[baseline-bash.md](baseline-bash.md) has the reference numbers; baseline-rust-phase*.md compare agentd with bash, phase by phase. Test a named commit: export it whole (`git archive <commit> | tar -x -C <dir>`, run from the repo's top: the suite also needs `theme.conf` next to `agents/`), build agentd there (`cargo build --release --offline --locked`) and point `AGENTD` and `AGENT_BASH_BIN` at it, rather than at a worktree that may be rebuilt meanwhile.
