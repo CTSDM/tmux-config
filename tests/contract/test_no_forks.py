@@ -50,8 +50,10 @@ def scene(make_server: Callable[..., TmuxServer]) -> Scene:
     server.run_tool([str(server.impl.bin / "agent-spaces"), "load"])
     assert isinstance(server.client, Terminal)
     time.sleep(SETTLE)
-    # A session nobody has shown yet has no layout width, so the first visit
-    # lays its bar out (F2: the width differs). Visit each once, as in use.
+    # A session nobody has shown yet has no layout width, so its first visit
+    # lays its bar out (F2: the width differs): once per session for the
+    # server's whole life, and there is no width to lay it out for before a
+    # client shows it. Visit each once, as in use, before measuring.
     server.client.switch("work")
     time.sleep(SETTLE)
     server.client.switch("main")
@@ -164,3 +166,33 @@ def test_F2_windows_opened_and_closed_under_a_narrow_client(scene: Scene) -> Non
         server.tmux("kill-window", "-t", window)
     eventually(lambda: layout(server, "work"), lambda v: v == before, 5, "the bar back as it was")
     assert small.value("#{client_session}") == "work"
+
+
+# --- a tmux 3.6 pitfall ------------------------------------------------------------------
+
+
+def alive(server: TmuxServer) -> bool:
+    return procs.alive(server.pid) and server.tmux("list-sessions", check=False) != ""
+
+
+def test_F_server_survives_a_client_still_connecting(scene: Scene) -> None:
+    """A client that has connected but not yet identified itself has no
+    name: in a #{L:} loop over clients tmux 3.6 strdup()s that NULL and the
+    server dies. There is nearly always such a client while hooks run (any
+    `tmux` command connecting), so the hooks' loops must skip it. Here one
+    is held open through a switch, a seen pane and a switch back."""
+    import socket
+
+    server = scene.server
+    agent = server.agent("claude", "work")
+    server.tmux("select-window", "-t", agent.pane)
+    working(agent)
+    agent.hook("Stop")
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+        raw.connect(server.socket_path)  # and says nothing
+        scene.user.switch("work")
+        time.sleep(SETTLE)
+        assert alive(server), "the tmux server died on the switch to work"
+        scene.user.switch("main")
+        time.sleep(SETTLE)
+        assert alive(server), "the tmux server died on the switch back"
