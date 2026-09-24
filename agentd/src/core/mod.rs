@@ -277,6 +277,17 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
     events::handle(state, input, facts)
 }
 
+/// E1, seen: the pane got focus. A finished pane is seen (`done` → `idle`,
+/// `@agent_since` untouched) and its notification closes.
+pub fn seen(pane: &Pane) -> Vec<Effect> {
+    let ops = if pane.state == "done" {
+        vec![Op::Set("@agent_state", "idle".into())]
+    } else {
+        Vec::new()
+    };
+    vec![Effect::Options(ops), Effect::NotifyClose]
+}
+
 /// The reminder fired (N4, C1, C2): what to do now that `@agent_remind_after`
 /// has passed since the `needs` that started at `since`.
 pub fn reminder(since: i64, facts: &Facts) -> Vec<Effect> {
