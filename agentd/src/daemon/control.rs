@@ -38,8 +38,13 @@ pub struct Control {
 impl Control {
     /// Attaches: our session (created if needed, gone when we detach), no
     /// pane output, never sizing a window, never the narrowest client.
-    /// `sessions_changed` is told when a session is created or closed.
-    pub fn start(socket: &Path, sessions_changed: Rc<Notify>) -> std::io::Result<Control> {
+    /// `sessions_changed` is told when a session is created or closed, and
+    /// `messages` gets the text of every `display-message -c` to our client.
+    pub fn start(
+        socket: &Path,
+        sessions_changed: Rc<Notify>,
+        messages: mpsc::UnboundedSender<String>,
+    ) -> std::io::Result<Control> {
         let mut child = Command::new("tmux")
             // UTF-8 whatever the locale: a client tmux takes for ASCII gets
             // `_` for every control character and non-ASCII letter.
@@ -105,6 +110,9 @@ impl Control {
                         lines,
                     }) => deliver(&reader_pending, ok, lines),
                     Some(Event::SessionsChanged) => sessions_changed.notify_one(),
+                    Some(Event::Message(text)) => {
+                        let _ = messages.send(text);
+                    }
                     Some(Event::Exit) => break,
                     _ => {}
                 }
@@ -183,6 +191,8 @@ enum Event {
         lines: Vec<String>,
     },
     SessionsChanged,
+    /// `%message <text>`: a `display-message -c` to our client.
+    Message(String),
     Exit,
 }
 
@@ -207,7 +217,9 @@ impl Parser {
                 } else if line == "%sessions-changed" {
                     Some(Event::SessionsChanged)
                 } else {
-                    None // a notification
+                    // `%message`, or another notification.
+                    line.strip_prefix("%message ")
+                        .map(|text| Event::Message(text.to_string()))
                 }
             }
             Some((tag, _, lines)) => {
@@ -261,7 +273,7 @@ mod tests {
         let mut p = Parser::default();
         let events = feed(
             &mut p,
-            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%sessions-changed\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
+            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%sessions-changed\n%message agentd seen %3\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
         );
         assert_eq!(
             events,
@@ -272,6 +284,7 @@ mod tests {
                     lines: vec![]
                 },
                 Event::SessionsChanged,
+                Event::Message("agentd seen %3".into()),
                 // A forged end (another number) is content.
                 Event::Block {
                     ours: true,

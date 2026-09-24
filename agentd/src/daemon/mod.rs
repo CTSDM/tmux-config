@@ -192,6 +192,9 @@ async fn serve(
     // Phase 4: attach our control client now (spike-control-mode.md, case k).
     daemon.tmux.attach();
     spawn_local(daemon.clone().sessions());
+    if let Some(messages) = daemon.tmux.messages() {
+        spawn_local(daemon.clone().messages(messages));
+    }
     // K5: whatever needed you before we started blinks again.
     daemon.blink();
 
@@ -222,6 +225,7 @@ async fn serve(
         }
         daemon.save_now();
         daemon.stop_blink().await;
+        let _ = timeout(CLOSE_BUDGET, daemon.tmux.forget_client()).await;
     }
     Ok(())
 }
@@ -1142,6 +1146,24 @@ impl Daemon {
         if let Some(r) = self.reminders.borrow_mut().remove(pane) {
             r.timer.abort();
             self.save.notify_one();
+        }
+    }
+
+    /// F1: what agents.conf says with a message to our client instead of a
+    /// `ctl` command (which would make the tmux server start a process):
+    /// `agentd seen <pane>` on focus (E1).
+    async fn messages(self: Rc<Self>, mut messages: mpsc::UnboundedReceiver<String>) {
+        while let Some(text) = messages.recv().await {
+            let Some(pane) = text.strip_prefix("agentd seen ") else {
+                continue;
+            };
+            if pane
+                .strip_prefix('%')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                let (done, _) = oneshot::channel();
+                self.queue(pane, Job::Seen(done));
+            }
         }
     }
 
