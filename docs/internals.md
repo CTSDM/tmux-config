@@ -367,3 +367,7 @@ uv run --no-project --with jeepney --with pyright pyright
 - **In `client-session-changed`, `#{client_width}` is some client of the
   session,** not always the one that switched: `#{hook_client}` is, and a
   `#{L:}` loop gets its width.
+- **`#{client_name}` in a `#{L:}` loop crashes tmux 3.6** when a client has
+  just connected and not identified yet (no name: a NULL `strdup`). Read it
+  only behind `#{?client_session,...}`; `list-clients` and `choose-client`
+  skip such clients by themselves.

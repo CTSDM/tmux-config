@@ -1170,6 +1170,9 @@ fn f1_focus_reaches_agentd_without_a_process() {
     };
     server.hook(&pane, ev("SessionStart"));
     finish(&server);
+    // A client that has just connected (tmux names it only once it identifies):
+    // the hook must not read its name (tmux 3.6 crashes on it in a #{L:} loop).
+    let _connecting = UnixStream::connect(&server.socket).unwrap();
     // A terminal on main, with focus; then the agent's window comes to the front.
     let mut terminals = Terminals::new(&server);
     terminals.open("attach -t main");
@@ -1178,6 +1181,11 @@ fn f1_focus_reaches_agentd_without_a_process() {
     sleep(Duration::from_millis(200));
     server.tmux(&["select-window", "-t", &pane]);
     wait_for("seen, through the message", || state(&server) == "idle");
+    assert_eq!(
+        server.tmux(&["display", "-p", "ok"]),
+        "ok",
+        "the server lives"
+    );
     let started = || fs::read_to_string(&runs).unwrap_or_default();
     assert!(!started().contains("ctl seen"), "{}", started());
 
@@ -1236,6 +1244,8 @@ fn f2_a_switch_lays_out_only_for_another_width() {
     wait_for("the attach's layout", || layouts() >= 1);
     sleep(Duration::from_millis(200));
     let before = layouts();
+    // A client that has just connected: see f1_focus_reaches_agentd_without_a_process.
+    let _connecting = UnixStream::connect(&server.socket).unwrap();
 
     // work was laid out for this width: no process.
     server.tmux(&["set", "-t", "=work:", "@layout-width", &width]);
@@ -1246,6 +1256,11 @@ fn f2_a_switch_lays_out_only_for_another_width() {
     server.tmux(&["set", "-t", "=main:", "@layout-width", "1"]);
     server.tmux(&["switch-client", "-c", &client, "-t", "=main:"]);
     wait_for("a layout", || layouts() == before + 1);
+    assert_eq!(
+        server.tmux(&["display", "-p", "ok"]),
+        "ok",
+        "the server lives"
+    );
     // A window opened and one closed change the tab rows: a layout each.
     let window = server.tmux(&[
         "new-window",
