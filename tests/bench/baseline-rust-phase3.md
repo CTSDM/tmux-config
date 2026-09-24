@@ -71,8 +71,9 @@ CPU, % of one core (30 s):
 | nothing blinking | 0.00 | 0.00 |
 
 What it says: every hook, Claude and Codex, now takes 1.2-2.9 ms at p50 and
-at most ~3.6 ms at p99, one sample of 50 aside (12.5 ms); the targets are
-met. Leaving `needs` (95 → 1.3 ms) and SessionEnd (92 → 2.9 ms) no longer
+at most ~3.6 ms at p99, except PreToolUse (12.5 and 12.1 ms: with 50 turns
+p99 is the maximum, one sample each; tail.py's 300-turn runs put p99 at
+~3 ms). The targets are met. Leaving `needs` (95 → 1.3 ms) and SessionEnd (92 → 2.9 ms) no longer
 wait for a Python notification helper. The steady scene keeps two
 processes, agentd and the bash blink animator (9.4 MB RSS together), and 20
 waits leave agentd alone (4.9 MB). The blink is the same in both, ~9% of a
