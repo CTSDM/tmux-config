@@ -86,7 +86,7 @@ stay for bash mode.
 | T3.6 | implementador | done (35a8437) | **The tick must not scan all of /proc** (tester's tail analysis, bench/baseline-rust-phase2.md "The p99 tail": ~10 ms of CPU and ~3,700 reads per tick on the runtime thread while Codex is observed, which delays ~1% of hooks by up to 10 ms). X7 and B1 walk the agent's descendants through `/proc/<pid>/task/*/children` (every thread), plus the kept `(pid, start)` of known groups and their descendants, instead of every process: the same trees, at a cost that follows the agent's tree, not the machine. Only when `children` files don't exist (kernel without CONFIG_PROC_CHILDREN), the full scan, and then off the runtime thread (`spawn_blocking`). Check with `bench/tail.py`: no burst per tick left. |
 | T3.5 | tester | done (6e77864, de4a2d6, bench/baseline-rust-phase3.md) | Suite and bench on each delivery; at the end of the phase, no expected failure left in Rust. Latency of leaving `needs` and of SessionEnd next to bash. |
 
-## Phase 4: control mode and the blink in the daemon
+## Phase 4: control mode and the blink in the daemon — done
 
 Goal: hook p50 ≤ 5 ms and the blink ≤ 1% of a core for `agentd`, with the
 daemon invisible (contract §16, Z1). Recipe and pitfalls:
@@ -98,7 +98,7 @@ daemon invisible (contract §16, Z1). Recipe and pitfalls:
 | T4.2 | implementador | done (76f20a1) | **Skip control clients in bash** (`#{client_control_mode}`): `agent-spaces layout` (per-session client width), `agent-jump` (viewer and most recently active client), `ag_focused_client`'s tmux-flag fallback. The session name alone is not the protection. |
 | T4.3 | implementador | done (19b8092) | **Blink in the daemon** (K1-K5): same targets, text, frames and timing; writes only the options that changed from the previous frame; `agentd ctl blink-demo`; with `@agentd`, agents.conf's load-time start and the prefix+Q preview (`agent-spaces` menu) go to the daemon, which no longer starts `agent-blink`. |
 | T4.5 | implementador | done (2255a79) | **Z1 gaps** (tester's findings): (a) on `%sessions-changed`, if the daemon's session is the only one left, close it and stop reattaching, so the server exits as without the daemon (today it keeps the server alive); (b) agents.conf rebinds `prefix s`, `w` (`choose-tree -Zs`/`-Zw -f '#{?#{m:_peek-*,#{session_name}},0,1}'`) and `D` (`choose-client -Z -f '#{==:#{client_control_mode},0}'`), in both modes; (c) a plain `tmux attach` must pick a user session: check what tmux 3.6 picks while the daemon's session is the most recent one, and fix it if it can be the daemon's. |
-| T4.4 | tester | doing | Tests for Z1 with `AGENT_IMPL=rust` (attach, run, kill its session, last user session closed, daemon exit: sizes, layout options, seen, `agent-jump`'s pick, lists, `session_attached`); K with the in-process blink; bench: hook latency and blink CPU of `agentd` next to phase 3. |
+| T4.4 | tester | done (62e6422, 416cb11, bench/baseline-rust-phase4.md) | Tests for Z1 with `AGENT_IMPL=rust` (attach, run, kill its session, last user session closed, daemon exit: sizes, layout options, seen, `agent-jump`'s pick, lists, `session_attached`); K with the in-process blink; bench: hook latency and blink CPU of `agentd` next to phase 3. |
 
 Subscriptions (`refresh-client -B`) are left out: with control mode the
 blink's refresh (`list-panes -a` every 6 frames) is cheap. Revisit if a

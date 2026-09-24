@@ -408,8 +408,10 @@ bash's chips have no range: a click on them does nothing.
 ## 16. The daemon is invisible
 
 **Z1.** An implementation that talks to tmux through a client of its own
-(control mode) must not be seen: no window changes size, no bar is laid out
-again (`@narrow-tabs`, `@summary-room`, the rows), no pane is marked seen,
+(control mode) must not be seen: no window changes size, no bar ends up laid
+out differently from what the user's own clients give (`@narrow-tabs`,
+`@summary-room`, the rows; its attach may re-run the layout, which then
+gives the same result, or corrects a stale one), no pane is marked seen,
 `agent-jump` and every client choice keep picking the user's client, no
 session of its own shows in the top row, the session search, the board or
 `agent-next`, tmux's own `prefix s`, `prefix w` and `prefix D`, and the
