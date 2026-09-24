@@ -227,6 +227,7 @@ fn parse(out: &str) -> Result<Read, Missing> {
                         space: f[13].into(),
                         muted: !f[13].is_empty() && f[14] == "on",
                         title: f[18].into(),
+                        ..Pane::default()
                     },
                     notify_id: f[9].into(),
                     window_active: f[11] == "1",

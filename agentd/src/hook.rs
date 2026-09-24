@@ -10,12 +10,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use crate::client;
+use crate::core::codex::fingerprint;
 use crate::core::{Event, Kind};
 use crate::procfs;
 use crate::proto::{HookRequest, Request, VERSION};
 
-/// Cut of every field (I3), in characters.
-const MAX_CHARS: usize = 300;
 /// A bigger payload is cut here; the fields we keep are short anyway.
 const MAX_PAYLOAD: u64 = 64 << 20;
 /// Parent chain sent for I4 (which looks at 13).
@@ -120,7 +119,34 @@ pub fn event_from_json(json: &Value) -> Option<Event> {
         source: field("source"),
         model: field("model"),
         transcript: field("transcript_path"),
+        turn: match obj.get("turn_id") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        },
+        // X2, X8: the call's fingerprint goes to the daemon, its input doesn't.
+        fingerprint: fingerprint(
+            obj.get("tool_name")
+                .unwrap_or(&Value::String(String::new())),
+            obj.get("tool_input")
+                .unwrap_or(&Value::Object(serde_json::Map::new())),
+        ),
+        accepted: accepted(obj.get("tool_response")),
     })
+}
+
+/// X4: `tool_response.accepted` is true; the response may be a JSON string.
+fn accepted(response: Option<&Value>) -> bool {
+    let parsed;
+    let response = match response {
+        Some(Value::String(s)) => {
+            parsed = serde_json::from_str::<Value>(s).unwrap_or(Value::Null);
+            &parsed
+        }
+        Some(v) => v,
+        None => return false,
+    };
+    response.get("accepted") == Some(&Value::Bool(true))
 }
 
 /// jq's `//`: null, false and missing are absent; everything else counts,
@@ -131,31 +157,11 @@ fn present(v: Option<&Value>) -> Option<&Value> {
 
 /// `tostring | gsub("\\s+"; " ") | .[0:300]` for a present value, "" else.
 fn line(v: Option<&Value>) -> String {
-    let text = match v {
-        None => return String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    };
-    let mut out = String::new();
-    let mut chars = 0;
-    let mut in_space = false;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if in_space {
-                continue;
-            }
-            in_space = true;
-            out.push(' ');
-        } else {
-            in_space = false;
-            out.push(c);
-        }
-        chars += 1;
-        if chars == MAX_CHARS {
-            break;
-        }
+    match v {
+        None => String::new(),
+        Some(Value::String(s)) => crate::core::line(s),
+        Some(other) => crate::core::line(&other.to_string()),
     }
-    out
 }
 
 #[cfg(test)]
@@ -257,6 +263,58 @@ mod tests {
         assert_eq!(d(json!(null)), "");
         assert_eq!(d(json!(false)), "");
         assert_eq!(event(json!({})).detail, "");
+    }
+
+    #[test]
+    fn x1_turn_id() {
+        assert_eq!(event(json!({"turn_id": "t1"})).turn, "t1");
+        assert_eq!(event(json!({"turn_id": null})).turn, "");
+        assert_eq!(event(json!({})).turn, "");
+        assert_eq!(event(json!({"turn_id": 7})).turn, "7");
+    }
+
+    #[test]
+    fn x2_fingerprint_in_the_client() {
+        let e = event(
+            json!({"tool_name": "Bash", "tool_input": {"command": "x", "description": "why"}}),
+        );
+        // agent-codex's call_key: sha256(json.dumps(["Bash", {"command": "x"}], ...))
+        assert_eq!(
+            e.fingerprint,
+            "a0fc644f7c1a418fc9e522bdf46f3dbd4d8c4904782abb31a02961b1bd228e76"
+        );
+        // Missing: "" and {} as in agent-codex.
+        assert_eq!(
+            event(json!({})).fingerprint,
+            fingerprint(&json!(""), &json!({}))
+        );
+        assert_eq!(
+            event(json!({"tool_name": "Bash", "tool_input": null})).fingerprint,
+            fingerprint(&json!("Bash"), &Value::Null)
+        );
+    }
+
+    #[test]
+    fn x4_accepted() {
+        let accepted = |r: Value| event(json!({"tool_response": r})).accepted;
+        assert!(accepted(json!({"accepted": true})));
+        assert!(accepted(json!("{\"accepted\":true}")));
+        assert!(!accepted(json!({"accepted": false})));
+        assert!(!accepted(json!({"accepted": "true"})));
+        assert!(!accepted(json!("{}")));
+        assert!(!accepted(json!("not json")));
+        assert!(!accepted(Value::Null));
+        assert!(!event(json!({})).accepted);
+    }
+
+    #[test]
+    fn x8_no_tool_input_in_the_request() {
+        let canary = "canary-command-words";
+        let e = event(json!({"tool_name": "Bash", "tool_use_id": "a",
+            "tool_input": {"command": "ls", "content": canary, "description": canary},
+            "tool_response": {"output": canary}}));
+        let sent = serde_json::to_string(&e).unwrap();
+        assert!(!sent.contains(canary), "{sent}");
     }
 
     #[test]

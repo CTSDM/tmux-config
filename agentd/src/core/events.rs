@@ -1,12 +1,15 @@
-//! Claude events (contract §3, §5, §8, §11), in the order agent-hook applies
-//! them at 885bb9b.
+//! Hook events (contract §3, §5, §6, §8, §11), in the order agent-hook
+//! applies them at 885bb9b. Codex goes through `codex::prepare` first, which
+//! may turn the event into another (an observation that ends the turn) and
+//! decides the state; the rest is shared.
 
 use std::cell::RefCell;
 
 use regex::Regex;
 
+use super::codex::{self, Update};
 use super::text::{escape_hashes, notify_title, subtypes, tool_label, unescape_hashes};
-use super::{ALL_OPTIONS, Effect, Facts, Input, Op, State, Urgency, Visibility};
+use super::{ALL_OPTIONS, Effect, Facts, Input, Kind, Op, State, Urgency, Visibility};
 
 /// S8: the default test regex of agent-hook.
 const TEST_REGEX: &str = r"(^|[[:space:];&|(])((npm|pnpm|yarn|bun)( run)? test|npx (vitest|jest)|vitest|jest|pytest|go test|cargo (test|nextest)|make (test|check)|mix test|dotnet test|rspec|phpunit|ctest|deno test|lake test|python3? -m (pytest|unittest))([[:space:];&|):]|$)";
@@ -56,7 +59,27 @@ impl Writes {
 }
 
 pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
-    let e = &input.event;
+    let codex: Option<Update> = match input.kind {
+        Kind::Claude => None,
+        Kind::Codex => {
+            let Some(cf) = &facts.codex else {
+                return Vec::new();
+            };
+            match codex::prepare(
+                state,
+                &input.pane,
+                &input.event,
+                &facts.pane,
+                cf,
+                input.agent_pid,
+                input.observing,
+            ) {
+                Some(update) => Some(update),
+                None => return Vec::new(), // X1: another session or a stale turn
+            }
+        }
+    };
+    let e = codex.as_ref().map_or(&input.event, |u| &u.event);
     let pane = &facts.pane;
     let cur = pane.state.as_str();
     let mut w = Writes(Vec::new());
@@ -174,14 +197,33 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
             new_state = Some("done".into()); // H9
             w.set("@agent_msg", escape_hashes(&e.last));
             w.unset("@agent_tool");
-            // B1: shells left running in the background.
-            bg_shells = facts.bg_shells;
-            if bg_shells > 0 {
-                effects.push(Effect::Bgwatch {
-                    agent_pid: input.agent_pid,
-                });
+            match &codex {
+                // B1: shells left running in the background.
+                None => {
+                    bg_shells = facts.bg_shells;
+                    if bg_shells > 0 {
+                        effects.push(Effect::Bgwatch {
+                            agent_pid: input.agent_pid,
+                        });
+                    }
+                }
+                // X7: the command trees just counted.
+                Some(u) => {
+                    bg_shells = u
+                        .options
+                        .iter()
+                        .find(|(n, _)| *n == "@agent_bg")
+                        .and_then(|(_, v)| v.parse().ok())
+                        .unwrap_or(0);
+                }
             }
         }
+        "Interrupt" if codex.is_some() => {
+            new_state = Some("idle".into()); // X3
+            w.unset("@agent_tool");
+            w.unset("@agent_prev");
+        }
+        "CodexReconcile" if codex.is_some() => {}
         "StopFailure" => {
             new_state = Some("error".into()); // H10
             let text = [&e.error, &e.last]
@@ -205,9 +247,28 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
         _ => return Vec::new(), // H12, and Codex-only events
     }
 
+    // Codex decides the state (X3) and has its own options (X6).
+    if let Some(u) = &codex {
+        new_state = (!u.state.is_empty()).then(|| u.state.clone());
+        needs = match u.needs.as_str() {
+            "permission" => Some(Needs::Permission),
+            "question" => Some(Needs::Question),
+            _ => None,
+        };
+        for (name, value) in &u.options {
+            if value.is_empty() {
+                w.unset(name);
+            } else {
+                w.set(name, value.clone());
+            }
+        }
+    }
+
     // H14: identity.
     w.set("@agent", input.kind.as_str());
-    w.set("@agent_profile", profile(input.config_dir.as_deref()));
+    if input.kind == Kind::Claude {
+        w.set("@agent_profile", profile(input.config_dir.as_deref()));
+    }
     if !e.sid.is_empty() {
         w.set("@agent_session", e.sid.clone());
     }
@@ -366,6 +427,10 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
     // K5: the turn signal, once the state is written.
     if matches!(new_state.as_deref(), Some("needs" | "done")) {
         effects.push(Effect::Blink);
+    }
+    // X5: a Codex hook (not an observation) makes sure someone observes.
+    if input.kind == Kind::Codex && !input.observing && input.event.agent_id.is_empty() {
+        effects.push(Effect::Watch);
     }
 
     let mut out = vec![Effect::Options(w.0)];
