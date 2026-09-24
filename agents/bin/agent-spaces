@@ -217,7 +217,9 @@ assign() { # [session...]
   while IFS=$US read -r sess path group; do
     (($#)) && [[ " $* " != *" $sess "* ]] && continue
     if [[ $sess == _peek-* ]]; then
-      # A peek session shows the world of the session it peeks into.
+      # A peek session shows the world of the session it peeks into;
+      # agentd's own (_peek-agentd, in no group) shows nothing.
+      [[ -n $group ]] || continue
       local src; src=$(tmux show -qv -t "=$group:" @space)
       tmux set -t "=$sess:" @space "${src:-${space_of[$group]}}"
       apply "$sess" "${space_of[$group]}"

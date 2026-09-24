@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -12,6 +14,7 @@ use serde_json::Value;
 use crate::client;
 use crate::core::codex::fingerprint;
 use crate::core::{Event, Kind};
+use crate::identity;
 use crate::procfs;
 use crate::proto::{HookRequest, Request, VERSION};
 
@@ -19,6 +22,11 @@ use crate::proto::{HookRequest, Request, VERSION};
 const MAX_PAYLOAD: u64 = 64 << 20;
 /// Parent chain sent for I4 (which looks at 13).
 const MAX_CHAIN: usize = 16;
+/// Bash's hook in the checkout this binary was built from: where the rollback
+/// switch sends the events (`@agents_bin` would cost a tmux call). If the
+/// checkout moved, the usual place of the config.
+const BASH_HOOK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../agents/bin/agent-hook");
+const BASH_HOOK_USUAL: &str = ".config/tmux/agents/bin/agent-hook";
 /// How long to wait for a daemon that has to be started first.
 const START_BUDGET: Duration = Duration::from_millis(300);
 /// The ack comes after one tmux read and one write. A daemon stuck longer
@@ -42,6 +50,10 @@ pub fn run(kind: Option<Kind>) {
     ) else {
         return;
     };
+    if identity::off() {
+        bash(kind, &payload);
+        return;
+    }
     // jq reads invalid UTF-8 as U+FFFD; so do we.
     let Ok(json) = serde_json::from_str::<Value>(&String::from_utf8_lossy(&payload)) else {
         return;
@@ -75,6 +87,34 @@ pub fn run(kind: Option<Kind>) {
     if let Some(stream) = client::connect_or_start(&paths, START_BUDGET) {
         let _ = client::call(stream, &request, REPLY_TIMEOUT);
     }
+}
+
+/// The rollback switch: the event goes to bash's `agent-hook`, as it came.
+fn bash(kind: Kind, payload: &[u8]) {
+    let usual = env::var_os("HOME").map(|h| Path::new(&h).join(BASH_HOOK_USUAL));
+    let Some(hook) = [Some(PathBuf::from(BASH_HOOK)), usual]
+        .into_iter()
+        .flatten()
+        .find(|p| p.exists())
+    else {
+        crate::debug::log(&format!(
+            "agentd.off: no bash agent-hook at {BASH_HOOK} or ~/{BASH_HOOK_USUAL}; event dropped"
+        ));
+        return;
+    };
+    let Ok(mut child) = Command::new(hook)
+        .arg(kind.as_str())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload);
+    }
+    let _ = child.wait();
 }
 
 /// I3: the fields the contract uses, as jq's `. // "" | tostring`, with

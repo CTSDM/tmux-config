@@ -38,6 +38,23 @@ pub fn runtime_dir(xdg_runtime_dir: Option<&OsStr>) -> PathBuf {
     Path::new(base).join("tmux-agents")
 }
 
+/// `${XDG_STATE_HOME:-~/.local/state}/tmux-agents`, where bash keeps its
+/// debug switch and logs too.
+pub fn state_dir() -> Option<PathBuf> {
+    let env = |name| std::env::var_os(name).filter(|v| !v.is_empty());
+    env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|h| Path::new(&h).join(".local/state")))
+        .map(|state| state.join("tmux-agents"))
+}
+
+/// The rollback switch (design.md, "Agents already running at cutover"), on
+/// disk so it lasts: while `agentd.off` is in the state folder, bash handles
+/// everything, hooks included, and no daemon starts. One `stat`.
+pub fn off() -> bool {
+    state_dir().is_some_and(|dir| dir.join("agentd.off").exists())
+}
+
 /// The daemon's runtime files for one tmux server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
