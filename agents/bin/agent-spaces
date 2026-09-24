@@ -7,6 +7,7 @@
 #   agent-spaces set <session> <space|auto>
 #   agent-spaces next|prev <client>   switch the client to the next/previous session
 #   agent-spaces go <client> <n>      switch the client to session number n
+#                                     (prefix+g N does this in tmux itself, agents.conf)
 #   agent-spaces layout               fit each session's bar to its terminal's width
 #   agent-spaces which <path>         the space a folder belongs to: "<space> named"
 #                                     (a rule names it), "<space> default" (only "*"
