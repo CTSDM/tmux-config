@@ -44,6 +44,16 @@ SOUNDS = (
 SPACE = "test"
 # A tmux to test instead of the one in PATH (e.g. a build of a newer release).
 TMUX_BIN: Path | None = Path(os.environ["AGENT_TMUX"]).resolve() if os.environ.get("AGENT_TMUX") else None
+
+
+@functools.cache
+def tmux_version() -> tuple[int, int]:
+    """(major, minor) of the tmux under test: `tmux 3.7c` -> (3, 7)."""
+    import re
+
+    tmux = str(TMUX_BIN) if TMUX_BIN else "tmux"
+    found = re.search(r"(\d+)\.(\d+)", subprocess.run([tmux, "-V"], capture_output=True, text=True).stdout)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
 _servers = itertools.count(1)
 
 type Focus = Literal["none", "client", "flag", "terminal"]
