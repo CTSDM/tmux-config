@@ -75,6 +75,7 @@ the `debug` file; `agentd.off`, the way back to bash).
 | `@agent_question` | agent-codex | `sent` after an asynchronous question, dismissed by the next user prompt |
 | `@agent_collaboration` | agent-codex | collaboration mode from the rollout; independent of `@agent_mode` (permissions) |
 | `@agent_pid`, `@agent_pid_start`, `@agent_codex_watch` | agent-codex | root PID, process start time and Codex observer PID |
+| `@p-untracked` | agentd | `1` while the pane runs `claude` or `codex` without `@agent` (◇); `@agent-untracked` reads it with agentd, `pane_current_command` without |
 
 ## From events to states
 
@@ -216,7 +217,8 @@ the round ends, and it is won when two or more panes took part.
 `agent-spaces load` (on config load) reads `spaces.conf`, tags each session
 (`@space_auto` from its start folder, `@space` when set by hand), numbers the
 sessions of each space by name (`@space-index-<space>`), defines the summary
-counts per space (`@cnt-<state>-<space>`) and binds `prefix S` and `prefix Q`.
+counts per space (`@cnt-<state>-<space>`, without agentd) and binds `prefix S`
+and `prefix Q`.
 
 The status rows are `status-format[N] = #{E:@rowN}`. Globally `@row0` is the
 space line (`#{E:@fleet-line}`, per session) and `@row1` the window line
@@ -236,13 +238,38 @@ records the width it laid out for.
 Moving between sessions (`next`, `prev`, `go`, the search) uses the same
 list, sorted by name, that the top row draws with `#{S/n:}`.
 
+**With agentd, the top row counts nothing** (task L1). tmux expands the row
+again on every redraw of a client: every blink frame, every option write,
+every title change. Without agentd, each chip loops over its session's panes
+(`#{W:#{P:#{E:@agent-glyph}}}`) and each count of the summary over every
+pane of every session, dozens of loops per redraw, plus a `/proc` read per
+pane for `pane_current_command` (the ◇): ~12 ms of the server per redraw per
+client at 40 panes. With `@agentd` set, `agent-spaces` fills the templates
+with plain values agentd keeps instead (`agentd/src/daemon/bar.rs`): per
+session `@s-glyphs`, `@s-unseen` and `@s-other-<state>` (the summary's
+counts, unset for none), per pane `@p-untracked`. The row keeps one loop over
+the sessions for its chips; ~0.5 ms. agentd reads what they come from in one
+`display -p` (50 ms after the news, so a burst makes one read) and writes
+only the values that differ, in one request (each write redraws every
+client). The news: its own writes that change `@agent`, `@agent_state`,
+`@agent_subs` or `@agent_bg` from what the last read found (every event
+writes its state again), a window or session added or closed (`%window-*`,
+`%sessions-changed` on its control client), a pane closed (the
+`after-kill-pane` and `pane-exited` hooks send `agentd bar` to that client,
+no process) and sessions tagged by `agent-spaces` (`agentd ctl bar`).
+Nothing polls: a control-mode subscription would notice a `claude` typed in
+a shell without hooks, but tmux checks one every second and reading every
+pane's command cost it ~1.2 ms a second at 40 panes; that ◇ shows at the next
+news instead. Without control mode (`AGENTD_TRANSPORT=spawn`) windows and
+closed panes wait for the next news too.
+
 ## agentd
 
 **Shape.** One binary, four commands: `agentd hook claude|codex` (what the
 agents run: reads the event, keeps the fields the contract uses, sends them
 with its parent process chain to the daemon, waits for the ack; never prints,
 always exits 0), `agentd daemon`, `agentd ensure` (start it unless it runs)
-and `agentd ctl status|seen|reconcile|blink|blink-demo|stop`. One daemon per
+and `agentd ctl status|seen|reconcile|blink|blink-demo|bar|stop`. One daemon per
 tmux server: its files are `agentd-<socket name>-<hash>.{sock,lock,state.json}`
 in `$XDG_RUNTIME_DIR/tmux-agents/`; the lock makes a second one exit at once,
 and a pidfd on the tmux server makes it exit with the server. A hook that
@@ -283,7 +310,8 @@ daemon's environment) never uses control mode.
 notifications (a click runs `agent-jump`), reminders (timers), the blink (it
 takes `agent-blink`'s lock, so the two never draw at once, and writes only
 what changes from frame to frame), Codex observation and background shells
-(one 2 s tick, only while something is observed). The state file keeps the
+(one 2 s tick, only while something is observed), the top row's values (see
+[Spaces and the bar](#spaces-and-the-bar)). The state file keeps the
 state machine's memory, reminders and notification ids; it belongs to one
 tmux server instance (pid and start time) and goes when that server dies.
 
@@ -362,6 +390,10 @@ uv run --no-project --with jeepney --with pyright pyright
   every `fork()` of the server slow (350 ms at 6 GB), and `run-shell` forks
   it. Keys and focus changes use `run-shell -C` (a tmux command, no process)
   and `if -F`; `display-message -c <agentd's client>` is how they reach agentd.
+- **The status line is expanded again on every redraw,** and any option
+  write redraws every client. A loop over panes in it costs on each blink
+  frame, and `pane_current_command` reads `/proc` each time it is expanded;
+  what the bar needs of every pane is best kept in a plain option.
 - **`display-message` expands `%N` as strftime,** so a pane id in its text
   turns into spaces; `-l` prints it as it is.
 - **In `client-session-changed`, `#{client_width}` is some client of the

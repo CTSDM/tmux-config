@@ -12,6 +12,7 @@ use tokio::process::Command;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
+use super::bar;
 use super::control::{self, Control};
 use crate::core::{Op, OtherPane, Pane};
 
@@ -124,6 +125,10 @@ pub struct Tmux {
     /// Messages to our client (`display-message -c`), for the daemon.
     messages: mpsc::UnboundedSender<String>,
     to_daemon: RefCell<Option<mpsc::UnboundedReceiver<String>>>,
+    /// L1: what the top row shows may have changed (bar.rs), and what the
+    /// last read found.
+    bar_changed: Rc<Notify>,
+    bar: RefCell<bar::Bar>,
 }
 
 /// One tmux command, word by word.
@@ -139,6 +144,8 @@ impl Tmux {
         let use_control = std::env::var("AGENTD_TRANSPORT").as_deref() != Ok("spawn");
         let (messages, to_daemon) = mpsc::unbounded_channel();
         Tmux {
+            bar_changed: Rc::new(Notify::new()),
+            bar: RefCell::default(),
             socket,
             env,
             control: RefCell::new(None),
@@ -159,6 +166,10 @@ impl Tmux {
 
     pub fn sessions_changed(&self) -> Rc<Notify> {
         self.sessions_changed.clone()
+    }
+
+    pub fn bar_changed(&self) -> Rc<Notify> {
+        self.bar_changed.clone()
     }
 
     pub fn env(&self) -> &str {
@@ -193,6 +204,7 @@ impl Tmux {
         match Control::start(
             &self.socket,
             self.sessions_changed.clone(),
+            self.bar_changed.clone(),
             self.messages.clone(),
         ) {
             Ok(control) => {
@@ -365,7 +377,7 @@ impl Tmux {
                 "-a",
                 "-F",
                 &format!(
-                    "{RS}P{US}#{{pane_id}}{US}#{{@agent_state}}{US}#{{@agent_subs}}{US}{SPACE}"
+                    "{RS}P{US}#{{pane_id}}{US}#{{@agent_state}}{US}#{{@agent_subs}}{US}#{{@agent_session}}{US}{SPACE}"
                 ),
             ]));
         }
@@ -388,7 +400,23 @@ impl Tmux {
                 Op::Unset(name) => cmd(&["set", "-pu", "-t", pane, name]),
             })
             .collect();
-        self.run(&commands).await.map(drop)
+        let written = self.run(&commands).await.map(drop);
+        if self.bar.borrow().changes(pane, ops) {
+            self.bar_changed.notify_one();
+        }
+        written
+    }
+
+    /// L1: reads what the top row's values come from, and writes those
+    /// that differ.
+    pub async fn refresh_bar(&self) {
+        let Ok(out) = self.run(&[bar::read()]).await else {
+            return;
+        };
+        let writes = self.bar.borrow_mut().update(&out);
+        if !writes.is_empty() {
+            let _ = self.run(&writes).await;
+        }
     }
 }
 
@@ -475,12 +503,13 @@ fn parse(out: &str) -> Result<Read, Missing> {
                 }
             }
             "P" => {
-                let f: Vec<&str> = rest.splitn(4, US).collect();
-                if let [pane, state, subs, space] = f[..] {
+                let f: Vec<&str> = rest.splitn(5, US).collect();
+                if let [pane, state, subs, sid, space] = f[..] {
                     others.push(OtherPane {
                         pane: pane.into(),
                         state: state.into(),
                         subs: subs.into(),
+                        sid: sid.into(),
                         space: space.into(),
                     });
                 }
@@ -526,8 +555,8 @@ mod tests {
                 &["/dev/pts/1", "77", "attached,focused,UTF-8", "api", "0"],
             )
             + &record('C', &["client-9", "9", "control-mode", "api", "1"])
-            + &record('P', &["%3", "needs", "", "work"])
-            + &record('P', &["%4", "done", "2", "home"]);
+            + &record('P', &["%3", "needs", "", "", "work"])
+            + &record('P', &["%4", "done", "2", "s4", "home"]);
         let r = parse(&out).unwrap();
         assert_eq!(r.pane_pid, 4242);
         assert_eq!(r.pane.state, "needs");
@@ -544,6 +573,8 @@ mod tests {
         assert_eq!(r.clients.len(), 2);
         assert!(r.clients[1].control);
         assert_eq!(r.others[1].subs, "2");
+        assert_eq!(r.others[1].sid, "s4");
+        assert_eq!(r.others[1].space, "home");
     }
 
     #[test]

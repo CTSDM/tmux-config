@@ -62,6 +62,15 @@ space_for_path() {
   done
 }
 
+# With agentd (@agentd set), the top row reads plain values the daemon keeps
+# (agentd/src/daemon/bar.rs): per session @s-glyphs, @s-unseen and
+# @s-other-<state>. Without it, formats that loop over every pane, which
+# tmux evaluates again on every redraw of the row (each blink frame).
+lean() {
+  [[ -n ${AG_LEAN+set} ]] || AG_LEAN=$(tmux show -gqv @agentd)
+  [[ -n $AG_LEAN ]]
+}
+
 # Formats, evaluated per session inside #{S:} loops.
 SPACE_OF='#{?@space,#{@space},#{@space_auto}}'
 not_peek() { printf '#{!=:#{m:_peek-*,#{session_name}},1}'; }
@@ -83,7 +92,8 @@ SUMMARY_STATES=(needs done working idle untracked)
 
 # Defines, per space (and "all"), how many agents of the other sessions are in
 # each state: global options @cnt-<state>-<space>, which summary() refers to.
-# Writing the counts out in every format made them too long for tmux.
+# Writing the counts out in every format made them too long for tmux. With
+# agentd, each session's @s-other-<state> instead (unset for none).
 define_counts() {
   local space key base filter item cond cmds=()
   for space in "${spaces[@]}" ""; do
@@ -111,19 +121,20 @@ summary() { # <space or empty for "all">
       idle) color='#{@thm-overlay1}' glyph=○ ;;
       untracked) color='#{@thm-overlay0}' glyph=◇ ;;
     esac
-    n="#{E:@cnt-$item-$key}"
+    if lean; then n="#{@s-other-$item}"; else n="#{E:@cnt-$item-$key}"; fi
     text="$n $item"
     [[ $item == needs ]] && text="$n #{?#{==:$n,1},needs,need} you"
     label=$text
     [[ $item == needs ]] && label="#[bold]$text#[nobold]"
-    local sep="" gap="" psep=""
+    # A count is true unless 0 or empty; || stops at the first one that is.
+    local sep="" gap="" psep="" any="#{||:$before}"
     if [[ -n $before ]]; then
-      sep="#{?#{!=:$before,0},#[fg=#{@thm-overlay0}] - ,}" gap="#{?#{!=:$before,0}, ,}" psep="#{?#{!=:$before,0}, - ,}"
+      sep="#{?$any,#[fg=#{@thm-overlay0}] - ,}" gap="#{?$any, ,}" psep="#{?$any, - ,}"
     fi
-    words+="#{?#{!=:$n,0},$sep#[fg=$color]$label,}"
-    plain+="#{?#{!=:$n,0},$psep$text,}"
-    glyphs+="#{?#{!=:$n,0},$gap#[fg=$color]$glyph$n,}"
-    if [[ -n $before ]]; then before="#{e|+:$before,$n}"; else before=$n; fi
+    words+="#{?$n,$sep#[fg=$color]$label,}"
+    plain+="#{?$n,$psep$text,}"
+    glyphs+="#{?$n,$gap#[fg=$color]$glyph$n,}"
+    before+=${before:+,}$n
   done
   printf '#{?#{e|>=:#{?@summary-room,#{@summary-room},999},#{n:%s}},%s,%s}' "$plain" "$words" "$glyphs"
 }
@@ -147,6 +158,10 @@ fleet_piece() { # <piece: head|chips|tail> <space or empty for "all"> [extra chi
   local muted=""
   [[ -n $space ]] && muted="#{?#{==:#{@agent_mute_${space//[^A-Za-z0-9_-]/_}},on},#[fg=#{@thm-overlay1}]muted  ,}"
   tpl=${tpl//@@MUTED@@/$muted}
+  local unseen='#{W:#{P:#{?#{E:@agent-unseen},x,}}}' glyphs='#{W:#{P:#{E:@agent-glyph}}}'
+  lean && unseen='#{@s-unseen}' glyphs='#{E:@s-glyphs}'
+  tpl=${tpl//@@UNSEEN@@/$unseen}
+  tpl=${tpl//@@GLYPHS@@/$glyphs}
   # What the other sessions are doing; the current one shows in its own tabs.
   [[ $tpl == *@@SUMMARY@@* ]] && tpl=${tpl//@@SUMMARY@@/$(summary "$space")}
   printf '%s' "$tpl"
@@ -212,6 +227,7 @@ apply() { # <session> <space_auto>
 assign() { # [session...]
   local sess path group line
   local -A space_of=()
+  lean || : # asked once, here: the rows are built in subshells
   while IFS=$US read -r sess path group; do
     space_of[$sess]=$(space_for_path "$path")
   done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
@@ -229,6 +245,9 @@ assign() { # [session...]
     fi
   done < <(tmux list-sessions -F "#{session_name}$US#{session_path}$US#{session_group}")
   number_sessions
+  # agentd's values follow the spaces; it hears of them now rather than
+  # within a second (not at all without control mode).
+  if lean; then "$AG_LEAN" ctl bar >/dev/null 2>&1 || true; fi
   layout
 }
 
@@ -351,6 +370,7 @@ layout_session() { # <session> <width>
 layout() {
   local sess width
   local -A widths=()
+  lean || :
   while IFS=$US read -r sess width; do
     [[ -z ${widths[$sess]:-} ]] || ((width < widths[$sess])) && widths[$sess]=$width
   done < <(tmux list-clients -f "$AG_USER_CLIENTS" -F "#{client_session}$US#{client_width}")
@@ -395,7 +415,7 @@ bind_menu() {
 read_rules
 case ${1:-} in
   load)
-    define_counts
+    lean || define_counts
     tmux set -g @spaces "${spaces[*]}" \; set -g @fleet-line "$(fleet_format "")"
     bind_menu
     assign

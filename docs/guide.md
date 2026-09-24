@@ -298,12 +298,14 @@ same.
 mkdir -p ~/.local/state/tmux-agents && touch ~/.local/state/tmux-agents/agentd.off
 ~/.config/tmux/agents/install --bash
 tmux set -gu @agentd
+~/.config/tmux/agents/bin/agent-spaces load
 ~/.local/bin/agentd ctl stop
 ```
 
 `agentd.off` lasts: while it exists, the hooks go to bash (even from agents
 that still call agentd), no daemon starts, the tmux config doesn't turn agentd
-on, and `setup.sh` registers the bash hook. The last step closes the
+on, and `setup.sh` registers the bash hook. `agent-spaces load` builds the
+top row again for bash (with agentd it reads values the daemon keeps). The last step closes the
 notifications agentd had open (a plain `ctl stop`, for an update, keeps them). To return to agentd, delete it,
 run `setup.sh` and reload the config (`prefix R`).
 

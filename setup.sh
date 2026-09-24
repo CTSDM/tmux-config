@@ -101,12 +101,24 @@ if ! command -v cargo &>/dev/null; then
     warn "cargo is not installed: agentd not built, the agent hooks stay on bash."
 else
     info "Building agentd"
-    if cargo build --release --locked --manifest-path "$SCRIPT_DIR/agentd/Cargo.toml" \
-        --target-dir "$SCRIPT_DIR/agentd/target"; then
+    # Static and not position independent on glibc: no dynamic loader or
+    # relocations at start, half of every hook's cost (~1.1 → ~0.6 ms). An
+    # explicit --target keeps the flags off the proc macros, which need PIC.
+    host="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p' || true)"
+    build=(cargo build --release --locked --manifest-path "$SCRIPT_DIR/agentd/Cargo.toml"
+        --target-dir "$SCRIPT_DIR/agentd/target")
+    built="$SCRIPT_DIR/agentd/target/release/agentd"
+    if [[ "$host" == *-linux-gnu ]] && "${build[@]}" --target "$host" \
+        --config "target.$host.rustflags=['-C','target-feature=+crt-static','-C','relocation-model=static']"; then
+        built="$SCRIPT_DIR/agentd/target/$host/release/agentd"
+    elif ! "${build[@]}"; then
+        built=""
+    fi
+    if [ -n "$built" ]; then
         mkdir -p "$(dirname "$AGENTD")"
         # A new file renamed over the old one: a running daemon keeps its inode.
         tmp="$(dirname "$AGENTD")/.agentd.$$"
-        cp "$SCRIPT_DIR/agentd/target/release/agentd" "$tmp"
+        cp "$built" "$tmp"
         chmod 755 "$tmp"
         mv -f "$tmp" "$AGENTD"
         agentd_ok=true

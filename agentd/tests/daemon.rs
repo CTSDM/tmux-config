@@ -273,6 +273,72 @@ fn dead_panes_and_their_reminders_are_swept_at_a_stop() {
     assert!(server.panes().contains(&main));
 }
 
+#[test]
+fn a_killed_pane_leaves_nothing_behind() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    let main = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    let dead = server.new_pane();
+    server.tmux(&["kill-pane", "-t", &dead]);
+    // What a killed pane leaves when no SessionEnd ever comes for it.
+    fs::create_dir_all(server.paths.state.parent().unwrap()).unwrap();
+    let saved = json!({
+        "v": 1,
+        "server": {"pid": server.pid, "start": server.start_time()},
+        "core": {
+            "subagents": {"gone": {"a1": "Explore"}},
+            "rounds": {"work": [dead]},
+            "codex": {(dead.clone()): {"session": "c1"}},
+        },
+        "reminders": {},
+        "notifications": {(dead.clone()): 7},
+    });
+    fs::write(&server.paths.state, saved.to_string()).unwrap();
+    server.start_daemon();
+    // One sweep that misses them is not enough: its list may predate a new
+    // pane or session. The next one forgets them.
+    server.hook(&main, ev("Stop"));
+    let state = &server.status()["state"];
+    assert_eq!(state["codex"].as_object().unwrap().len(), 1);
+    assert_eq!(state["subagents"], json!({"gone": {"a1": "Explore"}}));
+    server.hook(&main, ev("Stop"));
+    let state = &server.status()["state"];
+    assert_eq!(state["codex"], json!({}));
+    assert_eq!(state["rounds"], json!({}));
+    assert_eq!(state["subagents"], json!({}));
+    let sink = server.runtime.join("sink.jsonl");
+    wait_for("the dead pane's notification closed", || {
+        fs::read_to_string(&sink).is_ok_and(|s| {
+            s.lines().any(|l| {
+                let v: Value = serde_json::from_str(l).unwrap_or_default();
+                v["effect"] == "notify-close" && v["pane"] == dead.as_str()
+            })
+        })
+    });
+}
+
+#[test]
+fn a_session_on_a_live_pane_keeps_its_subagents() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let main = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    let other = server.new_pane();
+    server.hook(
+        &other,
+        json!({"hook_event_name": "SessionStart", "session_id": "s2"}),
+    );
+    server.hook(&other, json!({"hook_event_name": "SubagentStart", "session_id": "s2", "agent_id": "a1", "agent_type": "Explore"}));
+    server.hook(&main, ev("Stop"));
+    server.hook(&main, ev("Stop"));
+    assert_eq!(
+        server.status()["state"]["subagents"],
+        json!({"s2": {"a1": "Explore"}})
+    );
+}
+
 fn write_state(path: &Path, pid: u32, start: u64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let saved = json!({
@@ -1279,4 +1345,73 @@ fn f2_a_switch_lays_out_only_for_another_width() {
     server.tmux(&["rename-window", "-t", "main:^", "renamed"]);
     sleep(Duration::from_millis(300));
     assert_eq!(layouts(), before + 3);
+}
+
+#[test]
+fn l1_the_top_rows_values_follow_the_panes() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    for s in ["alpha", "zulu"] {
+        server.tmux(&["new-session", "-d", "-s", s, "sleep 600"]);
+    }
+    for (s, space) in [("main", "work"), ("alpha", "work"), ("zulu", "home")] {
+        server.tmux(&["set", "-t", &format!("={s}:"), "@space_auto", space]);
+    }
+    server.start_daemon();
+    let get = |target: &str, option: &str| server.tmux(&["show", "-qv", "-t", target, option]);
+    let alpha = server.tmux(&["display", "-p", "-t", "alpha", "#{pane_id}"]);
+    server.hook(&alpha, ev("UserPromptSubmit"));
+    // Right after our write: the other session of the space counts it,
+    // the session itself shows its glyph, another space nothing.
+    wait_for("main counts alpha working", || {
+        get("main:", "@s-other-working") == "1"
+    });
+    assert_eq!(get("alpha:", "@s-glyphs"), "#[fg=#{@ac-working}]●");
+    assert_eq!(get("alpha:", "@s-other-working"), "");
+    assert_eq!(get("zulu:", "@s-other-working"), "");
+
+    // An agent without hooks (a program named claude), in a new window: our
+    // control client hears of the window.
+    let claude = server.runtime.join("claude");
+    fs::copy("/bin/sh", &claude).unwrap();
+    let untracked = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "alpha:",
+        &format!("{} -c 'sleep 600; :'", claude.display()),
+    ]);
+    wait_for("main counts it untracked", || {
+        get("main:", "@s-other-untracked") == "1"
+    });
+    let flag = server.tmux(&["show", "-pqv", "-t", &untracked, "@p-untracked"]);
+    assert_eq!(flag, "1");
+    assert_eq!(
+        get("alpha:", "@s-glyphs"),
+        "#[fg=#{@ac-working}]●#[fg=#{@ac-dim}]◇"
+    );
+
+    // A pane killed: agents.conf's hook tells our client.
+    server.tmux(&["kill-pane", "-t", &alpha]);
+    let client = server.tmux(&["show", "-gqv", "@agentd_client"]);
+    server.tmux(&["display-message", "-c", &client, "agentd bar"]);
+    wait_for("alpha's working agent gone from main's count", || {
+        get("main:", "@s-other-working").is_empty()
+    });
+    assert_eq!(get("alpha:", "@s-glyphs"), "#[fg=#{@ac-dim}]◇");
+
+    // alpha moves to zulu's space, as agent-spaces does it.
+    server.tmux(&["set", "-t", "=alpha:", "@space", "home"]);
+    let reply = server.call(json!({"v": 1, "ctl": "bar"}));
+    assert_eq!(reply["ok"], true, "{reply}");
+    wait_for("zulu counts alpha's agent", || {
+        get("zulu:", "@s-other-untracked") == "1"
+    });
+    assert_eq!(get("main:", "@s-other-untracked"), "");
+    // Ours has none of them.
+    assert_eq!(get("_peek-agentd:", "@s-other-untracked"), "");
 }
