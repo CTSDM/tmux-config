@@ -159,3 +159,26 @@ make the tmux server fork; `run-shell -C` (a tmux command, no fork) and
 | F1 | implementador | todo | **Seen without a fork:** the daemon sets the global option `@agentd_client` to its control client's name whenever it attaches (unset when it closes its session); it takes `%message agentd seen <pane>` on that client as `ctl seen <pane>` (E1). agents.conf, with `@agentd`: `pane-focus-in[40]` runs `run-shell -C "display-message -c '#{@agentd_client}' 'agentd seen #{hook_pane}'"` for panes with `@agent` when `@agentd_client` is set, else today's `run-shell -b … ctl seen` (spawn transport). Verified by hand on tmux 3.6: a control client gets `%message <text>` for `display-message -c <it>`. |
 | F2 | implementador | todo | **Layout only when the width changes:** `agent-spaces layout` stores per session `@layout-width`, the client width it laid out for; `client-session-changed[40]` runs it only when `#{client_width}` differs from the session's `@layout-width` (check that `client_width` is the switching client in that hook). `client-attached`/`client-resized` keep running it. |
 | F3 | tester | todo | Tests: E1 green with `AGENT_IMPL=rust` through the new path (and with `AGENTD_TRANSPORT=spawn`, the fallback); a switch of session (`switch-client`, `prefix g N`) makes the tmux server start no process: count the server's children around the switch (none new); and the bar still lays out right when a narrower client arrives. |
+
+### Found while testing F1-F3: tmux 3.6 crashes, and leaks
+
+- **Crash** (tester, 2026-09-24): with F1/F2's hooks the tmux server dies
+  with a segfault (NULL in libc) on fast session switches: 14/30 runs on
+  4181d51, 7/30 on 9ebbcd8, 0/30 on main. Suspect: `#{L:…}` (a loop over
+  clients) in `pane-focus-in` and `client-session-changed` hooks. fix-forks
+  never went live.
+- **Leak** (arquitecto): the tmux server grows while it redraws our top row,
+  ~4 KB per draw of `@row0` (so ~100-200 MB per hour of blinking per
+  terminal, ~6 GB after 20 h live). Not in vanilla tmux; not with theme.conf
+  or agents.conf alone; only when the top row evaluates options that loop over
+  every pane with nested `E:` (`@cnt-*` in the summary, `@agent-glyph` and
+  `@agent-unseen` in the chips) inside conditionals, comparisons or `n:`.
+
+| Id | Owner | Status | Task |
+|---|---|---|---|
+| F1b | implementador | todo | Seen without a fork and **without `#{L:}`**: pane-focus-in[40] with `@agentd` and `@agent_client`-style check reduced to `#{@agentd_client}` being set (the daemon unsets it on stop; a stale one after `kill -9` loses one seen until the next daemon starts: accepted). |
+| F2b | implementador | todo | Layout on switch decided **by the daemon**, not a tmux hook: on `%client-session-changed <client> $id name` it reads that client's width through control mode, compares with the session's `@layout-width`, and if they differ it starts `agent-spaces layout` itself (a daemon fork is cheap; a tmux server fork is not). With `@agentd` the `client-session-changed[40]` hook does nothing; without it, today's `run-shell -b` stays (bash mode). `window-linked/unlinked` stay. |
+| F3b | tester | todo | The crash scene as a regression test (the server survives N fast switch scenes), plus F3's no-fork tests, on the rework. |
+| L1 | implementador | todo | **The bar without leaking loops** (after F1b/F2b): the daemon keeps plain values that the top row reads instead of computing them: per space `@n-needs-<space>`, `@n-done-…`, `@n-working-…`, `@n-idle-…`, `@n-untracked-…` (numbers), per session `@s-glyphs` (the glyph string with its `#[fg]`) and `@s-unseen` (1 or unset), updated when a state, a session, a space or a pane (a `claude`/`codex` without hooks, ◇) changes; `agent-spaces` builds the cheap top row when `@agentd` is set, today's otherwise. Same look, same counts (contract §2 readers), measured: no RSS growth under 14 redraws/s. |
+| L2 | tester | todo | Minimal reproducers, on vanilla tmux 3.6 (`-f /dev/null`), of the crash and of the leak, for a report to tmux upstream; the leak test (RSS under redraws) as a regression test for L1. |
+| U1 | arquitecto | todo | Draft the two upstream reports from L2's reproducers; the user decides whether they are sent. |
