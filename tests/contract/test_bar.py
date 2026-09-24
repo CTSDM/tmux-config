@@ -1,10 +1,12 @@
-"""§15 The bar (U1): clicks on a real client, rendered by an outer tmux.
+"""§15 The bar (U1, U2): clicks on a real client, rendered by an outer tmux,
+and what the top row says about the agents.
 
 theme.conf and agents.conf are loaded as tmux.conf does, with mouse on; the
 top row shows the chips of the client's space, the second its windows."""
 
 from collections.abc import Callable
 
+from harness.claude import ask, working
 from harness.marks import rule
 from harness.tmux import Terminal, TmuxServer, column
 from harness.wait import eventually
@@ -61,3 +63,47 @@ def test_U1_click_a_window_tab(make_server: Callable[..., TmuxServer]) -> None:
     terminal.click(column(tabs, "tabtwo") + 1, 2)
     eventually(lambda: terminal.value("#{window_name}"), lambda w: w == "tabtwo", 3, "window selected")
     assert session_of(terminal) == "main"
+
+
+# --- U2: the top row's glyphs and summary --------------------------------------------
+
+
+def top(terminal: Terminal, until: Callable[[str], bool], what: str) -> str:
+    return eventually(lambda: terminal.screen()[0], until, 5, what)
+
+
+@rule("U2")
+def test_U2_the_summary_counts_the_other_sessions_of_the_space(
+    make_server: Callable[..., TmuxServer],
+) -> None:
+    server, terminal = bar(make_server)
+    alpha, beta, own = (server.agent("claude", s) for s in ("alpha", "beta", "main"))
+    for agent in (alpha, beta, own):
+        working(agent)
+    top(terminal, lambda r: "2 working" in r and "alpha ●" in r and "beta ●" in r,
+        "alpha and beta working, main's own agent not counted")
+    # Another space is never counted.
+    zulu = server.agent("claude", "zulu")
+    working(zulu)
+    ask(zulu, "Bash", "z1", command="ls")
+    alpha.hook("Stop")
+    ask(beta, "Bash", "b1", command="ls")
+    row = top(terminal, lambda r: "1 needs you" in r and "1 done" in r and "working" not in r,
+              "beta needs you, alpha done")
+    assert "beta ▲" in row and "alpha ✓" in row
+    # alpha goes to another space: gone from the row and from the count.
+    server.run_tool([str(server.impl.bin / "agent-spaces"), "set", "alpha", "other"])
+    row = top(terminal, lambda r: "alpha" not in r and "done" not in r, "alpha in another space")
+    assert "1 needs you" in row
+
+
+@rule("U2")
+def test_U2_an_agent_without_hooks_until_its_pane_closes(
+    make_server: Callable[..., TmuxServer],
+) -> None:
+    server, terminal = bar(make_server)
+    silent = server.agent("claude", "beta")  # in a new window, never sends a hook
+    row = top(terminal, lambda r: "1 untracked" in r, "an agent that is not reporting")
+    assert "beta ◇" in row
+    server.tmux("kill-pane", "-t", silent.pane)
+    top(terminal, lambda r: "untracked" not in r and "◇" not in r, "its pane closed")
