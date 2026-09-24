@@ -113,8 +113,10 @@ Until phase 3 the daemon runs effects by spawning the existing bash helpers
 (`agent-sound`, `agent-notify`, `agent-remind`, `agent-bgwatch`,
 `agent-blink`), so phase 1 is already a complete replacement of the hook and
 the contract suite can pass end to end. Each later phase moves one family of
-effects in-process and deletes its bash script. The live system switches only
-at cutover (phase 5), with the user, with a way back.
+effects in-process; the daemon stops using that bash script, but the script
+stays: it is the bash implementation, and the way back. The live system
+switches only at cutover (phase 5), with the user. The bash implementation is
+deleted only after the user has run agentd live for a while (phase 7).
 
 ### The switch: `@agentd`
 
@@ -166,12 +168,13 @@ debounce. `notify` and `notify-close` are written where D-Bus would be called.
    subagents, ownership, rounds; effects via the bash helpers. Suite green.
 2. **Codex:** port `agent-codex` (fingerprints, rollout reader, command roots,
    observer). Suite green, including the scenarios of `agents/tests/test_codex.py`.
-3. **Effects in-process:** sounds, D-Bus notifications, reminders,
-   background shells, reconcile, seen. Bash helpers deleted.
+3. **Effects in-process:** sounds, D-Bus notifications, background shells,
+   seen (reminders and reconcile are already in).
 4. **Blink in-process**, over control mode if T0.3 says so.
 5. **Cutover:** `agents/install` points hooks at `agentd hook`, `tmux.conf`
    and `agents.conf` call `agentd`, docs updated, rollback tested. With the user.
 6. **Optional:** `agent-spaces` counts and layout.
+7. **Cleanup,** after a while live: delete the bash implementation.
 
 ## Roles and branches
 
