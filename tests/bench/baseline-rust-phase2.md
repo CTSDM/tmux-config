@@ -129,8 +129,10 @@ While a Codex turn (or its commands) is observed, the daemon scans all of
 `/proc` every 2 s (X7's command trees), ~10 ms of CPU on its only thread;
 a hook that arrives then waits up to that long. That is ~1% of hooks at this
 pace (a 7 ms hook meets a 10 ms burst every 2 s), and it matches what the
-tables show: in the Codex scenes about a third of the hooks over 15 ms
-overlap a burst (7 of 22 over both runs), and p99 sits around 10-16 ms.
+tables show: in the Codex scenes at least a third of the hooks over 15 ms
+overlap a burst (7 of 22 over both runs; a lower bound, since a burst that
+begins while a hook waits on its `tmux` call is not counted as background),
+and p99 sits around 10-16 ms.
 The rest of the slow hooks are ordinary scheduling noise: Claude alone,
 with no timer at all, also has 0-2 per 300, at 16-20 ms, and the
 `/bin/true` calibration shows the same kind of outliers. The burst scales
