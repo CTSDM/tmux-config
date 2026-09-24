@@ -13,7 +13,8 @@ contract suite. Prints a Markdown report; `--json` writes the raw numbers.
    in a steady scene (four agents: waiting, done with a background shell,
    done, Codex working) and after 20 waits on one pane.
 3. Blink: CPU of the implementation's processes and of the tmux server
-   while one pane blinks as `needs`, and while nothing blinks.
+   while one pane blinks as `needs`, as `unseen` only, and while nothing
+   blinks (schedstat, reaped children included).
 """
 
 import argparse
@@ -233,9 +234,13 @@ def blink_cpu(fakes: dict[str, Path], seconds: float) -> dict[str, dict[str, flo
         time.sleep(2)
         blinking = cpu_split(server, [agent], seconds)
         agent.hook("PostToolUse", tool_name="Bash", tool_use_id="a")
+        agent.hook("Stop")  # done and not seen: the soft blink, 120 s by default
+        time.sleep(2)
+        unseen = cpu_split(server, [agent], min(seconds, 10))
+        agent.hook("UserPromptSubmit")  # no target left
         time.sleep(3)
         quiet = cpu_split(server, [agent], min(seconds, 10))
-        return {"needs blinking": blinking, "nothing blinking": quiet}
+        return {"needs blinking": blinking, "only unseen blinking": unseen, "nothing blinking": quiet}
 
 
 # --- report -----------------------------------------------------------------------------
