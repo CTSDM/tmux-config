@@ -12,8 +12,8 @@ Report progress by message with the task id; the architect updates this file.
 | T0.3 | implementador | done (spike-control-mode.md) | Spike, control mode on tmux 3.6, findings in `docs/daemon/spike-control-mode.md` (send them to the architect, who commits them). Questions below. |
 | T0.4 | implementador | done (b1c8aca) | Crate skeleton in `agentd/`: `Cargo.toml` (edition 2024, release profile with `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`), `deny.toml` (crates.io only, license allowlist), `agentd/check.sh` (fmt, clippy -D warnings, test, deny), `target/` ignored, subcommand stubs. Dependencies of design.md only. |
 | T0.5 | tester | done (204874f) | Harness in `tests/` (uv + pytest + pyright strict): isolated tmux server fixture, fake agent processes, a way to run the hook as a child of the fake agent, sink reader, option snapshots. Selectable implementation: `AGENT_IMPL=bash` (the worktree's `agents/bin/agent-hook`) or `AGENT_IMPL=rust` (path in `AGENTD`). |
-| T0.6 | tester | doing | Contract suite on bash, section by section as contract.md lands. Intentional changes (`CHANGE` in the contract) are expected failures on bash. Needs T0.2 for sounds, notifications and visibility. |
-| T0.7 | tester | todo | Benchmarks in `tests/bench/`: hook latency per event (p50/p90/p99), RSS of resident processes, CPU of the blink over 30 s. Baseline numbers on bash into the report. |
+| T0.6 | tester | done (6c68ef8) | Contract suite on bash, section by section as contract.md lands. Intentional changes (`CHANGE` in the contract) are expected failures on bash. Needs T0.2 for sounds, notifications and visibility. |
+| T0.7 | tester | done (6c68ef8, bench/baseline-bash.md) | Benchmarks in `tests/bench/`: hook latency per event (p50/p90/p99), RSS of resident processes, CPU of the blink over 30 s. Baseline numbers on bash into the report. |
 
 ### T0.3 questions (control mode)
 
@@ -49,6 +49,6 @@ acks after `agent-notify --close` has run (~150-300 ms, uv), as bash does.
 | T1.5 | implementador | done (bf79b33) | U1 (the user asked for it): in theme.conf's `@fleet-chips-tpl`, wrap each chip, current and others, in `#[range=session\|#{session_id}]`…`#[norange]`; check it in an isolated server with the full tmux.conf (click, narrow layout with several chip rows, `_peek-*` still hidden). Small: do it when it fits between T1.2 and T1.3. |
 | T1.6 | tester | todo | U1 test: real client with `mouse on`, theme.conf and `agent-spaces load` sourced, an SGR mouse click (`\e[<0;X;Ym` down/up) on a chip of the top row → `client_session` changes; a chip of another space can't be clicked because it isn't there. C8: xfail strict on bash until T1.5 lands. |
 | T1.7 | implementador | todo | Long life (review of T1.3): (a) drop a pane's event and effect queues, and its reminder, once they are drained and the pane is gone (tmux read finds no pane) or after its SessionEnd; today a daemon that runs for weeks keeps a task and a channel per pane ever seen. (b) The state file belongs to one tmux server instance: store the server's pid and start time and ignore a file from another one (a restarted server reuses the socket path, so the id, and pane ids restart at `%0`: old rounds and reminders would land on new panes); delete it when the daemon exits because the server is gone. Tests for both. |
-| T1.4 | tester | todo | Run the suite with `AGENT_IMPL=rust` on each implementer delivery; report failures by rule id to both. Latency and RSS of `agentd` with T0.7's benchmarks. |
+| T1.4 | tester | doing | Run the suite with `AGENT_IMPL=rust` on each implementer delivery; report failures by rule id to both. Latency and RSS of `agentd` with T0.7's benchmarks. |
 
 Phases 2-5: written when phase 1 closes.
