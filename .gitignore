@@ -6,3 +6,6 @@ plugins/
 
 # Which folders are personal and which are work names clients: keep it local.
 spaces.conf
+
+# Drafts of bug reports to other projects (tmux...), filed by hand.
+upstream/
