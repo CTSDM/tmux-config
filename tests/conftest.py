@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import tempfile
 from collections import defaultdict
 from collections.abc import Callable, Iterator
@@ -12,15 +13,17 @@ import pytest
 
 from harness.agent import make_fakes
 from harness.impl import IMPL
-from harness.tmux import TmuxServer
+from harness.tmux import TMUX_BIN, TmuxServer
 
 # Unix socket paths are short (108 bytes): keep the roots near /.
 TMP_BASE = os.environ.get("AG_TEST_TMPDIR", "/tmp")
 KEEP = os.environ.get("AG_TEST_KEEP") == "1"  # keep temp dirs for debugging
 
 
-def pytest_report_header() -> str:
-    return f"agent implementation: {IMPL.name} ({IMPL.agentd or IMPL.bin})"
+def pytest_report_header() -> list[str]:
+    tmux = str(TMUX_BIN or shutil.which("tmux"))
+    version = subprocess.run([tmux, "-V"], capture_output=True, text=True).stdout.strip()
+    return [f"agent implementation: {IMPL.name} ({IMPL.agentd or IMPL.bin})", f"tmux: {version} ({tmux})"]
 
 
 @pytest.fixture(scope="session")

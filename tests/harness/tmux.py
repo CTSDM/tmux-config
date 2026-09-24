@@ -42,6 +42,18 @@ SOUNDS = (
     "fight-like-a-man",
 )
 SPACE = "test"
+# A tmux to test instead of the one in PATH (e.g. a build of a newer release).
+TMUX_BIN: Path | None = Path(os.environ["AGENT_TMUX"]).resolve() if os.environ.get("AGENT_TMUX") else None
+
+
+@functools.cache
+def tmux_version() -> tuple[int, int]:
+    """(major, minor) of the tmux under test: `tmux 3.7c` -> (3, 7)."""
+    import re
+
+    tmux = str(TMUX_BIN) if TMUX_BIN else "tmux"
+    found = re.search(r"(\d+)\.(\d+)", subprocess.run([tmux, "-V"], capture_output=True, text=True).stdout)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
 _servers = itertools.count(1)
 
 type Focus = Literal["none", "client", "flag", "terminal"]
@@ -118,6 +130,12 @@ class TmuxServer:
 
         keep = ("PATH", "USER", "LOGNAME", "TZ")
         self.env: dict[str, str] = {k: os.environ[k] for k in keep if k in os.environ}
+        if TMUX_BIN is not None:
+            # AGENT_TMUX: this tmux first in PATH, for the harness (subprocess
+            # looks programs up in the PATH it is given), the hooks and agentd.
+            (root / "bin").mkdir(exist_ok=True)
+            (root / "bin" / "tmux").symlink_to(TMUX_BIN)
+            self.env["PATH"] = f"{root / 'bin'}:{self.env.get('PATH', '')}"
         self.env.update(uv_dirs())
         # The implementation's own knobs, e.g. AGENTD_TRANSPORT=spawn.
         self.env.update({k: v for k, v in os.environ.items() if k.startswith("AGENTD_") and v})
@@ -251,6 +269,40 @@ class TmuxServer:
         if self.impl.agentd is not None:
             self.set_global("@agentd", str(self.impl.agentd))
             self.ensure()
+
+    def redraw_growth(self, client: str, redraws: int = 1600, warmup: int = 300) -> float:
+        """Bytes the server's RSS grows per status redraw of `client`: redraws
+        paced through one control client (no process per redraw), RSS sampled
+        every 100, least-squares slope."""
+        ctl = subprocess.Popen(["tmux", "-L", self.name, "-C", "attach"], env=self.env, stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
+        assert ctl.stdin is not None
+        pipe = ctl.stdin
+
+        def redraw(n: int) -> None:
+            for _ in range(n):
+                pipe.write(f"refresh-client -S -t {client}\n")
+                pipe.flush()
+                time.sleep(0.01)
+
+        def rss() -> int:
+            status = Path(f"/proc/{self.pid}/status").read_text()
+            return int(next(line.split()[1] for line in status.splitlines() if line.startswith("VmRSS"))) * 1024
+
+        try:
+            pipe.write("refresh-client -f no-output\n")
+            redraw(warmup)
+            xs: list[int] = []
+            ys: list[int] = []
+            for k in range(redraws // 100):
+                xs.append(k * 100)
+                ys.append(rss())
+                redraw(100)
+        finally:
+            pipe.close()
+            ctl.wait(timeout=5)
+        mx, my = sum(xs) / len(xs), sum(ys) / len(ys)
+        return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
 
     def control_clients(self) -> list[tuple[str, str]]:
         """(name, session) of the control-mode clients: the daemon's own."""
