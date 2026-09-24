@@ -171,8 +171,14 @@ class ChildWatch:
     def _poll(self) -> None:
         while not self._stop.is_set():
             for child in self._children() - self.before:
-                if child not in self.new:
-                    self.new[child] = comm(child) or "?"
+                # Right after the fork a child is still "tmux: server"; keep
+                # the command line it execs, when the watch sees it.
+                try:
+                    cmdline = Path(f"/proc/{child}/cmdline").read_bytes().replace(b"\0", b" ").decode().strip()
+                except OSError:
+                    cmdline = ""
+                if child not in self.new or (cmdline and not cmdline.startswith("tmux")):
+                    self.new[child] = cmdline or comm(child) or "?"
 
     def __enter__(self) -> "ChildWatch":
         self._thread.start()

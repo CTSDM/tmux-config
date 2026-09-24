@@ -50,6 +50,12 @@ def scene(make_server: Callable[..., TmuxServer]) -> Scene:
     server.run_tool([str(server.impl.bin / "agent-spaces"), "load"])
     assert isinstance(server.client, Terminal)
     time.sleep(SETTLE)
+    # A session nobody has shown yet has no layout width, so the first visit
+    # lays its bar out (F2: the width differs). Visit each once, as in use.
+    server.client.switch("work")
+    time.sleep(SETTLE)
+    server.client.switch("main")
+    time.sleep(SETTLE)
     s = Scene(server, server.client)
     assert s.forks(lambda: server.tmux("run-shell", "true")), "the watch must see a fork"
     return s
@@ -139,3 +145,22 @@ def test_F2_a_narrower_client_switching_in(scene: Scene) -> None:
     small.switch("main")
     eventually(lambda: layout(server, "main"), lambda v: room(v) < room(wide), 5, "main laid out for 80 columns")
     settled(server, "main")
+
+
+def test_F2_windows_opened_and_closed_under_a_narrow_client(scene: Scene) -> None:
+    """A session switch with the same width no longer lays the bar out, so
+    opening and closing windows must: long tabs that no longer fit 80
+    columns change the bar, and closing them brings it back."""
+    server = scene.server
+    small = server.terminal("work", cols=80)
+    wide = settled(server, "main")
+    eventually(lambda: layout(server, "work"), lambda v: room(v) < room(wide), 5, "work laid out for 80 columns")
+    before = settled(server, "work")
+    windows = [server.tmux("new-window", "-d", "-t", "work:", "-P", "-F", "#{window_id}", "-n",
+                           f"a-rather-long-window-name-{i}") for i in range(4)]
+    eventually(lambda: layout(server, "work"), lambda v: v != before, 5, "the bar redone for the new tabs")
+    settled(server, "work")
+    for window in windows:
+        server.tmux("kill-window", "-t", window)
+    eventually(lambda: layout(server, "work"), lambda v: v == before, 5, "the bar back as it was")
+    assert small.value("#{client_session}") == "work"
