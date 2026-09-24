@@ -1,6 +1,7 @@
-//! Effects, phases 1-2: the bash helpers of `@agents_bin` still play sounds,
-//! show notifications, watch background shells and blink (design.md,
-//! "Migration"). Reminders are the daemon's own timers (mod.rs).
+//! Effects. Sounds play in-process; the bash helpers of `@agents_bin` still
+//! show notifications, watch background shells and blink until their tasks
+//! of phase 3 and 4 move them in (design.md, "Migration"). Reminders are the
+//! daemon's own timers (mod.rs).
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -8,7 +9,14 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use super::sound;
 use crate::core::Effect;
+
+/// What effects need from the whole daemon.
+#[derive(Debug, Clone)]
+pub struct Env {
+    pub sound: sound::Config,
+}
 
 /// `agent-notify --close` is a uv script: give it time to start.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,17 +31,24 @@ pub struct Ctx {
     pub notify_open: bool,
     /// `$TMUX` for the helpers.
     pub tmux_env: String,
+    /// `@agent_sound` is not `off`, and `@agent_sound_volume`.
+    pub sound_on: bool,
+    pub volume: String,
 }
 
 /// Runs one effect. A close waits for its helper, so a notification shown
 /// afterwards can't be closed by it (O3).
-pub async fn run(ctx: &Ctx, effect: &Effect) {
+pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
+    if let Effect::Sound(name) = effect {
+        sound::play(&env.sound, name, ctx.sound_on, &ctx.volume).await;
+        return;
+    }
     if ctx.bin.is_empty() {
         return;
     }
     let helper = |name: &str| format!("{}/{name}", ctx.bin);
     match effect {
-        Effect::Sound(name) => spawn(ctx, &helper("agent-sound"), &[name]),
+        Effect::Sound(_) => {}
         Effect::Notify {
             urgency,
             title,

@@ -10,6 +10,7 @@
 mod effects;
 mod procs;
 mod rollout;
+mod sound;
 mod store;
 mod tmux;
 mod visibility;
@@ -155,6 +156,11 @@ async fn serve(
         watched: RefCell::new(HashMap::new()),
         ticking: Cell::new(false),
         save: Notify::new(),
+        effects_env: effects::Env {
+            sound: sound::Config::from_env(identity::runtime_dir(
+                env::var_os("XDG_RUNTIME_DIR").as_deref(),
+            )),
+        },
         paths,
         started_ms: now_ms(),
     });
@@ -243,6 +249,7 @@ struct Daemon {
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
     save: Notify,
+    effects_env: effects::Env,
     paths: Paths,
     started_ms: u64,
 }
@@ -367,7 +374,7 @@ impl Daemon {
     ) {
         while let Some((ctx, effects, done)) = batches.recv().await {
             for effect in &effects {
-                effects::run(&ctx, effect).await;
+                effects::run(&self.effects_env, &ctx, effect).await;
             }
             if let Some(done) = done {
                 let _ = done.send(());
@@ -824,6 +831,8 @@ impl Daemon {
             bin: read.bin.clone(),
             notify_open: !read.notify_id.is_empty(),
             tmux_env: self.tmux.env().to_string(),
+            sound_on: read.sound != "off",
+            volume: read.sound_volume.clone(),
         }
     }
 
