@@ -224,13 +224,14 @@ space line (`#{E:@fleet-line}`, per session) and `@row1` the window line
 templates in theme.conf (`@fleet-head-tpl`, `@fleet-chips-tpl`,
 `@fleet-tail-tpl`) with placeholders the script fills per space.
 
-`agent-spaces layout` (on resize, attach, session switch, and after tagging)
-estimates, for each session shown on a terminal, whether its rows fit the
+`agent-spaces layout` (on resize, attach, a session switch to a session laid
+out for another width, a window opened or closed, and after tagging) estimates, for each session shown on a terminal, whether its rows fit the
 terminal's width. If not, it sets session-level `@row0..@row4` and `status`:
 session chips packed into rows by index range, the summary on the last row or
 its own, and window tabs packed by window index (`@narrow-tabs` shortens
 titles). The summary chooses words or glyphs by comparing its plain length to
-`@summary-room`, the room the layout left on its row.
+`@summary-room`, the room the layout left on its row, and `@layout-width`
+records the width it laid out for.
 
 Moving between sessions (`next`, `prev`, `go`, the search) uses the same
 list, sorted by name, that the top row draws with `#{S/n:}`.
@@ -254,8 +255,10 @@ effects out.
 **The switch.** `tmux.conf` sets the global option `@agentd` to
 `~/.local/bin/agentd` when that file is executable and `agentd.off` doesn't
 exist, and unsets it otherwise. Everything else follows it: `agents.conf`
-starts the daemon (`ensure`), routes focus (`ctl seen`), the reconcile, the
-blink and prefix+Q's preview to it; the bash `agent-hook` and
+starts the daemon (`ensure`), routes focus to it (a `display-message -l -c`
+to its control client, named in `@agentd_client`, which it reads as
+`%message agentd seen <pane>`; `ctl seen` when that client is gone), the
+reconcile, the blink and prefix+Q's preview; the bash `agent-hook` and
 `agent-reconcile` hand over to it (agents started before the switch keep
 calling `agent-hook`; old Codex observers end up in `agentd hook` too, where
 the process-tree check drops them). `agentd.off` in
@@ -355,3 +358,16 @@ uv run --no-project --with jeepney --with pyright pyright
 - **tmux's `#{S:}` loop runs in creation order;** `#{S/n:}` sorts by name.
 - **gitleaks' default allowlist** ignores `/home/...` matches; the
   home-path rule reports the username only.
+- **A big tmux server forks slowly.** Freed memory the allocator keeps makes
+  every `fork()` of the server slow (350 ms at 6 GB), and `run-shell` forks
+  it. Keys and focus changes use `run-shell -C` (a tmux command, no process)
+  and `if -F`; `display-message -c <agentd's client>` is how they reach agentd.
+- **`display-message` expands `%N` as strftime,** so a pane id in its text
+  turns into spaces; `-l` prints it as it is.
+- **In `client-session-changed`, `#{client_width}` is some client of the
+  session,** not always the one that switched: `#{hook_client}` is, and a
+  `#{L:}` loop gets its width.
+- **`#{client_name}` in a `#{L:}` loop crashes tmux 3.6** when a client has
+  just connected and not identified yet (no name: a NULL `strdup`). Read it
+  only behind `#{?client_session,...}`; `list-clients` and `choose-client`
+  skip such clients by themselves.

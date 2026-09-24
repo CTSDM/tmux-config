@@ -299,7 +299,7 @@ layout_session() { # <session> <width>
 
   # Everything on the usual two rows?
   if ((${#chip_rows[@]} == 1 && !summary_own_row && wide_windows)); then
-    tmux set -t "=$sess:" @summary-room "$room" \; set -qu -t "=$sess:" status \; \
+    tmux set -t "=$sess:" @layout-width "$width" \; set -t "=$sess:" @summary-room "$room" \; set -qu -t "=$sess:" status \; \
       set -qu -t "=$sess:" @narrow-tabs \; set -qu -t "=$sess:" @row0 \; set -qu -t "=$sess:" @row1 \; \
       set -qu -t "=$sess:" @row2 \; set -qu -t "=$sess:" @row3 \; set -qu -t "=$sess:" @row4
     return
@@ -342,7 +342,8 @@ layout_session() { # <session> <width>
   done
   local nrows=$((${#rows[@]} > 5 ? 5 : ${#rows[@]}))
   if ((wide_windows)); then cmds+=(set -qu -t "=$sess:" @narrow-tabs \;); else cmds+=(set -t "=$sess:" @narrow-tabs 1 \;); fi
-  cmds+=(set -t "=$sess:" @summary-room "$room" \; set -t "=$sess:" status "$nrows")
+  cmds+=(set -t "=$sess:" @summary-room "$room" \; set -t "=$sess:" status "$nrows" \;
+    set -t "=$sess:" @layout-width "$width") # agents.conf: a switch lays out only for another width
   tmux "${cmds[@]}"
 }
 

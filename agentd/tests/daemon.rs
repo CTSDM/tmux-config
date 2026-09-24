@@ -704,18 +704,21 @@ impl Drop for Terminals {
 impl Server {
     /// agents.conf's Z1 section, sourced alone (the rest runs bash helpers).
     fn source_z1(&self) {
+        self.source_section("# --- Out of sight");
+    }
+
+    /// One section of agents.conf (from its `# ---` header to the next).
+    fn source_section(&self, header: &str) {
         let conf = fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../agents/agents.conf"
         ))
         .unwrap();
-        let start = conf
-            .find("# --- Out of sight")
-            .expect("Z1 section in agents.conf");
+        let start = conf.find(header).expect("the section in agents.conf");
         let end = conf[start + 1..]
             .find("\n# ---")
             .map_or(conf.len(), |e| start + 1 + e);
-        let path = self.runtime.join("z1.conf");
+        let path = self.runtime.join("section.conf");
         fs::write(&path, &conf[start..end]).unwrap();
         self.tmux(&["source-file", path.to_str().unwrap()]);
     }
@@ -1106,4 +1109,174 @@ fn t4_5_a_daemon_before_the_first_session_stays() {
     assert_eq!(server.status()["transport"], "control");
     let sessions = server.tmux(&["list-sessions", "-F", "#{session_name}"]);
     assert!(sessions.lines().any(|s| s == "_peek-agentd"), "{sessions}");
+}
+
+#[test]
+fn f1_focus_reaches_agentd_without_a_process() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.safe_env();
+    // @agentd names a wrapper that logs each run: the processes the hooks start.
+    let runs = server.runtime.join("agentd-runs");
+    let wrapper = server.runtime.join("agentd-wrapper");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nexec {} \"$@\"\n",
+            runs.display(),
+            env!("CARGO_BIN_EXE_agentd")
+        ),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&wrapper)
+        .status()
+        .unwrap();
+    server.tmux(&["set", "-g", "@agentd", wrapper.to_str().unwrap()]);
+    server.tmux(&[
+        "set",
+        "-g",
+        "@agents_bin",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../agents/bin"),
+    ]);
+    server.tmux(&["set", "-g", "focus-events", "on"]);
+    server.start_daemon();
+    // The daemon names its control client.
+    let control = |server: &Server| {
+        server
+            .tmux(&[
+                "list-clients",
+                "-F",
+                "#{client_control_mode} #{client_name}",
+            ])
+            .lines()
+            .find_map(|l| l.strip_prefix("1 ").map(String::from))
+            .unwrap_or_default()
+    };
+    wait_for("@agentd_client", || {
+        let named = server.tmux(&["show", "-gqv", "@agentd_client"]);
+        !named.is_empty() && named == control(&server)
+    });
+    server.source_section("# --- Seen / not seen");
+
+    let pane = server.claude_pane();
+    let state = |server: &Server| server.tmux(&["show", "-p", "-t", &pane, "-qv", "@agent_state"]);
+    let finish = |server: &Server| {
+        server.hook(&pane, ev("UserPromptSubmit"));
+        server.hook(&pane, ev("Stop"));
+        assert_eq!(state(server), "done");
+    };
+    server.hook(&pane, ev("SessionStart"));
+    finish(&server);
+    // A client that has just connected (tmux names it only once it identifies):
+    // the hook must not read its name (tmux 3.6 crashes on it in a #{L:} loop).
+    let _connecting = UnixStream::connect(&server.socket).unwrap();
+    // A terminal on main, with focus; then the agent's window comes to the front.
+    let mut terminals = Terminals::new(&server);
+    terminals.open("attach -t main");
+    wait_for("a terminal", || server.terminal_clients().len() == 1);
+    terminals.tmux(&["send-keys", "-t", "t:t0", "-H", "1b", "5b", "49"]);
+    sleep(Duration::from_millis(200));
+    server.tmux(&["select-window", "-t", &pane]);
+    wait_for("seen, through the message", || state(&server) == "idle");
+    assert_eq!(
+        server.tmux(&["display", "-p", "ok"]),
+        "ok",
+        "the server lives"
+    );
+    let started = || fs::read_to_string(&runs).unwrap_or_default();
+    assert!(!started().contains("ctl seen"), "{}", started());
+
+    // No live client of agentd's (the spawn transport): `ctl seen`, a process.
+    server.tmux(&["set", "-g", "@agentd_client", "client-gone"]);
+    finish(&server);
+    server.tmux(&["select-window", "-t", "main:^"]);
+    server.tmux(&["select-window", "-t", &pane]);
+    wait_for("seen, through ctl seen", || state(&server) == "idle");
+    assert!(
+        started().contains(&format!("ctl seen {pane}")),
+        "{}",
+        started()
+    );
+
+    // Gone with the daemon.
+    server.stop_daemon();
+    assert_eq!(server.tmux(&["show", "-gqv", "@agentd_client"]), "");
+}
+
+#[test]
+fn f2_a_switch_lays_out_only_for_another_width() {
+    let Some(server) = Server::start() else {
+        return;
+    };
+    server.safe_env();
+    // agent-spaces, as a stand-in that logs what it is asked.
+    let bin = server.runtime.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let runs = server.runtime.join("spaces-runs");
+    fs::write(
+        bin.join("agent-spaces"),
+        format!("#!/bin/sh\necho \"$*\" >> {}\n", runs.display()),
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(bin.join("agent-spaces"))
+        .status()
+        .unwrap();
+    server.tmux(&["set", "-g", "@agents_bin", bin.to_str().unwrap()]);
+    server.tmux(&["new-session", "-d", "-s", "work", "sleep 600"]);
+    server.source_section("# --- Spaces");
+    let mut terminals = Terminals::new(&server);
+    terminals.open("attach -t main");
+    wait_for("a terminal", || server.terminal_clients().len() == 1);
+    let (client, _) = server.terminal_clients().remove(0);
+    let width = server.tmux(&["display", "-p", "-c", &client, "#{client_width}"]);
+    let layouts = || {
+        fs::read_to_string(&runs)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| *l == "layout")
+            .count()
+    };
+    wait_for("the attach's layout", || layouts() >= 1);
+    sleep(Duration::from_millis(200));
+    let before = layouts();
+    // A client that has just connected: see f1_focus_reaches_agentd_without_a_process.
+    let _connecting = UnixStream::connect(&server.socket).unwrap();
+
+    // work was laid out for this width: no process.
+    server.tmux(&["set", "-t", "=work:", "@layout-width", &width]);
+    server.tmux(&["switch-client", "-c", &client, "-t", "=work:"]);
+    sleep(Duration::from_millis(300));
+    assert_eq!(layouts(), before);
+    // main was laid out for another one: a layout.
+    server.tmux(&["set", "-t", "=main:", "@layout-width", "1"]);
+    server.tmux(&["switch-client", "-c", &client, "-t", "=main:"]);
+    wait_for("a layout", || layouts() == before + 1);
+    assert_eq!(
+        server.tmux(&["display", "-p", "ok"]),
+        "ok",
+        "the server lives"
+    );
+    // A window opened and one closed change the tab rows: a layout each.
+    let window = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}",
+        "-t",
+        "main:",
+        "sleep 600",
+    ]);
+    wait_for("a layout for the new window", || layouts() == before + 2);
+    server.tmux(&["kill-window", "-t", &window]);
+    wait_for("a layout for the closed window", || layouts() == before + 3);
+    // A rename is not one of them.
+    server.tmux(&["rename-window", "-t", "main:^", "renamed"]);
+    sleep(Duration::from_millis(300));
+    assert_eq!(layouts(), before + 3);
 }

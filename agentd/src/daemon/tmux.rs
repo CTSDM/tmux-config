@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use tokio::process::Command;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 
 use super::control::{self, Control};
@@ -27,6 +27,9 @@ const REATTACH: Duration = Duration::from_secs(1);
 /// A daemon started while tmux loads its configuration is there before the
 /// user's first session: its own is alone for a moment.
 const FIRST_SESSION_GRACE: Duration = Duration::from_secs(5);
+
+/// The global option naming our control client, for agents.conf (F1).
+const AGENTD_CLIENT: &str = "@agentd_client";
 
 /// The session's space, as everywhere in agents/.
 const SPACE: &str = "#{?@space,#{@space},#{@space_auto}}";
@@ -118,6 +121,9 @@ pub struct Tmux {
     closed: Cell<bool>,
     /// A session of the user's was there at some point.
     seen_user: Cell<bool>,
+    /// Messages to our client (`display-message -c`), for the daemon.
+    messages: mpsc::UnboundedSender<String>,
+    to_daemon: RefCell<Option<mpsc::UnboundedReceiver<String>>>,
 }
 
 /// One tmux command, word by word.
@@ -131,6 +137,7 @@ impl Tmux {
     pub fn new(socket: PathBuf, server_pid: u32) -> Self {
         let env = format!("{},{server_pid},0", socket.display());
         let use_control = std::env::var("AGENTD_TRANSPORT").as_deref() != Ok("spawn");
+        let (messages, to_daemon) = mpsc::unbounded_channel();
         Tmux {
             socket,
             env,
@@ -140,7 +147,14 @@ impl Tmux {
             sessions_changed: Rc::new(Notify::new()),
             closed: Cell::new(false),
             seen_user: Cell::new(false),
+            messages,
+            to_daemon: RefCell::new(Some(to_daemon)),
         }
+    }
+
+    /// The messages to our client, once.
+    pub fn messages(&self) -> Option<mpsc::UnboundedReceiver<String>> {
+        self.to_daemon.borrow_mut().take()
     }
 
     pub fn sessions_changed(&self) -> Rc<Notify> {
@@ -176,8 +190,18 @@ impl Tmux {
             return;
         }
         self.last_attach.set(Some(Instant::now()));
-        match Control::start(&self.socket, self.sessions_changed.clone()) {
+        match Control::start(
+            &self.socket,
+            self.sessions_changed.clone(),
+            self.messages.clone(),
+        ) {
             Ok(control) => {
+                // F1: hooks tell us things with a message to this client,
+                // which makes the tmux server start no process.
+                let name = [cmd(&["set", "-gF", AGENTD_CLIENT, "#{client_name}"])];
+                if let Some(line) = control::line(&name) {
+                    let _ = control.send(line, 1);
+                }
                 *self.control.borrow_mut() = Some(control);
                 // Maybe ours is all there is (the last user session closed meanwhile).
                 self.sessions_changed.notify_one();
@@ -216,13 +240,17 @@ impl Tmux {
         // Our client goes, and destroy-unattached takes the session with it;
         // unless someone else is in it.
         self.control.borrow_mut().take();
-        let kill = [cmd(&[
-            "kill-session",
-            "-t",
-            &format!("={}:", control::SESSION),
-        ])];
+        let kill = [
+            cmd(&["set", "-gu", AGENTD_CLIENT]),
+            cmd(&["kill-session", "-t", &format!("={}:", control::SESSION)]),
+        ];
         let _ = self.spawn(&kill).await;
         None
+    }
+
+    /// The daemon goes: no hook should message a client that is gone.
+    pub async fn forget_client(&self) {
+        let _ = self.run(&[cmd(&["set", "-gu", AGENTD_CLIENT])]).await;
     }
 
     /// After closing: attach again once the user has a session (a server
