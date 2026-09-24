@@ -96,7 +96,9 @@ def test_option_snapshot_is_raw(server: TmuxServer) -> None:
     }
     for name, value in tricky.items():
         server.tmux("set", "-p", "-t", agent.pane, name, value)
-    assert server.pane_options(agent.pane) == tricky
+    # agentd marks a claude that sends no hook for the bar (◇, task L1).
+    options = {k: v for k, v in server.pane_options(agent.pane).items() if k != "@p-untracked"}
+    assert options == tricky
     assert "@other" not in agent.options()
     assert agent.option("@agent_msg") == tricky["@agent_msg"]
     assert agent.option("@agent_unset") == ""

@@ -404,6 +404,17 @@ default `MouseDown1Status` does for a `range=session`. The row shows only the
 sessions of the client's space, so a click never leaves the space. Clicking a
 window tab of the second row selects that window (already so). **CHANGE C8:**
 bash's chips have no range: a click on them does nothing.
+**U2. What the top row says.** Each other session of the client's space
+shows its agents' glyphs (`@agent-glyph`, ◇ for a `claude` or `codex` without
+`@agent`), and the right end counts the agents of those sessions by state
+(needs, done, working, idle, untracked: agent-spaces' `C_*` conditions),
+never the client's own session, a peek session or another space. Both
+implementations show the same row, at once after a hook, a window or session
+added or closed, a pane closed or a space set. One difference is allowed:
+agentd's row reads values the daemon keeps instead of looping over the panes
+on every redraw (task L1), and nothing polls, so an agent without hooks
+started in a pane that already exists (a `claude` typed in a shell) shows
+its ◇ at the next of those changes, and so does one that ended there.
 
 ## 16. The daemon is invisible
 

@@ -38,11 +38,14 @@ pub struct Control {
 impl Control {
     /// Attaches: our session (created if needed, gone when we detach), no
     /// pane output, never sizing a window, never the narrowest client.
-    /// `sessions_changed` is told when a session is created or closed, and
+    /// `sessions_changed` is told when a session is created or closed,
+    /// `bar_changed` also when a window is added or closed (what the top row
+    /// shows, bar.rs), and
     /// `messages` gets the text of every `display-message -c` to our client.
     pub fn start(
         socket: &Path,
         sessions_changed: Rc<Notify>,
+        bar_changed: Rc<Notify>,
         messages: mpsc::UnboundedSender<String>,
     ) -> std::io::Result<Control> {
         let mut child = Command::new("tmux")
@@ -109,10 +112,14 @@ impl Control {
                         ok,
                         lines,
                     }) => deliver(&reader_pending, ok, lines),
-                    Some(Event::SessionsChanged) => sessions_changed.notify_one(),
+                    Some(Event::SessionsChanged) => {
+                        sessions_changed.notify_one();
+                        bar_changed.notify_one();
+                    }
                     Some(Event::Message(text)) => {
                         let _ = messages.send(text);
                     }
+                    Some(Event::WindowsChanged) => bar_changed.notify_one(),
                     Some(Event::Exit) => break,
                     _ => {}
                 }
@@ -193,6 +200,8 @@ enum Event {
     SessionsChanged,
     /// `%message <text>`: a `display-message -c` to our client.
     Message(String),
+    /// A window added or closed, in any session.
+    WindowsChanged,
     Exit,
 }
 
@@ -216,6 +225,16 @@ impl Parser {
                     Some(Event::Exit)
                 } else if line == "%sessions-changed" {
                     Some(Event::SessionsChanged)
+                } else if [
+                    "%window-add ",
+                    "%window-close ",
+                    "%unlinked-window-add ",
+                    "%unlinked-window-close ",
+                ]
+                .iter()
+                .any(|n| line.starts_with(n))
+                {
+                    Some(Event::WindowsChanged)
                 } else {
                     // `%message`, or another notification.
                     line.strip_prefix("%message ")
@@ -273,7 +292,7 @@ mod tests {
         let mut p = Parser::default();
         let events = feed(
             &mut p,
-            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%sessions-changed\n%message agentd seen %3\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
+            "%begin 1 277 0\n%end 1 277 0\n%session-changed $0 x\n%sessions-changed\n%message agentd seen %3\n%unlinked-window-close @4\n%begin 2 282 1\n%end 1 283 1\nvalue\n%end 2 282 1\n%begin 2 283 1\nno such pane: %9\n%error 2 283 1\n%exit\n",
         );
         assert_eq!(
             events,
@@ -285,6 +304,7 @@ mod tests {
                 },
                 Event::SessionsChanged,
                 Event::Message("agentd seen %3".into()),
+                Event::WindowsChanged,
                 // A forged end (another number) is content.
                 Event::Block {
                     ours: true,
