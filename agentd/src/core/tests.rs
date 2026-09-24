@@ -942,6 +942,7 @@ fn n2_done_and_error_bodies() {
         let r = run_with(&mut State::default(), e.clone(), f);
         assert_eq!(r.notifies()[0].2, format!("All set{suffix}"));
         assert!(r.has(&Effect::Bgwatch { agent_pid: 4242 }));
+        assert_eq!(r.opt("@agent_bg"), Some(Some(n.to_string().as_str())));
     }
     let e = Event {
         error: "rate limit".into(),
@@ -1071,6 +1072,21 @@ fn n4_reminder_fires() {
         ..waiting
     };
     assert!(reminder(since, &facts(muted)).is_empty());
+}
+
+// --- §12 seen ---------------------------------------------------------------
+
+#[test]
+fn e1_seen() {
+    let r = Run(seen(&in_state("done")));
+    assert_eq!(r.state(), Some("idle"));
+    assert_eq!(r.opt("@agent_since"), None);
+    assert!(r.has(&Effect::NotifyClose));
+    for state in ["needs", "working", "idle", ""] {
+        let r = Run(seen(&in_state(state)));
+        assert_eq!(r.opt("@agent_state"), None, "{state}");
+        assert!(r.has(&Effect::NotifyClose), "{state}");
+    }
 }
 
 // --- §10 blink ---------------------------------------------------------------

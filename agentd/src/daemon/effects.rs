@@ -1,17 +1,22 @@
-//! Effects, phases 1-2: the bash helpers of `@agents_bin` still play sounds,
-//! show notifications, watch background shells and blink (design.md,
-//! "Migration"). Reminders are the daemon's own timers (mod.rs).
+//! Effects. Sounds and notifications are in-process; of the bash helpers of
+//! `@agents_bin` only agent-blink is left, until phase 4 (design.md,
+//! "Migration"). Reminders and background shells are the daemon's own
+//! (mod.rs).
 
 use std::process::Stdio;
-use std::time::Duration;
+use std::rc::Rc;
 
 use tokio::process::Command;
-use tokio::time::timeout;
 
+use super::notify::Notifier;
+use super::sound;
 use crate::core::Effect;
 
-/// `agent-notify --close` is a uv script: give it time to start.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// What effects need from the whole daemon.
+pub struct Env {
+    pub sound: sound::Config,
+    pub notifier: Rc<Notifier>,
+}
 
 /// What the effects of one event need besides themselves.
 #[derive(Debug, Clone)]
@@ -19,66 +24,48 @@ pub struct Ctx {
     pub pane: String,
     /// `@agents_bin`, read with the event.
     pub bin: String,
-    /// The pane had a notification open (`@agent_notify_id`) when read.
-    pub notify_open: bool,
     /// `$TMUX` for the helpers.
     pub tmux_env: String,
+    /// `@agent_sound` is not `off`, and `@agent_sound_volume`.
+    pub sound_on: bool,
+    pub volume: String,
 }
 
-/// Runs one effect. A close waits for its helper, so a notification shown
-/// afterwards can't be closed by it (O3).
-pub async fn run(ctx: &Ctx, effect: &Effect) {
-    if ctx.bin.is_empty() {
-        return;
-    }
-    let helper = |name: &str| format!("{}/{name}", ctx.bin);
+/// Runs one effect; the pane's effects run one after the other (O3).
+pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
     match effect {
-        Effect::Sound(name) => spawn(ctx, &helper("agent-sound"), &[name]),
+        Effect::Sound(name) => sound::play(&env.sound, name, ctx.sound_on, &ctx.volume).await,
         Effect::Notify {
             urgency,
             title,
             body,
-        } => spawn(
-            ctx,
-            &helper("agent-notify"),
-            &[&ctx.pane, urgency.as_str(), title, body],
-        ),
-        Effect::NotifyClose if ctx.notify_open => {
-            if let Some(mut child) = command(ctx, &helper("agent-notify"), &["--close", &ctx.pane])
-            {
-                let _ = timeout(CLOSE_TIMEOUT, child.wait()).await;
-            }
+        } => {
+            env.notifier
+                .show(&ctx.pane, *urgency, title, body, &ctx.bin, &ctx.tmux_env)
+                .await
         }
-        // Nothing open (the bash notifier keeps its id in the pane).
-        Effect::NotifyClose => {}
-        Effect::Bgwatch { agent_pid } => spawn(
-            ctx,
-            &helper("agent-bgwatch"),
-            &[&ctx.pane, &agent_pid.to_string()],
-        ),
-        Effect::Blink => spawn(ctx, &helper("agent-blink"), &[]),
-        // Handled by the daemon before the ack.
-        Effect::Options(_) | Effect::RemindArm { .. } | Effect::RemindCancel | Effect::Watch => {}
+        Effect::NotifyClose => env.notifier.close(&ctx.pane).await,
+        Effect::Blink if !ctx.bin.is_empty() => {
+            spawn(ctx, &format!("{}/agent-blink", ctx.bin), &[])
+        }
+        // Handled by the daemon before the ack, or no helpers to run.
+        _ => {}
     }
 }
 
-fn command(ctx: &Ctx, program: &str, args: &[&str]) -> Option<tokio::process::Child> {
-    Command::new(program)
+/// Starts a helper out of the daemon's process group (like `setsid -f` in
+/// bash) and lets it run; it is reaped when it ends.
+fn spawn(ctx: &Ctx, program: &str, args: &[&str]) {
+    let child = Command::new(program)
         .args(args)
         .env("TMUX", &ctx.tmux_env)
         .env_remove("TMUX_PANE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        // Out of the daemon's process group, like `setsid -f` in bash.
         .process_group(0)
-        .spawn()
-        .ok()
-}
-
-/// Starts a helper and lets it run; it is reaped when it ends.
-fn spawn(ctx: &Ctx, program: &str, args: &[&str]) {
-    if let Some(mut child) = command(ctx, program, args) {
+        .spawn();
+    if let Ok(mut child) = child {
         tokio::task::spawn_local(async move {
             let _ = child.wait().await;
         });

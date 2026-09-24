@@ -404,3 +404,15 @@ default `MouseDown1Status` does for a `range=session`. The row shows only the
 sessions of the client's space, so a click never leaves the space. Clicking a
 window tab of the second row selects that window (already so). **CHANGE C8:**
 bash's chips have no range: a click on them does nothing.
+
+## 16. The daemon is invisible
+
+**Z1.** An implementation that talks to tmux through a client of its own
+(control mode) must not be seen: no window changes size, no bar is laid out
+again (`@narrow-tabs`, `@summary-room`, the rows), no pane is marked seen,
+`agent-jump` and every client choice keep picking the user's client, no
+session of its own shows in the top row, the session search, the board or
+`agent-next`, and the user's `session_attached` counts don't change. This
+holds when it attaches, while it runs, when its session is killed or the last
+user session closes, and when it goes away.
+

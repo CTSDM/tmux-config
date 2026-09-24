@@ -49,8 +49,9 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
     let Some(paths) = client::paths(&tmux) else {
         return ExitCode::FAILURE;
     };
-    // Reconcile runs on config load too, maybe before any hook started us.
-    let (stream, timeout) = if command == "reconcile" {
+    // Reconcile runs on config load, seen on focus: maybe before any hook
+    // started us.
+    let (stream, timeout) = if command == "reconcile" || command == "seen" {
         (
             client::connect_or_start(&paths, ENSURE_BUDGET),
             RECONCILE_TIMEOUT,

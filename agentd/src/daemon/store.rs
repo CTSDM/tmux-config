@@ -34,6 +34,9 @@ pub struct Saved {
     pub server: Option<Server>,
     pub core: State,
     pub reminders: BTreeMap<String, SavedReminder>,
+    /// The open notification of each pane (N3), so a restarted daemon can
+    /// still close it.
+    pub notifications: BTreeMap<String, u32>,
 }
 
 /// The saved state of `server`. A missing or unreadable file, or one of

@@ -53,7 +53,7 @@ and C3 (the bash helpers write `@agent_notify_id`, `@agent_notify_pid`,
 | T1.7 | implementador | done (d397371) | Long life (review of T1.3): (a) drop a pane's event and effect queues, and its reminder, once they are drained and the pane is gone (tmux read finds no pane) or after its SessionEnd; today a daemon that runs for weeks keeps a task and a channel per pane ever seen. (b) The state file belongs to one tmux server instance: store the server's pid and start time and ignore a file from another one (a restarted server reuses the socket path, so the id, and pane ids restart at `%0`: old rounds and reminders would land on new panes); delete it when the daemon exits because the server is gone. Tests for both. |
 | T1.4 | tester | done (cebc2a5, 82b7614, bench/baseline-rust-phase1.md) | Run the suite with `AGENT_IMPL=rust` on each implementer delivery; report failures by rule id to both. Latency and RSS of `agentd` with T0.7's benchmarks. |
 
-## Phase 2: Codex, and reconcile in the daemon
+## Phase 2: Codex, and reconcile in the daemon — done
 
 Goal: the whole contract suite green with `AGENT_IMPL=rust`, Codex included
 (§6), except O3/C5 until phase 3. Reconcile moves here, not in phase 3: the
@@ -67,8 +67,8 @@ would keep its own Codex bookkeeping on panes the daemon owns.
 | T2.3 | implementador | done (3b42a28) | **Observation (X5, X7) in the daemon:** one shared 2 s tick that runs only while some pane is watched (no timer otherwise), one `/proc` scan per tick for all watched panes (command roots, X7), the rollout read incrementally per pane (device and inode, offset, never an unfinished line, restart on truncation or another file), synthesized events through the pane's event queue (O2), X5's end conditions, agent gone → as H11 (notification closed). Persist only ids, offsets, fingerprints and process identities (X8): no messages, prompts or commands in the state file. |
 | T2.4 | implementador | done (c8cb42f) | **Reconcile in the daemon** (E2, B2, C6): `agentd ctl reconcile [pane...]` is a daemon request, no longer bash. Agent gone → clear and close its notification; Claude busy with a transcript that says the turn is over → idle (last 80 lines); background shells without a watcher → start `agent-bgwatch` (still bash); Codex → one observation now, and resume watching. |
 | T2.6 | implementador | done (dc66868) | **The `@agentd` switch** (design.md), delivered with T2.4 and never before it: `agents.conf` runs `#{@agentd} ensure` on load when set; `agent-reconcile` starts with "if `@agentd` is set, exec `agentd ctl reconcile "$@"`". Nothing else changes yet. |
-| T2.7 | tester | doing | With `AGENT_IMPL=rust`, set `@agentd` (= `AGENTD`) globally before sourcing agents.conf, so tmux hooks, the board and load-time reconcile reach the daemon; keep the harness's own `ensure` only for servers without agents.conf. Lands after T2.4 + T2.6. |
-| T2.5 | tester | doing | Suite with `AGENT_IMPL=rust` on each delivery (§6, E2 and C6 now expected green), and Codex latency with bench/run.py next to bash. |
+| T2.7 | tester | done (f9b9407) | With `AGENT_IMPL=rust`, set `@agentd` (= `AGENTD`) globally before sourcing agents.conf, so tmux hooks, the board and load-time reconcile reach the daemon; keep the harness's own `ensure` only for servers without agents.conf. Lands after T2.4 + T2.6. |
+| T2.5 | tester | done (f9b9407, bench/baseline-rust-phase2.md) | Suite with `AGENT_IMPL=rust` on each delivery (§6, E2 and C6 now expected green), and Codex latency with bench/run.py next to bash. |
 
 ## Phase 3: effects in-process
 
@@ -79,10 +79,28 @@ stay for bash mode.
 
 | Id | Owner | Status | Task |
 |---|---|---|---|
-| T3.1 | implementador | todo | **Sounds (S9):** file lookup (`AG_SOUNDS`, `$XDG_DATA_HOME/tmux-agents/sounds`, wav/ogg/oga/mp3/flac), `@agent_sound` and `@agent_sound_volume`, player as agent-sound (`AG_SOUND_PLAYER`, `pw-play --volume`, ffplay, mpv, aplay), priority and the 2.5 s debounce shared with bash and other daemons through `$XDG_RUNTIME_DIR/tmux-agents/sound.last` under the same `flock` (one debounce per user, S9), a higher priority stops the previous player. Sink line at the same point as bash. |
-| T3.2 | implementador | todo | **Notifications over D-Bus (zbus):** one session connection and one signal match; `Notify` as agent-notify (app `tmux agents`, icon `utilities-terminal`, actions `default`/`Open`, urgency hint, `replaces_id` = the pane's open one, timeout -1); `ActionInvoked` default → `agent-jump <pane>`; `NotificationClosed` → forget. Closes per N3, in effect order (O3). Ids per pane in memory and in the state file, so a restarted daemon can still close them. No pane options (C3). No bus → nothing (debug log). Sink seam. |
-| T3.3 | implementador | todo | **Seen:** `agentd ctl seen <pane>` (E1: `done` → `idle` without touching `@agent_since`, close its notification). agents.conf: with `@agentd`, `pane-focus-in` runs it for panes with `@agent` instead of hooks [40]/[41]; without `@agentd`, as today. |
-| T3.4 | implementador | todo | **Background shells (B1, B2) in the daemon:** Claude panes with such shells join the shared tick and its `/proc` scan; `@agent_bg` kept there; no `agent-bgwatch`, no `@agent_bg_watch` (C3). |
-| T3.5 | tester | todo | Suite and bench on each delivery; at the end of the phase, no expected failure left in Rust. Latency of leaving `needs` and of SessionEnd next to bash. |
+| T3.1 | implementador | done (9b563e5) | **Sounds (S9):** file lookup (`AG_SOUNDS`, `$XDG_DATA_HOME/tmux-agents/sounds`, wav/ogg/oga/mp3/flac), `@agent_sound` and `@agent_sound_volume`, player as agent-sound (`AG_SOUND_PLAYER`, `pw-play --volume`, ffplay, mpv, aplay), priority and the 2.5 s debounce shared with bash and other daemons through `$XDG_RUNTIME_DIR/tmux-agents/sound.last` under the same `flock` (one debounce per user, S9), a higher priority stops the previous player. Sink line at the same point as bash. |
+| T3.2 | implementador | done (3ab2561) | **Notifications over D-Bus (zbus):** one session connection and one signal match; `Notify` as agent-notify (app `tmux agents`, icon `utilities-terminal`, actions `default`/`Open`, urgency hint, `replaces_id` = the pane's open one, timeout -1); `ActionInvoked` default → `agent-jump <pane>`; `NotificationClosed` → forget. Closes per N3, in effect order (O3). Ids per pane in memory and in the state file, so a restarted daemon can still close them. No pane options (C3). No bus → nothing (debug log). Sink seam. |
+| T3.3 | implementador | done (3ab2561) | **Seen:** `agentd ctl seen <pane>` (E1: `done` → `idle` without touching `@agent_since`, close its notification). agents.conf: with `@agentd`, `pane-focus-in` runs it for panes with `@agent` instead of hooks [40]/[41]; without `@agentd`, as today. |
+| T3.4 | implementador | done (35a8437) | **Background shells (B1, B2) in the daemon:** Claude panes with such shells join the shared tick and its `/proc` scan; `@agent_bg` kept there; no `agent-bgwatch`, no `@agent_bg_watch` (C3). |
+| T3.6 | implementador | done (35a8437) | **The tick must not scan all of /proc** (tester's tail analysis, bench/baseline-rust-phase2.md "The p99 tail": ~10 ms of CPU and ~3,700 reads per tick on the runtime thread while Codex is observed, which delays ~1% of hooks by up to 10 ms). X7 and B1 walk the agent's descendants through `/proc/<pid>/task/*/children` (every thread), plus the kept `(pid, start)` of known groups and their descendants, instead of every process: the same trees, at a cost that follows the agent's tree, not the machine. Only when `children` files don't exist (kernel without CONFIG_PROC_CHILDREN), the full scan, and then off the runtime thread (`spawn_blocking`). Check with `bench/tail.py`: no burst per tick left. |
+| T3.5 | tester | doing | Suite and bench on each delivery; at the end of the phase, no expected failure left in Rust. Latency of leaving `needs` and of SessionEnd next to bash. |
 
-Phases 4-5: written when phase 3 closes.
+## Phase 4: control mode and the blink in the daemon
+
+Goal: hook p50 ≤ 5 ms and the blink ≤ 1% of a core for `agentd`, with the
+daemon invisible (contract §16, Z1). Recipe and pitfalls:
+[spike-control-mode.md](spike-control-mode.md), case k.
+
+| Id | Owner | Status | Task |
+|---|---|---|---|
+| T4.1 | implementador | todo | **Control-mode transport** behind the `Tmux` trait: `tmux -C new-session -A -s _peek-agentd <inert>`, then `destroy-unattached on`, flags `no-output,ignore-size`, size `1000x100`; answers matched to commands by number (`%begin`/`%end`/`%error`), never by content (output is not escaped); formats without `%` (control mode's `display -p` expands strftime); reattach after `%exit` while the server lives, EOF = server gone. If the control client can't attach, the spawn transport, with a debug log line. |
+| T4.2 | implementador | todo | **Skip control clients in bash** (`#{client_control_mode}`): `agent-spaces layout` (per-session client width), `agent-jump` (viewer and most recently active client), `ag_focused_client`'s tmux-flag fallback. The session name alone is not the protection. |
+| T4.3 | implementador | todo | **Blink in the daemon** (K1-K5): same targets, text, frames and timing; writes only the options that changed from the previous frame; `agentd ctl blink-demo`; with `@agentd`, agents.conf's load-time start and the prefix+Q preview (`agent-spaces` menu) go to the daemon, which no longer starts `agent-blink`. |
+| T4.4 | tester | todo | Tests for Z1 with `AGENT_IMPL=rust` (attach, run, kill its session, last user session closed, daemon exit: sizes, layout options, seen, `agent-jump`'s pick, lists, `session_attached`); K with the in-process blink; bench: hook latency and blink CPU of `agentd` next to phase 3. |
+
+Subscriptions (`refresh-client -B`) are left out: with control mode the
+blink's refresh (`list-panes -a` every 6 frames) is cheap. Revisit if a
+measurement shows polling.
+
+Phase 5 (cutover) is written when phase 4 closes.
