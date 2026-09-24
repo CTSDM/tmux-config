@@ -116,9 +116,20 @@ def layout(server: TmuxServer, session: str) -> str:
 
 
 def settled(server: TmuxServer, session: str) -> str:
-    """The layout, after checking that a full `agent-spaces layout` would
-    not change it: what the hooks left is what the clients need."""
-    before = layout(server, session)
+    """The layout once the hooks are done (unchanged for a second: several
+    layouts may run one after another), after checking that a full
+    `agent-spaces layout` would not change it: what the hooks left is what
+    the clients need."""
+    seen = [layout(server, session)]
+    still = time.monotonic()
+    end = still + 10
+    while time.monotonic() - still < 1 and time.monotonic() < end:
+        time.sleep(0.1)
+        now = layout(server, session)
+        if now != seen[-1]:
+            seen.append(now)
+            still = time.monotonic()
+    before = seen[-1]
     server.run_tool([str(server.impl.bin / "agent-spaces"), "layout"])
     time.sleep(0.5)
     assert layout(server, session) == before, "the hooks left a stale bar"
@@ -196,3 +207,25 @@ def test_F_server_survives_a_client_still_connecting(scene: Scene) -> None:
         scene.user.switch("main")
         time.sleep(SETTLE)
         assert alive(server), "the tmux server died on the switch back"
+
+
+def test_F_server_survives_fast_switch_scenes(scene: Scene) -> None:
+    """The scene that found the crash, ten times without pauses and with a
+    connection that never identifies itself: a new session, a switch there,
+    a finished turn, a switch back to the pane in front."""
+    import socket
+
+    server = scene.server
+    agent = server.agent("claude", "main")
+    server.tmux("select-window", "-t", agent.pane)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as raw:
+        raw.connect(server.socket_path)
+        for i in range(10):
+            server.session(f"quick{i}")
+            scene.user.switch(f"quick{i}")
+            working(agent)
+            agent.hook("Stop")
+            scene.user.switch("main")
+            assert alive(server), f"the tmux server died in scene {i}"
+    time.sleep(SETTLE)
+    assert alive(server)
