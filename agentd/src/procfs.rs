@@ -142,6 +142,14 @@ mod tests {
             .unwrap();
         let me = std::process::id();
         assert!(children(me).contains(&child.id()));
+        // Until it has exec'd, the child still shows our command line.
+        for _ in 0..200 {
+            let cmdline = fs::read(format!("/proc/{}/cmdline", child.id())).unwrap_or_default();
+            if String::from_utf8_lossy(&cmdline).contains("snapshot-test") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert_eq!(count_children_matching(me, "shell-snapshots/snapshot-"), 1);
         assert_eq!(count_children_matching(me, "no-such-marker"), 0);
         child.kill().unwrap();
