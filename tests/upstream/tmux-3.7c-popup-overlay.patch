@@ -1,0 +1,11 @@
+--- a/screen-redraw.c
++++ b/screen-redraw.c
+@@ -1367,7 +1367,7 @@
+ 		}
+ 
+ 		/* Get visible ranges of line before we draw it. */
+-		r = tty_check_overlay_range(tty, wx, wy, width);
++		r = tty_check_overlay_range(tty, wx, py, width);
+ 		r = screen_redraw_get_visible_ranges(wp, wx, wy, width, r);
+ 		tty_default_colours(&defaults, wp);
+ 		for (k = 0; k < r->used; k++) {
