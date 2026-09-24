@@ -9,6 +9,8 @@ pub struct Stat {
     pub comm: String,
     pub state: char,
     pub ppid: u32,
+    /// The Unix session.
+    pub session: u32,
     pub starttime: u64,
 }
 
@@ -24,8 +26,32 @@ pub fn parse_stat(pid: u32, text: &str) -> Option<Stat> {
         comm,
         state: rest.first()?.chars().next()?,
         ppid: rest.get(1)?.parse().ok()?,
+        session: rest.get(3)?.parse().ok()?,
         starttime: rest.get(19)?.parse().ok()?,
     })
+}
+
+/// Every process: one pass over /proc.
+pub fn all() -> Vec<Stat> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(stat)
+        .collect()
+}
+
+/// NUL-separated /proc file (environ, cmdline) as its entries.
+pub fn entries(pid: u32, file: &str) -> Option<Vec<String>> {
+    let raw = fs::read(format!("/proc/{pid}/{file}")).ok()?;
+    Some(
+        raw.split(|b| *b == 0)
+            .filter(|e| !e.is_empty())
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect(),
+    )
 }
 
 pub fn stat(pid: u32) -> Option<Stat> {
@@ -42,6 +68,43 @@ pub fn chain(pid: u32, max: usize) -> Vec<Stat> {
         out.push(s);
     }
     out
+}
+
+/// E2: the pane's agent process: `pane_pid` itself if named `claude` or
+/// `codex`, else its first child (by pid) with that exact name.
+pub fn agent_of(pane_pid: u32) -> Option<u32> {
+    let agent = |pid: u32| stat(pid).is_some_and(|s| s.comm == "claude" || s.comm == "codex");
+    if agent(pane_pid) {
+        return Some(pane_pid);
+    }
+    let mut kids = children(pane_pid);
+    kids.sort_unstable();
+    kids.into_iter().find(|p| agent(*p))
+}
+
+/// The last `n` lines of a file, like `tail -n`: without reading all of a
+/// long transcript. `None` when it can't be read.
+pub fn tail_lines(path: &str, n: usize) -> Option<Vec<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut start = size;
+    let mut buf: Vec<u8> = Vec::new();
+    // Read back in blocks until n + 1 newlines (or the start) are in.
+    while start > 0 && buf.iter().filter(|b| **b == b'\n').count() <= n {
+        let step = start.min(64 * 1024);
+        start -= step;
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut block = vec![0; step as usize];
+        file.read_exact(&mut block).ok()?;
+        block.extend_from_slice(&buf);
+        buf = block;
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let skip = lines.len().saturating_sub(n);
+    Some(lines[skip..].iter().map(|l| l.to_string()).collect())
 }
 
 /// Whether `ancestor` is `pid` or one of its parents, looking at no more than
@@ -117,8 +180,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            (s.comm.as_str(), s.state, s.ppid, s.starttime),
-            ("a) b (c", 'S', 1, 12345)
+            (s.comm.as_str(), s.state, s.ppid, s.session, s.starttime),
+            ("a) b (c", 'S', 1, 7, 12345)
         );
         assert!(parse_stat(7, "7 (x) S 1").is_none());
     }
@@ -135,9 +198,38 @@ mod tests {
     }
 
     #[test]
+    fn tail_like_tail() {
+        let dir = std::env::temp_dir().join(format!("agentd-tail-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let p = path.to_str().unwrap();
+        let body: String = (1..=200_000).map(|i| format!("line {i}\n")).collect();
+        fs::write(&path, &body).unwrap();
+        let last = tail_lines(p, 80).unwrap();
+        assert_eq!(last.len(), 80);
+        assert_eq!(
+            (last[0].as_str(), last[79].as_str()),
+            ("line 199921", "line 200000")
+        );
+        fs::write(&path, "a\nb\nc").unwrap(); // no final newline: c is a line
+        assert_eq!(tail_lines(p, 2).unwrap(), ["b", "c"]);
+        fs::write(&path, "").unwrap();
+        assert_eq!(tail_lines(p, 80).unwrap(), [""]);
+        assert!(tail_lines("/nonexistent/agentd", 80).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn agent_of_a_pane() {
+        // Our own process is no agent, and neither are its children.
+        assert_eq!(agent_of(std::process::id()), None);
+    }
+
+    #[test]
     fn children_and_command_lines() {
-        let mut child = std::process::Command::new("sleep")
-            .args(["5", "shell-snapshots/snapshot-test"])
+        // The marker as $0 of a shell (sleep would reject it and exit).
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 5", "shell-snapshots/snapshot-test"])
             .spawn()
             .unwrap();
         let me = std::process::id();

@@ -12,6 +12,8 @@ use crate::proto::{CtlRequest, Request, VERSION};
 /// tmux.conf runs `ensure` on load; waiting a little lets it report failure.
 const ENSURE_BUDGET: Duration = Duration::from_secs(2);
 const CTL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Reconciling every pane of a big server takes a while.
+const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn tmux_var() -> Option<OsString> {
     let tmux = env::var_os("TMUX").filter(|v| !v.is_empty());
@@ -38,20 +40,28 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
     let Some(tmux) = tmux_var() else {
         return ExitCode::FAILURE;
     };
-    // Phase 1: still the bash helpers (design.md, "Migration").
-    match command {
-        "reconcile" => return helper(&tmux, "agent-reconcile", args),
-        "blink-demo" => {
-            let mut demo = vec!["--demo".to_string()];
-            demo.extend_from_slice(args);
-            return helper(&tmux, "agent-blink", &demo);
-        }
-        _ => {}
+    // Until phase 4 the blink is still bash (design.md, "Migration").
+    if command == "blink-demo" {
+        let mut demo = vec!["--demo".to_string()];
+        demo.extend_from_slice(args);
+        return helper(&tmux, "agent-blink", &demo);
     }
     let Some(paths) = client::paths(&tmux) else {
         return ExitCode::FAILURE;
     };
-    let Ok(stream) = std::os::unix::net::UnixStream::connect(&paths.socket) else {
+    // Reconcile runs on config load too, maybe before any hook started us.
+    let (stream, timeout) = if command == "reconcile" {
+        (
+            client::connect_or_start(&paths, ENSURE_BUDGET),
+            RECONCILE_TIMEOUT,
+        )
+    } else {
+        (
+            std::os::unix::net::UnixStream::connect(&paths.socket).ok(),
+            CTL_TIMEOUT,
+        )
+    };
+    let Some(stream) = stream else {
         eprintln!("agentd ctl: no daemon for this tmux server");
         return ExitCode::FAILURE;
     };
@@ -60,7 +70,7 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
         ctl: command.to_string(),
         args: args.to_vec(),
     });
-    match client::call(stream, &request, CTL_TIMEOUT) {
+    match client::call(stream, &request, timeout) {
         Ok(reply) if reply.ok => {
             if let Some(data) = reply.data {
                 println!(

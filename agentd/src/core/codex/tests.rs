@@ -800,6 +800,7 @@ fn x5_keep_watching() {
         session: "s".into(),
         state: state.into(),
         bg: bg.into(),
+        agent_pid: "1".into(),
     };
     let mut session = "s".to_string();
     let mut since = None;

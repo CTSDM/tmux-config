@@ -312,3 +312,143 @@ fn state_file_kept_when_stopped_and_removed_when_the_server_dies() {
     assert!(!server.paths.state.exists(), "state file left behind");
     assert!(!server.paths.socket.exists(), "socket left behind");
 }
+
+impl Server {
+    fn ctl(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_agentd"))
+            .arg("ctl")
+            .args(args)
+            .env("TMUX", format!("{},{},0", self.socket, self.pid))
+            .env_remove("TMUX_PANE")
+            .env("XDG_RUNTIME_DIR", &self.runtime)
+            .env("AG_FOCUS_CLIENT", "none")
+            .env("AG_SOUND_PLAYER", "/bin/true")
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .output()
+            .unwrap()
+    }
+
+    fn pane_options(&self, pane: &str) -> Vec<String> {
+        self.tmux(&["show", "-p", "-t", pane])
+            .lines()
+            .filter(|l| l.starts_with("@agent"))
+            .map(String::from)
+            .collect()
+    }
+
+    /// A pane whose process is named `claude`: a copy of dash (sleep may be
+    /// a multicall binary that goes by its name), kept alive by `; :`.
+    fn claude_pane(&self) -> String {
+        let fake = self.runtime.join("claude");
+        if !fake.exists() {
+            fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
+        }
+        let command = format!("{} -c 'sleep 600; :'", fake.display());
+        let pane = self.tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "main:",
+            &command,
+        ]);
+        let pid: u32 = self
+            .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+            .parse()
+            .unwrap();
+        wait_for("the fake claude", || {
+            agentd::procfs::agent_of(pid).is_some()
+        });
+        pane
+    }
+}
+
+#[test]
+fn e2_reconcile_clears_a_pane_whose_agent_is_gone() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane(); // runs sleep: no agent there
+    for (name, value) in [
+        ("@agent", "claude"),
+        ("@agent_state", "working"),
+        ("@agent_bg_watch", "1"),
+    ] {
+        server.tmux(&["set", "-p", "-t", &pane, name, value]);
+    }
+    let out = server.ctl(&["reconcile", &pane]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(server.pane_options(&pane), Vec::<String>::new());
+}
+
+#[test]
+fn e2_reconcile_idles_a_busy_pane_whose_turn_is_over() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.claude_pane();
+    let transcript = server.runtime.join("t.jsonl");
+    fs::write(&transcript, "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n").unwrap();
+    for (name, value) in [
+        ("@agent", "claude"),
+        ("@agent_state", "needs"),
+        ("@agent_needs", "permission"),
+        ("@agent_tool", "Bash: ls"),
+        ("@agent_transcript", transcript.to_str().unwrap()),
+    ] {
+        server.tmux(&["set", "-p", "-t", &pane, name, value]);
+    }
+    // Without panes: every agent pane.
+    let out = server.ctl(&["reconcile"]);
+    assert!(out.status.success(), "{out:?}");
+    let options = server.pane_options(&pane);
+    assert!(
+        options.contains(&"@agent_state idle".to_string()),
+        "{options:?}"
+    );
+    assert!(
+        options
+            .iter()
+            .all(|o| !o.starts_with("@agent_needs") && !o.starts_with("@agent_tool")),
+        "{options:?}"
+    );
+    // A turn that isn't over stays as it is.
+    fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_state", "working"]);
+    server.ctl(&["reconcile", &pane]);
+    assert!(
+        server
+            .pane_options(&pane)
+            .contains(&"@agent_state working".to_string())
+    );
+}
+
+#[test]
+fn t2_6_bash_reconcile_hands_over_to_agentd() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane();
+    server.tmux(&["set", "-p", "-t", &pane, "@agent", "claude"]);
+    server.tmux(&["set", "-g", "@agentd", env!("CARGO_BIN_EXE_agentd")]);
+    let bash = Path::new(env!("CARGO_MANIFEST_DIR")).join("../agents/bin/agent-reconcile");
+    let out = Command::new(bash)
+        .arg(&pane)
+        .env("TMUX", format!("{},{},0", server.socket, server.pid))
+        .env_remove("TMUX_PANE")
+        .env("XDG_RUNTIME_DIR", &server.runtime)
+        .env("XDG_STATE_HOME", server.runtime.join("state"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    // agentd cleared it (bash would too, but leaves @agent_bg_watch-like
+    // internals; here the pane had only @agent).
+    assert_eq!(server.pane_options(&pane), Vec::<String>::new());
+    let status = server.status();
+    assert!(status["panes"].as_array().unwrap().is_empty() || status["panes"] == json!([pane]));
+}
