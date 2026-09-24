@@ -5,6 +5,7 @@
 
 pub mod codex;
 mod events;
+pub mod reconcile;
 mod text;
 
 use std::collections::{BTreeMap, BTreeSet};

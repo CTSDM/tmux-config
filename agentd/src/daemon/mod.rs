@@ -200,6 +200,8 @@ enum Job {
     },
     /// X5: observe a Codex pane, with this tick's view of /proc.
     Observe(Rc<ProcView>),
+    /// E2: reconcile the pane; told when done.
+    Reconcile(oneshot::Sender<()>),
 }
 
 /// A Codex pane under observation (X5).
@@ -253,7 +255,7 @@ impl Daemon {
         let reply = match timeout(REQUEST_TIMEOUT, reader.read_line(&mut line)).await {
             Ok(Ok(n)) if n > 0 => match serde_json::from_str::<Request>(&line) {
                 Ok(Request::Hook(h)) => self.hook(h).await,
-                Ok(Request::Ctl(c)) => self.ctl(&c),
+                Ok(Request::Ctl(c)) => self.ctl(&c).await,
                 Err(e) => Reply::error(format!("bad request: {e}")),
             },
             _ => return,
@@ -271,8 +273,9 @@ impl Daemon {
         acked.await.unwrap_or_else(|_| Reply::ok())
     }
 
-    fn ctl(&self, request: &CtlRequest) -> Reply {
+    async fn ctl(self: &Rc<Self>, request: &CtlRequest) -> Reply {
         match request.ctl.as_str() {
+            "reconcile" => self.reconcile(&request.args).await,
             "status" => Reply::data(json!({
                 "pid": std::process::id(),
                 "tmux": self.tmux.env(),
@@ -340,6 +343,18 @@ impl Daemon {
                     Ok(None) => false,
                     Err(missing) => missing == Missing::Pane,
                 },
+                Job::Reconcile(done) => {
+                    let retire = match self.on_reconcile(&pane).await {
+                        Ok(Some(((ctx, effects), cleared))) => {
+                            self.run_effects(ctx, effects);
+                            cleared
+                        }
+                        Ok(None) => false,
+                        Err(missing) => missing == Missing::Pane,
+                    };
+                    let _ = done.send(());
+                    retire
+                }
             };
             self.finished(&pane, Some(retire));
         }
@@ -582,8 +597,8 @@ impl Daemon {
         }
     }
 
-    /// X5: what the rollout and /proc say that no hook did; then whether to
-    /// go on observing (`watch()` of agent-codex).
+    /// X5, one tick: observe, then whether to go on observing (`watch()` of
+    /// agent-codex).
     async fn observe(
         self: &Rc<Self>,
         pane: &str,
@@ -605,39 +620,10 @@ impl Daemon {
             }
         };
         self.sweep(&read.others.iter().map(|o| o.pane.as_str()).collect());
-        if read.pane.sid.is_empty() || read.pane.agent != "codex" {
+        let Some((batch, after)) = self.observe_now(pane, &read, view, w.agent).await else {
             self.watched.borrow_mut().remove(pane);
             return Ok(None);
-        }
-        let agent = read.pane.agent_pid.parse().unwrap_or(w.agent);
-        let start = view.start_of(agent);
-        // The agent is gone when its pid and start time no longer match.
-        let gone = match start {
-            None => true,
-            Some(s) => {
-                !read.pane.agent_pid_start.is_empty() && read.pane.agent_pid_start != s.to_string()
-            }
         };
-        let event = Event {
-            ev: if gone { "SessionEnd" } else { "CodexReconcile" }.into(),
-            sid: read.pane.sid.clone(),
-            turn: read.pane.turn.clone(),
-            transcript: read.pane.transcript.clone(),
-            ..Event::default()
-        };
-        let codex = self.codex_facts(pane, &event, &read, start, Some(view));
-        let vis = Some(self.visibility(&read).await);
-        let facts = self.facts(&read, vis, 0, Some(codex));
-        let input = Input {
-            kind: Kind::Codex,
-            pane: pane.to_string(),
-            event,
-            config_dir: None,
-            agent_pid: agent,
-            observing: true,
-        };
-        let (batch, ops) = self.run_core(&input, &facts, &read).await;
-        let after = After::from(&read.pane, &ops);
         let keep = {
             let state = self.state.borrow();
             codex::keep_watching(
@@ -653,12 +639,143 @@ impl Daemon {
             if let Some(entry) = watched.get_mut(pane) {
                 entry.session = w.session;
                 entry.finished_since = w.finished_since;
-                entry.agent = agent;
+                entry.agent = after.agent_pid.parse().unwrap_or(w.agent);
             }
         } else {
             watched.remove(pane);
         }
         Ok(Some(batch))
+    }
+
+    /// X5: what the rollout and /proc say that no hook did, now. `None` when
+    /// the pane holds no Codex session.
+    async fn observe_now(
+        self: &Rc<Self>,
+        pane: &str,
+        read: &Read,
+        view: Rc<ProcView>,
+        fallback: u32,
+    ) -> Option<(Batch, After)> {
+        if read.pane.sid.is_empty() || read.pane.agent != "codex" {
+            return None;
+        }
+        let agent = read.pane.agent_pid.parse().unwrap_or(fallback);
+        let start = view.start_of(agent);
+        // The agent is gone when its pid and start time no longer match.
+        let gone = match start {
+            None => true,
+            Some(s) => {
+                !read.pane.agent_pid_start.is_empty() && read.pane.agent_pid_start != s.to_string()
+            }
+        };
+        let event = Event {
+            ev: if gone { "SessionEnd" } else { "CodexReconcile" }.into(),
+            sid: read.pane.sid.clone(),
+            turn: read.pane.turn.clone(),
+            transcript: read.pane.transcript.clone(),
+            ..Event::default()
+        };
+        let codex = self.codex_facts(pane, &event, read, start, Some(view));
+        let vis = Some(self.visibility(read).await);
+        let facts = self.facts(read, vis, 0, Some(codex));
+        let input = Input {
+            kind: Kind::Codex,
+            pane: pane.to_string(),
+            event,
+            config_dir: None,
+            agent_pid: agent,
+            observing: true,
+        };
+        let (batch, ops) = self.run_core(&input, &facts, read).await;
+        Some((batch, After::from(&read.pane, &ops)))
+    }
+
+    /// E2 for the given panes, or every agent pane; done when all are.
+    async fn reconcile(self: &Rc<Self>, panes: &[String]) -> Reply {
+        let panes: Vec<String> = if panes.is_empty() {
+            let fmt = "#{pane_id}\x1f#{@agent}";
+            match self
+                .tmux
+                .run(&["list-panes".into(), "-a".into(), "-F".into(), fmt.into()])
+                .await
+            {
+                Ok(out) => out
+                    .lines()
+                    .filter_map(|l| l.split_once('\x1f'))
+                    .filter(|(_, agent)| !agent.is_empty())
+                    .map(|(pane, _)| pane.to_string())
+                    .collect(),
+                Err(_) => return Reply::error("tmux did not answer"),
+            }
+        } else {
+            panes.to_vec()
+        };
+        let mut done = Vec::new();
+        for pane in panes {
+            let (tx, rx) = oneshot::channel();
+            self.queue(&pane, Job::Reconcile(tx));
+            done.push(rx);
+        }
+        for rx in done {
+            let _ = rx.await;
+        }
+        Reply::ok()
+    }
+
+    /// E2 for one pane: the batch, and whether the pane was cleared.
+    async fn on_reconcile(self: &Rc<Self>, pane: &str) -> Result<Option<(Batch, bool)>, Missing> {
+        let read = self.tmux.read(pane, true, true).await?;
+        let p = &read.pane;
+        if p.agent.is_empty() {
+            return Ok(None);
+        }
+        let apid = procfs::agent_of(read.pane_pid);
+        if p.agent == "codex" {
+            // One observation now, and observation again if it still runs.
+            let view = Rc::new(ProcView::scan());
+            let Some((batch, after)) = self.observe_now(pane, &read, view, apid.unwrap_or(0)).await
+            else {
+                return Ok(None);
+            };
+            if let (false, Ok(tracked)) = (after.session.is_empty(), after.agent_pid.parse()) {
+                self.watch(pane, tracked, &after.session);
+            }
+            return Ok(Some((batch, after.session.is_empty())));
+        }
+        let ctx = self.ctx(pane, &read);
+        let Some(apid) = apid else {
+            // The agent is gone: as H11, notification and internal options too (C6).
+            let input = Input {
+                kind: Kind::Claude,
+                pane: pane.to_string(),
+                event: Event {
+                    ev: "SessionEnd".into(),
+                    sid: p.sid.clone(),
+                    ..Event::default()
+                },
+                config_dir: None,
+                agent_pid: 0,
+                observing: false,
+            };
+            let facts = self.facts(&read, None, 0, None);
+            let (batch, _) = self.run_core(&input, &facts, &read).await;
+            return Ok(Some((batch, true)));
+        };
+        if core::reconcile::busy(&p.state) {
+            let lines = procfs::tail_lines(&p.transcript, core::reconcile::TRANSCRIPT_LINES);
+            if lines.is_some_and(|l| core::reconcile::turn_over(l.iter().map(String::as_str))) {
+                let now = (now_ms() / 1000) as i64;
+                self.tmux.write(pane, &core::reconcile::idle(now)).await;
+            }
+        }
+        // B2: background shells nobody watches.
+        let watcher = procfs::entries(p.bg_watch.parse().unwrap_or(0), "cmdline")
+            .is_some_and(|argv| argv.iter().any(|a| a.contains("agent-bgwatch")));
+        let mut effects = Vec::new();
+        if !watcher && procfs::count_children_matching(apid, SNAPSHOT_SHELL) > 0 {
+            effects.push(Effect::Bgwatch { agent_pid: apid });
+        }
+        Ok(Some(((ctx, effects), false)))
     }
 
     async fn on_reminder(
