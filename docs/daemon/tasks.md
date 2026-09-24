@@ -39,7 +39,9 @@ through the bash helpers (design.md, "Migration"). Known exceptions until
 phase 3: O3 / C5 (a spawned `agent-notify` publishes its id ~150 ms late,
 like bash) and C6 (`agentd ctl reconcile` delegates to bash `agent-reconcile`
 in phase 1). Also until phase 3: an event that closes a bash notification
-acks after `agent-notify --close` has run (~150-300 ms, uv), as bash does.
+acks after `agent-notify --close` has run (~150-300 ms, uv), as bash does;
+and C3 (the bash helpers write `@agent_notify_id`, `@agent_notify_pid`,
+`@agent_bg_watch`).
 
 | Id | Owner | Status | Task |
 |---|---|---|---|
@@ -47,9 +49,9 @@ acks after `agent-notify --close` has run (~150-300 ms, uv), as bash does.
 | T1.2 | implementador | done (2ac5eb2) | **Hook client** (`agentd hook`): I1-I3 parsing with jq `//` semantics, whitespace collapse, 300 characters; parent chain from `/proc` (pid, comm, start time) for I4 (up to 16 entries or pid 1); the protocol of design.md; `ensure` and retry for 300 ms when there is no daemon; never stdout, always 0. Measure p50/p99. |
 | T1.3 | implementador | done (fe2e20b, 9f7670f) | **Daemon** (`agentd daemon`, `ensure`, `ctl status`): socket per server (identity.rs), flock, pidfd on the tmux server; per event one tmux read (pane pid, the P2 options, session, window/pane active, title, space, mute, §13 options) and one write before the ack; I4 with the chain (C4); visibility V1-V2 in-process (Hyprland `.socket.sock` `j/activewindow`, `AG_FOCUS_CLIENT`, skip control-mode clients); effects by spawning the helpers of `@agents_bin` (`agent-sound`, `agent-notify`, `agent-bgwatch`, `agent-blink`), except reminders: timers in the daemon, one per pane (C1, C2), firing spawns sound + notify; rounds and subagents in memory, persisted in the state file and read on start. `ctl status`: JSON of the daemon's state, for tests and debugging. |
 | T1.5 | implementador | done (bf79b33) | U1 (the user asked for it): in theme.conf's `@fleet-chips-tpl`, wrap each chip, current and others, in `#[range=session\|#{session_id}]`…`#[norange]`; check it in an isolated server with the full tmux.conf (click, narrow layout with several chip rows, `_peek-*` still hidden). Small: do it when it fits between T1.2 and T1.3. |
-| T1.6 | tester | todo | U1 test: real client with `mouse on`, theme.conf and `agent-spaces load` sourced, an SGR mouse click (`\e[<0;X;Ym` down/up) on a chip of the top row → `client_session` changes; a chip of another space can't be clicked because it isn't there. C8: xfail strict on bash until T1.5 lands. |
+| T1.6 | tester | doing | U1 test: real client with `mouse on`, theme.conf and `agent-spaces load` sourced, an SGR mouse click (`\e[<0;X;Ym` down/up) on a chip of the top row → `client_session` changes; a chip of another space can't be clicked because it isn't there. C8: xfail strict on bash until T1.5 lands. |
 | T1.7 | implementador | done (d397371) | Long life (review of T1.3): (a) drop a pane's event and effect queues, and its reminder, once they are drained and the pane is gone (tmux read finds no pane) or after its SessionEnd; today a daemon that runs for weeks keeps a task and a channel per pane ever seen. (b) The state file belongs to one tmux server instance: store the server's pid and start time and ignore a file from another one (a restarted server reuses the socket path, so the id, and pane ids restart at `%0`: old rounds and reminders would land on new panes); delete it when the daemon exits because the server is gone. Tests for both. |
-| T1.4 | tester | doing | Run the suite with `AGENT_IMPL=rust` on each implementer delivery; report failures by rule id to both. Latency and RSS of `agentd` with T0.7's benchmarks. |
+| T1.4 | tester | done (cebc2a5, 82b7614, bench/baseline-rust-phase1.md) | Run the suite with `AGENT_IMPL=rust` on each implementer delivery; report failures by rule id to both. Latency and RSS of `agentd` with T0.7's benchmarks. |
 
 ## Phase 2: Codex, and reconcile in the daemon
 
