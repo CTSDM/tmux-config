@@ -92,11 +92,41 @@ else
     warn "Could not auto-install plugins. Open tmux and press prefix + I to install."
 fi
 
+# --- 3a. agentd (the agent layer's daemon, in Rust) ----------------------------
+
+AGENTD="$HOME/.local/bin/agentd"
+AGENTD_OFF="${XDG_STATE_HOME:-$HOME/.local/state}/tmux-agents/agentd.off"
+agentd_ok=false
+if ! command -v cargo &>/dev/null; then
+    warn "cargo is not installed: agentd not built, the agent hooks stay on bash."
+else
+    info "Building agentd"
+    if cargo build --release --locked --manifest-path "$SCRIPT_DIR/agentd/Cargo.toml" \
+        --target-dir "$SCRIPT_DIR/agentd/target"; then
+        mkdir -p "$(dirname "$AGENTD")"
+        # A new file renamed over the old one: a running daemon keeps its inode.
+        tmp="$(dirname "$AGENTD")/.agentd.$$"
+        cp "$SCRIPT_DIR/agentd/target/release/agentd" "$tmp"
+        chmod 755 "$tmp"
+        mv -f "$tmp" "$AGENTD"
+        agentd_ok=true
+        ok "agentd installed at $AGENTD"
+        warn "Running agentd daemons keep the old binary until 'agentd ctl stop' in their tmux server."
+    else
+        warn "agentd did not build: the agent hooks stay on bash."
+    fi
+fi
+[ -e "$AGENTD_OFF" ] && warn "agentd is switched off ($AGENTD_OFF): the agent hooks stay on bash."
+
 # --- 3b. Agent hooks (Claude Code, Codex) ------------------------------------
 
 info "Registering the agent hooks with Claude Code and Codex"
 if command -v jq &>/dev/null; then
-    "$TMUX_CONFIG_DIR/agents/install"
+    if [ "$agentd_ok" = true ] && [ ! -e "$AGENTD_OFF" ]; then
+        "$TMUX_CONFIG_DIR/agents/install" --agentd "$AGENTD"
+    else
+        "$TMUX_CONFIG_DIR/agents/install" --bash
+    fi
 else
     warn "jq is not installed: skipped. Install it, then run agents/install."
 fi

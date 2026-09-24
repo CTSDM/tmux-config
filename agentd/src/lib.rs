@@ -7,6 +7,7 @@ pub mod client;
 pub mod core;
 pub mod ctl;
 pub mod daemon;
+pub mod debug;
 pub mod hook;
 pub mod identity;
 pub mod procfs;

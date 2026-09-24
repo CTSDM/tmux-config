@@ -6,11 +6,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::client;
+use crate::identity;
 use crate::proto::{CtlRequest, Request, VERSION};
 
 /// tmux.conf runs `ensure` on load; waiting a little lets it report failure.
 const ENSURE_BUDGET: Duration = Duration::from_secs(2);
 const CTL_TIMEOUT: Duration = Duration::from_secs(5);
+/// Saving the state and clearing the blink take well under this.
+const STOP_BUDGET: Duration = Duration::from_secs(5);
 /// Reconciling every pane of a big server takes a while.
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -24,6 +27,10 @@ fn tmux_var() -> Option<OsString> {
 
 /// Starts the daemon of this tmux server unless it runs. Idempotent.
 pub fn ensure() -> ExitCode {
+    // Switched off (rollback): nothing to start.
+    if identity::off() {
+        return ExitCode::SUCCESS;
+    }
     let Some(paths) = tmux_var().and_then(|t| client::paths(&t)) else {
         return ExitCode::FAILURE;
     };
@@ -56,6 +63,9 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
         ),
     };
     let Some(stream) = stream else {
+        if command == "stop" {
+            return ExitCode::SUCCESS; // nothing runs
+        }
         eprintln!("agentd ctl: no daemon for this tmux server");
         return ExitCode::FAILURE;
     };
@@ -65,6 +75,14 @@ pub fn ctl(command: &str, args: &[String]) -> ExitCode {
         args: args.to_vec(),
     });
     match client::call(stream, &request, timeout) {
+        Ok(reply) if reply.ok && command == "stop" => {
+            if client::wait_gone(&paths, STOP_BUDGET) {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("agentd ctl stop: the daemon did not exit");
+                ExitCode::FAILURE
+            }
+        }
         Ok(reply) if reply.ok => {
             if let Some(data) = reply.data {
                 println!(

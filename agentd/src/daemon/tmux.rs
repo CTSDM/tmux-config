@@ -24,6 +24,9 @@ const US: char = '\x1f';
 const TIMEOUT: Duration = Duration::from_secs(3);
 /// Attaching again after our control client went away.
 const REATTACH: Duration = Duration::from_secs(1);
+/// A daemon started while tmux loads its configuration is there before the
+/// user's first session: its own is alone for a moment.
+const FIRST_SESSION_GRACE: Duration = Duration::from_secs(5);
 
 /// The session's space, as everywhere in agents/.
 const SPACE: &str = "#{?@space,#{@space},#{@space_auto}}";
@@ -113,6 +116,8 @@ pub struct Tmux {
     /// Z1: our session was all that was left and we closed it; no attaching
     /// until the user has a session again.
     closed: Cell<bool>,
+    /// A session of the user's was there at some point.
+    seen_user: Cell<bool>,
 }
 
 /// One tmux command, word by word.
@@ -134,6 +139,7 @@ impl Tmux {
             last_attach: Cell::new(None),
             sessions_changed: Rc::new(Notify::new()),
             closed: Cell::new(false),
+            seen_user: Cell::new(false),
         }
     }
 
@@ -181,18 +187,31 @@ impl Tmux {
     }
 
     /// Z1: when our session is all that is left, it goes and we stay away,
-    /// so the server exits (`exit-empty`) as it would without us.
-    pub async fn close_if_alone(&self) {
+    /// so the server exits (`exit-empty`) as it would without us. Before the
+    /// user's first session, it waits a little: the time to check again.
+    pub async fn close_if_alone(&self) -> Option<Duration> {
         if self.closed.get() || !self.use_control {
-            return;
+            return None;
         }
         let list = [cmd(&["list-sessions", "-F", "#{session_name}"])];
-        let Ok(sessions) = self.run(&list).await else {
-            return;
-        };
+        let sessions = self.run(&list).await.ok()?;
         if sessions.lines().any(|s| s != control::SESSION) {
-            return;
+            self.seen_user.set(true);
+            return None;
         }
+        if !self.seen_user.get() {
+            let waited = self
+                .last_attach
+                .get()
+                .map_or(Duration::MAX, |t| t.elapsed());
+            if let Some(left) = FIRST_SESSION_GRACE
+                .checked_sub(waited)
+                .filter(|d| !d.is_zero())
+            {
+                return Some(left);
+            }
+        }
+        super::log("our session is the last one: closing it");
         self.closed.set(true);
         // Our client goes, and destroy-unattached takes the session with it;
         // unless someone else is in it.
@@ -203,6 +222,7 @@ impl Tmux {
             &format!("={}:", control::SESSION),
         ])];
         let _ = self.spawn(&kill).await;
+        None
     }
 
     /// After closing: attach again once the user has a session (a server
@@ -221,6 +241,7 @@ impl Tmux {
         if let Ok(sessions) = self.spawn(&list).await
             && sessions.lines().any(|s| s != control::SESSION)
         {
+            super::log("the user has a session again: attaching");
             self.closed.set(false);
             self.last_attach.set(None);
         }
