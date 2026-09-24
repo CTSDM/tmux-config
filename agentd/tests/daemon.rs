@@ -1246,4 +1246,22 @@ fn f2_a_switch_lays_out_only_for_another_width() {
     server.tmux(&["set", "-t", "=main:", "@layout-width", "1"]);
     server.tmux(&["switch-client", "-c", &client, "-t", "=main:"]);
     wait_for("a layout", || layouts() == before + 1);
+    // A window opened and one closed change the tab rows: a layout each.
+    let window = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{window_id}",
+        "-t",
+        "main:",
+        "sleep 600",
+    ]);
+    wait_for("a layout for the new window", || layouts() == before + 2);
+    server.tmux(&["kill-window", "-t", &window]);
+    wait_for("a layout for the closed window", || layouts() == before + 3);
+    // A rename is not one of them.
+    server.tmux(&["rename-window", "-t", "main:^", "renamed"]);
+    sleep(Duration::from_millis(300));
+    assert_eq!(layouts(), before + 3);
 }

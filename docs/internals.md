@@ -225,7 +225,7 @@ templates in theme.conf (`@fleet-head-tpl`, `@fleet-chips-tpl`,
 `@fleet-tail-tpl`) with placeholders the script fills per space.
 
 `agent-spaces layout` (on resize, attach, a session switch to a session laid
-out for another width, and after tagging) estimates, for each session shown on a terminal, whether its rows fit the
+out for another width, a window opened or closed, and after tagging) estimates, for each session shown on a terminal, whether its rows fit the
 terminal's width. If not, it sets session-level `@row0..@row4` and `status`:
 session chips packed into rows by index range, the summary on the last row or
 its own, and window tabs packed by window index (`@narrow-tabs` shortens
