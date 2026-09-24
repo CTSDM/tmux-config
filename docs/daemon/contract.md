@@ -412,7 +412,11 @@ bash's chips have no range: a click on them does nothing.
 again (`@narrow-tabs`, `@summary-room`, the rows), no pane is marked seen,
 `agent-jump` and every client choice keep picking the user's client, no
 session of its own shows in the top row, the session search, the board or
-`agent-next`, and the user's `session_attached` counts don't change. This
-holds when it attaches, while it runs, when its session is killed or the last
-user session closes, and when it goes away.
+`agent-next`, tmux's own `prefix s`, `prefix w` and `prefix D`, and the
+user's `session_attached` counts don't change. A plain `tmux attach` from
+outside lands in a session of the user's, never in the daemon's. When the
+daemon's session is all that is left, the daemon closes it and does not
+come back, so the server exits (with `exit-empty on`) as it would without
+the daemon. This holds when it attaches, while it runs, when its session is
+killed, when the last user session closes, and when it goes away.
 
