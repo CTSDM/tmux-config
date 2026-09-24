@@ -140,6 +140,9 @@ class TmuxServer:
                     "set -wg remain-on-exit on",
                     # agents.conf sets it too; agentd finds the bash helpers by it (phase 1).
                     f"set -g @agents_bin '{impl.bin}'",
+                    # The switch (design.md): agents.conf and the bash entry points
+                    # hand over to agentd when it names the binary.
+                    *([f"set -g @agentd '{impl.agentd}'"] if impl.agentd else []),
                     "",
                 ]
             )
@@ -162,10 +165,12 @@ class TmuxServer:
                 self.tmux("source-file", str(impl.theme))
                 self.set_global("mouse", "on")
             if conf:
+                # With @agentd set, it runs `agentd ensure` on load.
                 self.tmux("source-file", str(impl.conf))
-            # What tmux.conf does on load; after the focus is fixed, since the
-            # daemon reads the seams from its environment once.
-            self.ensure()
+            else:
+                # What agents.conf would do; after the focus is fixed, since
+                # the daemon reads the seams from its environment once.
+                self.ensure()
         except BaseException:
             self.kill()
             raise

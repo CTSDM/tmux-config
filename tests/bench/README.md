@@ -29,4 +29,4 @@ What it measures (targets from [design.md](../../docs/daemon/design.md)):
   and while nothing blinks. No client is attached, so tmux does not redraw.
   Target: ≤ 1% blinking, 0 idle.
 
-[baseline-bash.md](baseline-bash.md) has the reference numbers.
+[baseline-bash.md](baseline-bash.md) has the reference numbers; baseline-rust-phase*.md compare agentd with bash, phase by phase.
