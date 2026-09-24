@@ -4,7 +4,8 @@ pub const USAGE: &str = "\
 usage: agentd hook claude|codex     the agent hook: event JSON on stdin
        agentd daemon                one per tmux server, runs until it is gone
        agentd ensure                start the daemon of this tmux server unless it runs
-       agentd ctl <command> [args]  a request to the daemon (seen, reconcile, status...)";
+       agentd ctl <command> [args]  a request to the daemon: seen <pane>, reconcile [panes],
+                                    blink, blink-demo <session> <window> [secs], status";
 
 pub use crate::core::Kind;
 
