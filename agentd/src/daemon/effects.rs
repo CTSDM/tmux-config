@@ -1,7 +1,7 @@
-//! Effects. Sounds and notifications are in-process; the bash helpers of
-//! `@agents_bin` still watch background shells and blink until phase 3 and 4
-//! move them in (design.md, "Migration"). Reminders are the daemon's own
-//! timers (mod.rs).
+//! Effects. Sounds and notifications are in-process; of the bash helpers of
+//! `@agents_bin` only agent-blink is left, until phase 4 (design.md,
+//! "Migration"). Reminders and background shells are the daemon's own
+//! (mod.rs).
 
 use std::process::Stdio;
 use std::rc::Rc;
@@ -33,7 +33,6 @@ pub struct Ctx {
 
 /// Runs one effect; the pane's effects run one after the other (O3).
 pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
-    let helper = |name: &str| format!("{}/{name}", ctx.bin);
     match effect {
         Effect::Sound(name) => sound::play(&env.sound, name, ctx.sound_on, &ctx.volume).await,
         Effect::Notify {
@@ -46,12 +45,9 @@ pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
                 .await
         }
         Effect::NotifyClose => env.notifier.close(&ctx.pane).await,
-        Effect::Bgwatch { agent_pid } if !ctx.bin.is_empty() => spawn(
-            ctx,
-            &helper("agent-bgwatch"),
-            &[&ctx.pane, &agent_pid.to_string()],
-        ),
-        Effect::Blink if !ctx.bin.is_empty() => spawn(ctx, &helper("agent-blink"), &[]),
+        Effect::Blink if !ctx.bin.is_empty() => {
+            spawn(ctx, &format!("{}/agent-blink", ctx.bin), &[])
+        }
         // Handled by the daemon before the ack, or no helpers to run.
         _ => {}
     }

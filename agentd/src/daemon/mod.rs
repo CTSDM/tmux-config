@@ -156,6 +156,7 @@ async fn serve(
         reminders: RefCell::new(HashMap::new()),
         panes: RefCell::new(HashMap::new()),
         watched: RefCell::new(HashMap::new()),
+        background: RefCell::new(HashMap::new()),
         ticking: Cell::new(false),
         effects_env: effects::Env {
             sound: sound::Config::from_env(identity::runtime_dir(
@@ -219,6 +220,18 @@ enum Job {
     Reconcile(oneshot::Sender<()>),
     /// E1: the pane got focus; told once written.
     Seen(oneshot::Sender<()>),
+    /// B1: count the pane's background shells, with this tick's /proc.
+    Background(Rc<ProcView>),
+}
+
+/// B1: a Claude pane whose agent left shells running in the background.
+#[derive(Debug, Clone)]
+struct Background {
+    agent: u32,
+    /// What `@agent_bg` says now.
+    count: u32,
+    /// A count of this pane is queued and not done yet.
+    queued: bool,
 }
 
 /// A Codex pane under observation (X5).
@@ -257,6 +270,7 @@ struct Daemon {
     reminders: RefCell<HashMap<String, Reminder>>,
     panes: RefCell<HashMap<String, PaneQueues>>,
     watched: RefCell<HashMap<String, Watch>>,
+    background: RefCell<HashMap<String, Background>>,
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
     save: Rc<Notify>,
@@ -313,6 +327,9 @@ impl Daemon {
                     .collect::<BTreeMap<_, _>>(),
                 "panes": self.panes.borrow().keys().cloned().collect::<BTreeSet<_>>(),
                 "watching": self.watched.borrow().keys().cloned().collect::<BTreeSet<_>>(),
+                "background": self.background.borrow().iter()
+                    .map(|(pane, b)| (pane.clone(), b.count))
+                    .collect::<BTreeMap<_, _>>(),
             })),
             other => Reply::error(format!("unknown command: {other}")),
         }
@@ -370,11 +387,12 @@ impl Daemon {
                     Ok(None) => false,
                     Err(missing) => missing == Missing::Pane,
                 },
+                Job::Background(view) => self.on_background(&pane, &view).await,
                 Job::Seen(done) => match self.tmux.read(&pane, false, false).await {
                     Ok(read) => {
                         let mut effects = core::seen(&read.pane);
                         if let Some(Effect::Options(ops)) = effects.first() {
-                            self.tmux.write(&pane, ops).await;
+                            let _ = self.tmux.write(&pane, ops).await;
                         }
                         let _ = done.send(());
                         effects.remove(0);
@@ -434,6 +452,7 @@ impl Daemon {
             drop(panes);
             self.cancel(pane);
             self.watched.borrow_mut().remove(pane);
+            self.background.borrow_mut().remove(pane);
         }
     }
 
@@ -470,6 +489,9 @@ impl Daemon {
             self.cancel(&pane);
         }
         self.watched
+            .borrow_mut()
+            .retain(|p, _| existing.contains(p.as_str()));
+        self.background
             .borrow_mut()
             .retain(|p, _| existing.contains(p.as_str()));
     }
@@ -513,6 +535,14 @@ impl Daemon {
         } else {
             0
         };
+        let view = if core::may_need_procs(kind, ev) {
+            Some(
+                self.proc_view(self.codex_roots(&request.pane, agent_pid))
+                    .await,
+            )
+        } else {
+            None
+        };
         let codex = (kind == Kind::Codex).then(|| {
             // The agent's start time, from the chain the hook walked.
             let start = request
@@ -520,7 +550,6 @@ impl Daemon {
                 .iter()
                 .find(|(pid, _, _)| *pid == agent_pid)
                 .map(|(_, _, s)| *s);
-            let view = core::may_need_procs(kind, ev).then(|| Rc::new(ProcView::scan()));
             self.codex_facts(&request.pane, &request.event, &read, start, view)
         });
         let facts = self.facts(&read, vis, bg_shells, codex);
@@ -563,7 +592,47 @@ impl Daemon {
             effects.remove(i);
             self.watch(&input.pane, input.agent_pid, &input.event.sid);
         }
+        let bgwatch = effects
+            .iter()
+            .position(|e| matches!(e, Effect::Bgwatch { .. }));
+        if let Some(Effect::Bgwatch { agent_pid }) = bgwatch.map(|i| effects.remove(i)) {
+            // Counted by the same event, which wrote it (B1).
+            let count = ops
+                .iter()
+                .find_map(|op| match op {
+                    core::Op::Set("@agent_bg", n) => n.parse().ok(),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            self.watch_background(&input.pane, agent_pid, count);
+        }
         ((ctx, self.apply(&input.pane, effects).await), ops)
+    }
+
+    /// X7's roots for a Codex pane: its agent, and every process of the
+    /// command trees it is known to have started.
+    fn codex_roots(&self, pane: &str, agent: u32) -> Vec<u32> {
+        let state = self.state.borrow();
+        let groups = state
+            .codex
+            .get(pane)
+            .map(|c| c.groups.as_slice())
+            .unwrap_or_default();
+        std::iter::once(agent)
+            .chain(groups.iter().flat_map(|g| g.keys().copied()))
+            .collect()
+    }
+
+    /// The processes X7 and B1 look at. The full scan, only on kernels
+    /// without children files, runs off the runtime's thread.
+    async fn proc_view(&self, roots: Vec<u32>) -> Rc<ProcView> {
+        if procs::children_files() {
+            return Rc::new(ProcView::around(roots));
+        }
+        match tokio::task::spawn_blocking(ProcView::scan).await {
+            Ok(view) => Rc::new(view),
+            Err(_) => Rc::new(ProcView::around(roots)),
+        }
     }
 
     /// Codex's facts: the rollout read on from the pane's bookkeeping.
@@ -595,39 +664,117 @@ impl Daemon {
                 finished_since: None,
                 queued: false,
             });
-        if !self.ticking.replace(true) {
-            spawn_local(self.clone().ticker());
-        }
+        self.start_ticking();
     }
 
-    /// One tick for all watched panes, with one scan of /proc; it stops when
-    /// nothing is watched.
+    /// One tick for all watched panes (Codex, background shells), with one
+    /// scan of /proc; it stops when nothing is watched.
     async fn ticker(self: Rc<Self>) {
         loop {
             sleep(TICK).await;
-            let due: Vec<String> = {
+            let (observe, count) = {
                 let mut watched = self.watched.borrow_mut();
-                if watched.is_empty() {
+                let mut background = self.background.borrow_mut();
+                if watched.is_empty() && background.is_empty() {
                     self.ticking.set(false);
                     return;
                 }
-                watched
+                let observe: Vec<String> = watched
                     .iter_mut()
                     .filter(|(_, w)| !w.queued)
                     .map(|(pane, w)| {
                         w.queued = true;
                         pane.clone()
                     })
-                    .collect()
+                    .collect();
+                let count: Vec<String> = background
+                    .iter_mut()
+                    .filter(|(_, b)| !b.queued)
+                    .map(|(pane, b)| {
+                        b.queued = true;
+                        pane.clone()
+                    })
+                    .collect();
+                (observe, count)
             };
-            if due.is_empty() {
+            if observe.is_empty() && count.is_empty() {
                 continue;
             }
-            let view = Rc::new(ProcView::scan());
-            for pane in due {
+            // One view for the tick: the watched agents' trees, and their
+            // known command trees.
+            let roots: Vec<u32> = {
+                let watched = self.watched.borrow();
+                let background = self.background.borrow();
+                let mut roots: Vec<u32> = count
+                    .iter()
+                    .filter_map(|p| background.get(p))
+                    .map(|b| b.agent)
+                    .collect();
+                for pane in &observe {
+                    if let Some(w) = watched.get(pane) {
+                        roots.extend(self.codex_roots(pane, w.agent));
+                    }
+                }
+                roots
+            };
+            let view = self.proc_view(roots).await;
+            for pane in observe {
                 self.queue(&pane, Job::Observe(view.clone()));
             }
+            for pane in count {
+                self.queue(&pane, Job::Background(view.clone()));
+            }
         }
+    }
+
+    fn start_ticking(self: &Rc<Self>) {
+        if !self.ticking.replace(true) {
+            spawn_local(self.clone().ticker());
+        }
+    }
+
+    /// B1: keep the pane's `@agent_bg` up to date while its agent's shells
+    /// run; `count` is what it says now.
+    fn watch_background(self: &Rc<Self>, pane: &str, agent: u32, count: u32) {
+        self.background.borrow_mut().insert(
+            pane.to_string(),
+            Background {
+                agent,
+                count,
+                queued: false,
+            },
+        );
+        self.start_ticking();
+    }
+
+    /// B1, one tick: the shells again; `@agent_bg` written when the count
+    /// changes, unset and no longer watched at 0. Whether the pane is gone.
+    async fn on_background(self: &Rc<Self>, pane: &str, view: &ProcView) -> bool {
+        let Some(b) = self.background.borrow_mut().get_mut(pane).map(|b| {
+            b.queued = false;
+            b.clone()
+        }) else {
+            return false;
+        };
+        let n = view.children_matching(b.agent, SNAPSHOT_SHELL);
+        if n != b.count {
+            let op = if n > 0 {
+                core::Op::Set("@agent_bg", n.to_string())
+            } else {
+                core::Op::Unset("@agent_bg")
+            };
+            if self.tmux.write(pane, &[op]).await == Err(Missing::Pane) {
+                self.background.borrow_mut().remove(pane);
+                return true;
+            }
+        }
+        let mut background = self.background.borrow_mut();
+        if n == 0 {
+            background.remove(pane);
+        } else if let Some(entry) = background.get_mut(pane) {
+            entry.count = n;
+        }
+        false
     }
 
     /// X5, one tick: observe, then whether to go on observing (`watch()` of
@@ -693,6 +840,12 @@ impl Daemon {
             return None;
         }
         let agent = read.pane.agent_pid.parse().unwrap_or(fallback);
+        // The pane's agent changed since the tick picked its roots.
+        let view = if view.covers(agent) {
+            view
+        } else {
+            self.proc_view(self.codex_roots(pane, agent)).await
+        };
         let start = view.start_of(agent);
         // The agent is gone when its pid and start time no longer match.
         let gone = match start {
@@ -765,7 +918,8 @@ impl Daemon {
         let apid = procfs::agent_of(read.pane_pid);
         if p.agent == "codex" {
             // One observation now, and observation again if it still runs.
-            let view = Rc::new(ProcView::scan());
+            let agent = p.agent_pid.parse().ok().or(apid).unwrap_or(0);
+            let view = self.proc_view(self.codex_roots(pane, agent)).await;
             let Some((batch, after)) = self.observe_now(pane, &read, view, apid.unwrap_or(0)).await
             else {
                 return Ok(None);
@@ -798,17 +952,21 @@ impl Daemon {
             let lines = procfs::tail_lines(&p.transcript, core::reconcile::TRANSCRIPT_LINES);
             if lines.is_some_and(|l| core::reconcile::turn_over(l.iter().map(String::as_str))) {
                 let now = (now_ms() / 1000) as i64;
-                self.tmux.write(pane, &core::reconcile::idle(now)).await;
+                let _ = self.tmux.write(pane, &core::reconcile::idle(now)).await;
             }
         }
         // B2: background shells nobody watches.
-        let watcher = procfs::entries(p.bg_watch.parse().unwrap_or(0), "cmdline")
-            .is_some_and(|argv| argv.iter().any(|a| a.contains("agent-bgwatch")));
-        let mut effects = Vec::new();
-        if !watcher && procfs::count_children_matching(apid, SNAPSHOT_SHELL) > 0 {
-            effects.push(Effect::Bgwatch { agent_pid: apid });
+        if !self.background.borrow().contains_key(pane) {
+            let n = procfs::count_children_matching(apid, SNAPSHOT_SHELL);
+            if n > 0 {
+                let _ = self
+                    .tmux
+                    .write(pane, &[core::Op::Set("@agent_bg", n.to_string())])
+                    .await;
+                self.watch_background(pane, apid, n);
+            }
         }
-        Ok(Some(((ctx, effects), false)))
+        Ok(Some(((ctx, Vec::new()), false)))
     }
 
     async fn on_reminder(
@@ -873,7 +1031,7 @@ impl Daemon {
         for effect in effects {
             match effect {
                 Effect::Options(ops) => {
-                    self.tmux.write(pane, &ops).await;
+                    let _ = self.tmux.write(pane, &ops).await;
                 }
                 Effect::RemindArm { after, since } => self.arm(pane, after, since),
                 Effect::RemindCancel => self.cancel(pane),

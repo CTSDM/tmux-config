@@ -3,17 +3,17 @@
 //! notification per pane (its id in memory and in the state file, never in
 //! pane options: C3). A click runs `agent-jump <pane>`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::future::poll_fn;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::process::Command;
-use tokio::sync::{Notify, OnceCell};
+use tokio::sync::{Mutex, Notify};
 use zbus::export::futures_core::Stream;
 use zbus::proxy::{Builder, CacheProperties};
 use zbus::zvariant::Value;
@@ -24,11 +24,20 @@ use crate::core::Urgency;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
+/// No session bus yet (a tmux started before the desktop): try again, but
+/// not more often than this.
+const RETRY: Duration = Duration::from_secs(30);
 
 pub struct Notifier {
     /// `AG_SINK` (tests): lines instead of D-Bus, which is never touched.
     sink: Option<PathBuf>,
-    bus: OnceCell<Option<Proxy<'static>>>,
+    /// The session bus's address; `None` is the usual one.
+    address: Option<String>,
+    bus: Mutex<Option<Proxy<'static>>>,
+    /// When connecting last failed, and how long until trying again.
+    failed: Cell<Option<Instant>>,
+    retry: Duration,
+    attempts: Cell<u32>,
     /// The open notification of each pane.
     ids: Rc<RefCell<BTreeMap<String, u32>>>,
     /// Sink mode's ids (a notification server's own counter).
@@ -42,7 +51,11 @@ impl Notifier {
     pub fn new(sink: Option<PathBuf>, ids: BTreeMap<String, u32>, save: Rc<Notify>) -> Notifier {
         Notifier {
             sink,
-            bus: OnceCell::new(),
+            address: None,
+            bus: Mutex::new(None),
+            failed: Cell::new(None),
+            retry: RETRY,
+            attempts: Cell::new(0),
             ids: Rc::new(RefCell::new(ids)),
             next_fake: RefCell::new(1),
             jump: Rc::new(RefCell::new((String::new(), String::new()))),
@@ -99,7 +112,7 @@ impl Notifier {
                 match proxy.call::<_, _, u32>("Notify", &args).await {
                     Ok(id) => id,
                     Err(e) => {
-                        super::log(&format!("notify: {e}"));
+                        self.failed_call("notify", e).await;
                         return;
                     }
                 }
@@ -125,7 +138,7 @@ impl Notifier {
                 if let Some(proxy) = self.bus().await
                     && let Err(e) = proxy.call::<_, _, ()>("CloseNotification", &(id,)).await
                 {
-                    super::log(&format!("close notification: {e}"));
+                    self.failed_call("close notification", e).await;
                 }
             }
         }
@@ -133,23 +146,53 @@ impl Notifier {
 
     /// The session bus, connected on first use, with its signals watched
     /// from before the first notification (a quick click is not missed).
-    async fn bus(&self) -> Option<&Proxy<'static>> {
-        self.bus
-            .get_or_init(|| async {
-                match self.connect().await {
-                    Ok(proxy) => Some(proxy),
-                    Err(e) => {
-                        super::log(&format!("no notifications (D-Bus): {e}"));
-                        None
-                    }
-                }
-            })
-            .await
-            .as_ref()
+    /// Without a bus, connecting is tried again on a later call, at most
+    /// once every 30 s.
+    async fn bus(&self) -> Option<Proxy<'static>> {
+        let mut bus = self.bus.lock().await;
+        if let Some(proxy) = bus.as_ref() {
+            return Some(proxy.clone());
+        }
+        if self
+            .failed
+            .get()
+            .is_some_and(|at| at.elapsed() < self.retry)
+        {
+            return None;
+        }
+        self.attempts.set(self.attempts.get() + 1);
+        match self.connect().await {
+            Ok(proxy) => {
+                self.failed.set(None);
+                *bus = Some(proxy.clone());
+                Some(proxy)
+            }
+            Err(e) => {
+                super::log(&format!("no notifications (D-Bus): {e}"));
+                self.failed.set(Some(Instant::now()));
+                None
+            }
+        }
+    }
+
+    /// A call failed; a connection that broke is dropped so the next call
+    /// connects again.
+    async fn failed_call(&self, what: &str, e: zbus::Error) {
+        super::log(&format!("{what}: {e}"));
+        if matches!(e, zbus::Error::InputOutput(_)) {
+            *self.bus.lock().await = None;
+        }
     }
 
     async fn connect(&self) -> zbus::Result<Proxy<'static>> {
-        let conn = Connection::session().await?;
+        let conn = match &self.address {
+            None => Connection::session().await?,
+            Some(address) => {
+                zbus::connection::Builder::address(address.as_str())?
+                    .build()
+                    .await?
+            }
+        };
         let proxy: Proxy<'static> = Builder::new(&conn)
             .destination(SERVICE)?
             .path(PATH)?
@@ -288,6 +331,28 @@ mod tests {
         assert!(raw.starts_with("{\"t\":"), "{raw}");
         assert!(raw.contains("api · Fix"), "not ASCII-escaped: {raw}");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn no_bus_is_tried_again_later() {
+        let mut n = Notifier::new(None, BTreeMap::new(), Rc::new(Notify::new()));
+        n.address = Some("unix:path=/nonexistent/agentd-test/bus".into());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                n.show("%1", Urgency::Normal, "t", "b", "", "").await;
+                assert_eq!(n.attempts.get(), 1);
+                assert!(n.ids().is_empty(), "nothing shown");
+                // Within the retry interval: not again.
+                n.close("%1").await;
+                n.show("%1", Urgency::Normal, "t", "b", "", "").await;
+                assert_eq!(n.attempts.get(), 1);
+                // Once it has passed: again.
+                n.retry = Duration::ZERO;
+                n.show("%1", Urgency::Normal, "t", "b", "", "").await;
+                assert_eq!(n.attempts.get(), 2);
+            })
+            .await;
     }
 
     #[test]

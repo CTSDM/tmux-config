@@ -942,6 +942,7 @@ fn n2_done_and_error_bodies() {
         let r = run_with(&mut State::default(), e.clone(), f);
         assert_eq!(r.notifies()[0].2, format!("All set{suffix}"));
         assert!(r.has(&Effect::Bgwatch { agent_pid: 4242 }));
+        assert_eq!(r.opt("@agent_bg"), Some(Some(n.to_string().as_str())));
     }
     let e = Event {
         error: "rate limit".into(),

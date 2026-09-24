@@ -180,7 +180,8 @@ pub enum Effect {
     /// Close the pane's notification (N3).
     NotifyClose,
     Sound(&'static str),
-    /// Keep `@agent_bg` up to date for the agent's background shells (B1).
+    /// Keep `@agent_bg` up to date for the agent's background shells (B1);
+    /// the Stop that found them has written it already.
     Bgwatch {
         agent_pid: u32,
     },

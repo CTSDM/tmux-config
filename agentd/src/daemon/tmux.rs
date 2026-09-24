@@ -169,9 +169,9 @@ impl Tmux {
     }
 
     /// The pane's option writes, in order, in one `tmux`.
-    pub async fn write(&self, pane: &str, ops: &[Op]) -> bool {
+    pub async fn write(&self, pane: &str, ops: &[Op]) -> Result<(), Missing> {
         if ops.is_empty() {
-            return true;
+            return Ok(());
         }
         let mut args: Vec<Cow<str>> = Vec::new();
         for op in ops {
@@ -189,7 +189,7 @@ impl Tmux {
                 }
             }
         }
-        self.run(&args).await.is_ok()
+        self.run(&args).await.map(drop)
     }
 }
 
