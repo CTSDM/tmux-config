@@ -116,6 +116,24 @@ the contract suite can pass end to end. Each later phase moves one family of
 effects in-process and deletes its bash script. The live system switches only
 at cutover (phase 5), with the user, with a way back.
 
+### The switch: `@agentd`
+
+One global tmux option says which implementation runs: `@agentd` = the path
+of the `agentd` binary, or unset for bash. The same `agents.conf` and bash
+entry points follow it, so tests, cutover and rollback use one config:
+
+- `agents.conf` on load: `agentd ensure` when `@agentd` is set.
+- `agent-reconcile` (called by agents.conf, the board, `prefix u`) hands over
+  to `agentd ctl reconcile` when `@agentd` is set. Only once the daemon
+  serves `ctl reconcile` itself (T2.4): before that, each would call the other.
+- Later phases route the rest the same way: seen (`pane-focus-in`) in
+  phase 3, the blink and its demo in phase 4.
+- The agents' hooks are the exception: `agents/install` writes either
+  `agent-hook` or `agentd hook` into the Claude and Codex settings (phase 5),
+  since a hook that asked tmux first would lose the latency we gained.
+
+Rollback: unset `@agentd`, reinstall the bash hooks.
+
 ## Test seams (both implementations)
 
 Needed so the same black-box suite runs against bash and Rust without
