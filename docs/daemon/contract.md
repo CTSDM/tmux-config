@@ -37,6 +37,8 @@ and neither null nor `false` (jq's `//`: an empty string or `0` counts, and
 wins); none → empty. A `tool_input` that is null or `false` gives an empty
 detail; any other non-object is the detail itself (as JSON text if not a
 string). Tool label: `tool` alone when detail is empty, else `tool: detail`.
+How a number is spelled in that JSON text is not part of the contract (jq
+keeps the literal `1.50`, serde writes `1.5`).
 
 **I4. Ownership.** Only the pane's own agent counts. Walk from the hook's
 parent process up through its ancestors until reaching the pane's
@@ -65,7 +67,7 @@ values are part of the contract.
 | `@agent_needs_id` | id of the call that is waiting; only while `needs` |
 | `@agent_since` | epoch seconds of the last state **change** |
 | `@agent_prev` | state before compaction |
-| `@agent_tool` | last tool label, `#` written as `##` |
+| `@agent_tool` | last tool label, `#` written as `##` (**CHANGE C9**: every value is stored whole; bash loses a trailing `;`, which tmux reads as a command separator) |
 | `@agent_msg` | last reply (done) or error text, `#` written as `##` |
 | `@agent_subs` | running subagents; `0` and unset mean the same |
 | `@agent_subtypes` | e.g. `2 Explore, 1 Plan`; unset when none |
@@ -393,3 +395,12 @@ Changes take effect for the next event or tick (no restart needed).
 - Bash sink mode keeps a shown notification "open" (a fake id, no waiter)
   until it is replaced or closed, so every close path produces its
   `notify-close` line. A click cannot be simulated; `agent-jump` is out of scope.
+
+## 15. The bar
+
+**U1. Clicking a session.** A left click on a session chip of the top row
+(its index, name and glyphs) switches that client to the session, as tmux's
+default `MouseDown1Status` does for a `range=session`. The row shows only the
+sessions of the client's space, so a click never leaves the space. Clicking a
+window tab of the second row selects that window (already so). **CHANGE C8:**
+bash's chips have no range: a click on them does nothing.

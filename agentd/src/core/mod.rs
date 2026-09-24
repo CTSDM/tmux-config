@@ -210,6 +210,27 @@ pub fn may_need_bg_shells(kind: Kind, ev: &str) -> bool {
     kind == Kind::Claude && ev == "Stop"
 }
 
+/// I4 with C4: the pane's own agent, from the hook's parent chain (pid and
+/// comm, parent first). The walk must reach `pane_pid` within 13 processes,
+/// and exactly one of them, `pane_pid` included, is `claude` or `codex`.
+pub fn owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32) -> Option<u32> {
+    let mut agent = None;
+    let mut agents = 0;
+    for (pid, comm) in chain.into_iter().take(13) {
+        if comm == "claude" || comm == "codex" {
+            agents += 1;
+            agent = Some(pid);
+        }
+        if agents > 1 {
+            return None;
+        }
+        if pid == pane_pid {
+            return if agents == 1 { agent } else { None };
+        }
+    }
+    None
+}
+
 /// Handles one hook event. Codex arrives in phase 2.
 pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
     match input.kind {

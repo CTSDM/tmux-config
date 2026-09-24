@@ -428,12 +428,8 @@ fn is_test_run(detail: &str, custom: &str) -> bool {
 }
 
 /// N4: `@agent_remind_after`, default 900. Bash hands it to GNU `sleep`, so
-/// a suffix `s`, `m`, `h` or `d` works too. A value `sleep` rejects makes it
-/// fail at once, and the bash reminder then checks immediately: 0 here.
+/// a suffix `s`, `m`, `h` or `d` works too. Empty or unreadable: 900 (C7).
 fn remind_after(raw: &str) -> f64 {
-    if raw.is_empty() {
-        return REMIND_AFTER;
-    }
     let (number, unit) = match raw.char_indices().last() {
         Some((i, 's')) => (&raw[..i], 1.0),
         Some((i, 'm')) => (&raw[..i], 60.0),
@@ -445,5 +441,5 @@ fn remind_after(raw: &str) -> f64 {
         .parse::<f64>()
         .ok()
         .filter(|n| n.is_finite() && *n >= 0.0)
-        .map_or(0.0, |n| n * unit)
+        .map_or(REMIND_AFTER, |n| n * unit)
 }
