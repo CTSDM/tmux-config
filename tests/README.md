@@ -31,7 +31,8 @@ keep margins for that; none is retried.
 Layout: `harness/` (fixtures' machinery), `selftest/` (the harness itself),
 `contract/` (one module per contract section, tests named and marked with the
 rule ids they cover), `bench/` (latency, memory, CPU), `rehearsal/` (the
-cutover and rollback, T5.5).
+cutover and rollback, T5.5), `upstream/` (scripts, not tests: tmux bugs
+reproduced on vanilla tmux, and the patch for the one 3.7c still has).
 
 `uv run pytest rehearsal` is not in the default run: it clones this repo at
 `COMMIT` (default: the phase 5 merge) into a temporary HOME, runs the real
