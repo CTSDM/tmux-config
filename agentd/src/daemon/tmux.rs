@@ -40,7 +40,7 @@ const SPACE: &str = "#{?@space,#{@space},#{@space_auto}}";
 const MUTE: &str = "#{E:#{s/XSPACEX/#{s/[^A-Za-z0-9_-]/_/:#{?@space,#{@space},#{@space_auto}}}/:#{l:#{@agent_mute_XSPACEX}}}}";
 
 /// The pane's fields, title last (it is the most likely to hold odd bytes).
-const PANE_FIELDS: [&str; 27] = [
+const PANE_FIELDS: [&str; 28] = [
     "#{pane_id}",
     "#{pane_pid}",
     "#{@agent_state}",
@@ -67,6 +67,7 @@ const PANE_FIELDS: [&str; 27] = [
     "#{@agent_bg_watch}",
     "#{@agent_sound}",
     "#{@agent_sound_volume}",
+    "#{@agent_needs}",
     "#{pane_title}",
 ];
 
@@ -478,7 +479,8 @@ fn parse(out: &str) -> Result<Read, Missing> {
                         agent_pid_start: f[21].into(),
                         bg: f[22].into(),
                         bg_watch: f[23].into(),
-                        title: f[26].into(),
+                        needs: f[26].into(),
+                        title: f[27].into(),
                     },
                     window_active: f[10] == "1",
                     pane_active: f[11] == "1",
@@ -533,7 +535,7 @@ mod tests {
 
     #[test]
     fn parses_pane_clients_and_panes() {
-        let mut d = vec![""; 27];
+        let mut d = vec![""; 28];
         d[0] = "%3";
         d[1] = "4242";
         d[2] = "needs";
@@ -548,7 +550,8 @@ mod tests {
         d[17] = "codex";
         d[20] = "4242";
         d[24] = "off";
-        d[26] = "✳ multi\nline";
+        d[26] = "permission";
+        d[27] = "✳ multi\nline";
         let out = record('D', &d)
             + &record(
                 'C',
@@ -561,6 +564,7 @@ mod tests {
         assert_eq!(r.pane_pid, 4242);
         assert_eq!(r.pane.state, "needs");
         assert_eq!(r.pane.tool, "Bash: echo ##1");
+        assert_eq!(r.pane.needs, "permission");
         assert_eq!(r.pane.title, "✳ multi\nline");
         assert!(r.pane.muted);
         assert!(r.window_active && !r.pane_active);
@@ -579,7 +583,7 @@ mod tests {
 
     #[test]
     fn mute_needs_a_space() {
-        let mut d = vec![""; 27];
+        let mut d = vec![""; 28];
         d[0] = "%1";
         d[1] = "1";
         d[13] = "on";
@@ -594,7 +598,7 @@ mod tests {
             Err(Missing::Tmux)
         );
         // tmux 3.6 "displays" a pane that is gone, with every field empty.
-        assert_eq!(parse(&record('D', &[""; 27])), Err(Missing::Pane));
+        assert_eq!(parse(&record('D', &[""; 28])), Err(Missing::Pane));
     }
 
     #[test]

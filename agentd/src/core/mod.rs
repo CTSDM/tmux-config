@@ -91,6 +91,8 @@ pub struct Pane {
     pub since: String,
     pub prev: String,
     pub needs_id: String,
+    /// `@agent_needs`.
+    pub needs: String,
     pub tool: String,
     pub tests_sound_at: String,
     /// `@agent_session`: the sid the pane had before this event.
@@ -203,6 +205,11 @@ pub enum Effect {
     Blink,
     /// Observe this Codex pane until its turn is over (X5).
     Watch,
+    /// H5b: watch for the answer to the permission dialog of the `needs`
+    /// that started at `since` (the Bash tool's shell starting).
+    AwaitAnswer {
+        since: i64,
+    },
 }
 
 /// The daemon's own bookkeeping (P2: never seeded from options).
@@ -309,6 +316,26 @@ pub fn reminder(since: i64, facts: &Facts) -> Vec<Effect> {
             title: notify_title(&pane.session, &pane.title, &facts.host),
             body: format!("Still waiting for you, {minutes} min now"),
         },
+    ]
+}
+
+/// H5b: a shell of Claude's Bash tool started while the pane waited for a
+/// permission since `since`: you answered Yes, and the command runs. As H5:
+/// `working`, the wait's notification closes and its reminder goes (N3, C1).
+pub fn answered(since: i64, facts: &Facts) -> Vec<Effect> {
+    let pane = &facts.pane;
+    if pane.state != "needs" || pane.needs != "permission" || pane.since != since.to_string() {
+        return Vec::new();
+    }
+    vec![
+        Effect::Options(vec![
+            Op::Set("@agent_since", facts.now.to_string()),
+            Op::Set("@agent_state", "working".into()),
+            Op::Unset("@agent_needs"),
+            Op::Unset("@agent_needs_id"),
+        ]),
+        Effect::NotifyClose,
+        Effect::RemindCancel,
     ]
 }
 

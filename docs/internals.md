@@ -51,8 +51,9 @@ spell it out; agentd does the same in one process.
 
 Runtime state lives outside the repo: `$XDG_RUNTIME_DIR/tmux-agents/` (running
 subagents per session, sound debounce, rounds; agentd's socket, lock and state
-file per tmux server) and `~/.local/state/tmux-agents/` (debug logs, only with
-the `debug` file; `agentd.off`, the way back to bash).
+file per tmux server) and `~/.local/state/tmux-agents/` (agentd's event log,
+always; debug logs, only with the `debug` file; `agentd.off`, the way back to
+bash).
 
 ## Pane options
 
@@ -87,6 +88,7 @@ the `debug` file; `agentd.off`, the way back to bash).
 | PreToolUse: request_user_input (Codex) | `needs question` until the matching PostToolUse |
 | PermissionRequest | `needs`: `question` for AskUserQuestion, `plan` for ExitPlanMode, else `permission` |
 | PostToolUse, PostToolUseFailure | `working`; ends `needs` only for the call that asked |
+| (none: a permission allowed in its dialog) | `working` when the Bash tool's shell starts (agentd only, see below) |
 | Notification (Claude) | `needs` for permission prompts and elicitations |
 | Elicitation / ElicitationResult (Claude) | `needs question` / `working` |
 | PreCompact / PostCompact | `compacting` / back to the previous state |
@@ -133,6 +135,21 @@ to approve a plan; Codex has no ExitPlanMode hook in this version.
 
 **Seen.** `pane-focus-in` turns `done` into `idle` and closes the pane's
 notification.
+
+**A permission allowed** (agentd only, contract H5b). Claude Code sends no
+hook when you answer Yes in its dialog, and a command then runs for as long
+as it takes, so the pane stayed `needs permission` (with its reminder) until
+PostToolUse. When a Claude pane enters that wait, agentd notes the Bash
+tool's shells its agent has (children with `shell-snapshots/snapshot-` in
+the command line, as for background shells, by pid and start time) and looks
+again on the 2 s tick: a new one means you allowed the command, and the pane
+goes `working` as H5 would (the notification closes, the reminder goes). The
+look ends when the pane leaves that wait (same `@agent_since`) or its agent
+is gone. Hooks are children too, but without the snapshot; a question or a
+plan is answered in the dialog itself and isn't watched. A tool other than
+Bash (an MCP call, an edit) starts no shell and ends the wait with its
+PostToolUse as before. One false positive is possible: a Bash call allowed by
+your rules and run in parallel with the one that asks.
 
 **Background shells.** No hook says when a shell started with
 `run_in_background` ends. On `Stop` the hook counts the agent's child
@@ -309,10 +326,10 @@ daemon's environment) never uses control mode.
 **In process.** Sounds (same files and debounce as `agent-sound`), D-Bus
 notifications (a click runs `agent-jump`), reminders (timers), the blink (it
 takes `agent-blink`'s lock, so the two never draw at once, and writes only
-what changes from frame to frame), Codex observation and background shells
-(one 2 s tick, only while something is observed), the top row's values (see
-[Spaces and the bar](#spaces-and-the-bar)). The state file keeps the
-state machine's memory, reminders and notification ids; it belongs to one
+what changes from frame to frame), Codex observation, background shells and
+permission waits (H5b; one 2 s tick, only while something is watched), the
+top row's values (see [Spaces and the bar](#spaces-and-the-bar)). The state
+file keeps the state machine's memory, reminders and notification ids; it belongs to one
 tmux server instance (pid and start time) and goes when that server dies.
 A pane that goes without its SessionEnd (killed, or its agent crashed) is
 forgotten by the sweep, which runs on every full pane list (a Stop, the
@@ -323,8 +340,27 @@ session just made.
 
 **Debugging.** `agentd ctl status` prints the pid, the transport (`control`
 or `spawn`), its state, reminders, queues, observed panes and what blinks.
+`~/.local/state/tmux-agents/events.log` (always on, `src/daemon/eventlog.rs`)
+has one line per input the daemon handled: local time with milliseconds, the
+tmux socket's name, the pane, the agent kind, then the hook event with its
+structural fields (`mode=`, `type=` for the notification type, `source=`,
+`tool=`, `tool_use_id=yes|no`, `subagent=yes`) or an input of its own
+(`seen`, `reconcile`, `observe` when a tick changes the state, `reminder
+fired|skipped`, `background` counts, `answered` for H5b), and the state
+before and after (`working->needs:permission`); a hook that isn't the pane's agent's says
+`ignored:not-its-agent`, one for a pane gone `pane-gone`. Nothing an agent or
+you wrote goes in (prompts, commands, paths, messages), so it can stay on.
+At 1 MiB it moves to `events.log.1` (one old file kept; several tmux servers
+share it). A write that fails changes nothing else.
+
+```
+2026-09-25 11:02:13.481 default %12 claude PermissionRequest mode=bypassPermissions tool=Bash tool_use_id=no working->working
+2026-09-25 11:02:16.902 default %12 claude Notification type=permission_prompt working->needs:permission
+```
+
 With `~/.local/state/tmux-agents/debug`, errors go to `errors.log` there as
-`agentd[<pid>] ...`. `agentd ctl stop` (or SIGTERM) saves, clears the blink
+`agentd[<pid>] ...` (and bash's hook, when it runs, logs each whole payload,
+prompts included, to `payloads.log`). `agentd ctl stop` (or SIGTERM) saves, clears the blink
 and exits (the next hook starts the installed binary); with `agentd.off` it
 first closes its open notifications, since no daemon will come back to close
 them when their panes are seen. To rule out control mode, stop it and

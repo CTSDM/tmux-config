@@ -604,6 +604,200 @@ fn b1_background_shells_are_counted_on_the_tick() {
 }
 
 #[test]
+fn h5b_a_shell_after_the_dialog_is_its_answer() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    // A fake claude with a shell of its Bash tool already running (in the
+    // background, say), and one more once `go` exists: the answer.
+    let fake = server.runtime.join("claude");
+    fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
+    let go = server.runtime.join("go");
+    let script = format!(
+        "sh -c 'sleep 600; :' shell-snapshots/snapshot-a & \
+         while [ ! -e {go} ]; do sleep 0.1; done; \
+         sh -c 'sleep 600; :' shell-snapshots/snapshot-b & sleep 600; :",
+        go = go.display()
+    );
+    let command = format!("{} -c \"{script}\"", fake.display());
+    let pane = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "main:",
+        &command,
+    ]);
+    let pane_pid: u32 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    let mut agent = 0;
+    wait_for("the fake claude", || {
+        agent = agentd::procfs::agent_of(pane_pid).unwrap_or(0);
+        agent != 0
+    });
+    let shells = || agentd::procfs::count_children_matching(agent, "shell-snapshots/snapshot-");
+    wait_for("the first shell", || shells() == 1);
+    let chain = if agent == pane_pid {
+        json!([[agent, "claude", 0]])
+    } else {
+        json!([[agent, "claude", 0], [pane_pid, "sh", 0]])
+    };
+    let hook = |event: Value| {
+        let reply = server.call(json!({
+            "v": 1, "kind": "claude", "pane": pane, "event": event, "chain": chain, "env": {}, "t": 0,
+        }));
+        assert_eq!(reply["ok"], true);
+    };
+    let state = || server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]);
+    hook(ev("UserPromptSubmit"));
+    hook(
+        json!({"hook_event_name": "PermissionRequest", "session_id": "s1",
+        "tool_name": "Bash", "tool_use_id": "t1"}),
+    );
+    assert_eq!(state(), "needs");
+    assert_eq!(server.status()["answering"], json!([pane]));
+    // The shell that ran before, and the loop's own children, are no answer.
+    sleep(Duration::from_millis(2500));
+    assert_eq!(state(), "needs");
+    fs::write(&go, "").unwrap();
+    wait_for("working", || state() == "working");
+    assert_eq!(shells(), 2);
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_needs"]),
+        ""
+    );
+    assert_eq!(server.status()["answering"], json!([]));
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l.ends_with(&format!("{pane} claude answered needs:permission->working"))),
+        "{log}"
+    );
+    // A question is answered in the dialog itself: not watched. Leaving the
+    // wait (for a question, for the end of the turn) ends the watch.
+    hook(
+        json!({"hook_event_name": "PermissionRequest", "session_id": "s1",
+        "tool_name": "AskUserQuestion", "tool_use_id": "q1"}),
+    );
+    assert_eq!(server.status()["answering"], json!([]));
+    hook(
+        json!({"hook_event_name": "Notification", "session_id": "s1",
+        "notification_type": "permission_prompt"}),
+    );
+    assert_eq!(server.status()["answering"], json!([]), "already waiting");
+    hook(json!({"hook_event_name": "PostToolUse", "session_id": "s1",
+        "tool_name": "AskUserQuestion", "tool_use_id": "q1"}));
+    hook(
+        json!({"hook_event_name": "Notification", "session_id": "s1",
+        "notification_type": "permission_prompt"}),
+    );
+    assert_eq!(server.status()["answering"], json!([pane]));
+    hook(ev("Stop"));
+    assert_eq!(server.status()["answering"], json!([]));
+}
+
+#[test]
+fn event_log_has_structure_and_no_text() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    let canary = "canary-private-words";
+    let with = |name: &str, fields: Value| {
+        let mut e = ev(name);
+        e.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        server.hook(&pane, e);
+    };
+    with(
+        "SessionStart",
+        json!({"source": "startup", "transcript_path": format!("/home/{canary}.jsonl")}),
+    );
+    with("UserPromptSubmit", json!({"prompt": canary}));
+    with(
+        "PreToolUse",
+        json!({"tool_name": "Bash", "tool_use_id": "t1", "detail": canary}),
+    );
+    with(
+        "PermissionRequest",
+        json!({"tool_name": "Bash", "permission_mode": "bypassPermissions", "detail": canary}),
+    );
+    with(
+        "Notification",
+        json!({"notification_type": "permission_prompt", "message": canary}),
+    );
+    with(
+        "SubagentStart",
+        json!({"agent_id": "a1", "agent_type": "Explore"}),
+    );
+    with(
+        "Stop",
+        json!({"last_assistant_message": canary, "error": canary}),
+    );
+    // Through the real hook client, from a process that is not the pane's
+    // agent (I4): logged as ignored, with the payload's texts left behind.
+    let payload = json!({
+        "hook_event_name": "PreToolUse", "session_id": canary, "tool_name": "Write",
+        "tool_input": {"file_path": format!("/{canary}"), "content": canary}, "prompt": canary,
+    });
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["hook", "claude"])
+        .env("TMUX", format!("{},{},0", server.socket, server.pid))
+        .env("TMUX_PANE", &pane)
+        .env("XDG_RUNTIME_DIR", &server.runtime)
+        .env("XDG_STATE_HOME", server.runtime.join("state"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(!log.contains(canary), "{log}");
+    assert!(!log.contains("/home"), "{log}");
+    let lines: Vec<&str> = log.lines().collect();
+    let has = |what: &str| {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&format!(" {pane} ")) && l.ends_with(what)),
+            "no line ending in {what:?}:\n{log}"
+        )
+    };
+    assert!(lines[0].ends_with(&format!(
+        "agentd start pid={}",
+        server.daemon.as_ref().unwrap().id()
+    )));
+    has("claude SessionStart source=startup none->ready");
+    has("claude UserPromptSubmit ready->working");
+    has("claude PreToolUse tool=Bash tool_use_id=yes working->working");
+    has(
+        "claude PermissionRequest mode=bypassPermissions tool=Bash tool_use_id=no working->working",
+    );
+    has("claude Notification type=permission_prompt working->needs:permission");
+    has("claude SubagentStart subagent=yes needs:permission->needs:permission");
+    has("claude Stop needs:permission->done");
+    has("claude PreToolUse tool=Write tool_use_id=no ignored:not-its-agent");
+    // Time, then the server's socket name.
+    let first = lines[1].split(' ').collect::<Vec<_>>();
+    assert_eq!(first[0].len(), "2026-09-25".len(), "{}", lines[1]);
+    assert_eq!(first[1].len(), "11:00:47.123".len(), "{}", lines[1]);
+    assert_eq!(first[2], server.name);
+}
+
+#[test]
 fn t4_1_control_mode_session_of_its_own() {
     let Some(mut server) = Server::start() else {
         return;

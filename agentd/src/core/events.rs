@@ -435,6 +435,20 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
         }
     }
 
+    // H5b: a Claude permission dialog (H4, H6) is answered without a hook;
+    // the daemon watches for the command it lets run.
+    if input.kind == Kind::Claude
+        && new_state.as_deref() == Some("needs")
+        && needs == Some(Needs::Permission)
+    {
+        let since = if cur == "needs" {
+            pane.since.parse().unwrap_or(facts.now)
+        } else {
+            facts.now
+        };
+        effects.push(Effect::AwaitAnswer { since });
+    }
+
     // K5: the turn signal, once the state is written.
     if matches!(new_state.as_deref(), Some("needs" | "done")) {
         effects.push(Effect::Blink);

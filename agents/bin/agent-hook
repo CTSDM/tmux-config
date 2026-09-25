@@ -32,7 +32,7 @@ agentd=$(tmux show -gqv @agentd 2>/dev/null)
 . "${BASH_SOURCE[0]%/*}/agent-lib.sh" || exit 0
 if [[ -e $AG_STATE/debug ]]; then
   exec >/dev/null 2>>"$AG_STATE/errors.log"
-  printf '%(%FT%T)T %s %s %s\n' -1 "$kind" "$TMUX_PANE" "$payload" >>"$AG_STATE/events.log"
+  printf '%(%FT%T)T %s %s %s\n' -1 "$kind" "$TMUX_PANE" "$payload" >>"$AG_STATE/payloads.log"
 else
   exec >/dev/null 2>&1
 fi
