@@ -18,12 +18,18 @@ ALERTING = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_u
 
 
 def assert_ignored(server: TmuxServer, agent: FakeAgent, run: Any) -> None:
-    """`run()` must change nothing: no option of any pane, nothing in the sink."""
+    """`run()` must change nothing: no option of any pane, nothing in the sink.
+    The bar's own values (`@p-*`, L1) are left out: agentd writes them a moment
+    after earlier events, whatever `run()` does."""
     panes = server.tmux("list-panes", "-a", "-F", "#{pane_id}").splitlines()
-    before = {p: server.pane_options(p) for p in panes}
+
+    def options() -> dict[str, dict[str, str]]:
+        return {p: {k: v for k, v in server.pane_options(p).items() if not k.startswith("@p-")} for p in panes}
+
+    before = options()
     mark = server.sink.mark()
     run()
-    assert {p: server.pane_options(p) for p in panes} == before
+    assert options() == before
     server.sink.quiet(1.0, after=mark)
 
 
