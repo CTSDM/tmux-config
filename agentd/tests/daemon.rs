@@ -604,6 +604,102 @@ fn b1_background_shells_are_counted_on_the_tick() {
 }
 
 #[test]
+fn event_log_has_structure_and_no_text() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.tmux(&["display", "-p", "-t", "main", "#{pane_id}"]);
+    let canary = "canary-private-words";
+    let with = |name: &str, fields: Value| {
+        let mut e = ev(name);
+        e.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        server.hook(&pane, e);
+    };
+    with(
+        "SessionStart",
+        json!({"source": "startup", "transcript_path": format!("/home/{canary}.jsonl")}),
+    );
+    with("UserPromptSubmit", json!({"prompt": canary}));
+    with(
+        "PreToolUse",
+        json!({"tool_name": "Bash", "tool_use_id": "t1", "detail": canary}),
+    );
+    with(
+        "PermissionRequest",
+        json!({"tool_name": "Bash", "permission_mode": "bypassPermissions", "detail": canary}),
+    );
+    with(
+        "Notification",
+        json!({"notification_type": "permission_prompt", "message": canary}),
+    );
+    with(
+        "SubagentStart",
+        json!({"agent_id": "a1", "agent_type": "Explore"}),
+    );
+    with(
+        "Stop",
+        json!({"last_assistant_message": canary, "error": canary}),
+    );
+    // Through the real hook client, from a process that is not the pane's
+    // agent (I4): logged as ignored, with the payload's texts left behind.
+    let payload = json!({
+        "hook_event_name": "PreToolUse", "session_id": canary, "tool_name": "Write",
+        "tool_input": {"file_path": format!("/{canary}"), "content": canary}, "prompt": canary,
+    });
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_agentd"))
+        .args(["hook", "claude"])
+        .env("TMUX", format!("{},{},0", server.socket, server.pid))
+        .env("TMUX_PANE", &pane)
+        .env("XDG_RUNTIME_DIR", &server.runtime)
+        .env("XDG_STATE_HOME", server.runtime.join("state"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(!log.contains(canary), "{log}");
+    assert!(!log.contains("/home"), "{log}");
+    let lines: Vec<&str> = log.lines().collect();
+    let has = |what: &str| {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&format!(" {pane} ")) && l.ends_with(what)),
+            "no line ending in {what:?}:\n{log}"
+        )
+    };
+    assert!(lines[0].ends_with(&format!(
+        "agentd start pid={}",
+        server.daemon.as_ref().unwrap().id()
+    )));
+    has("claude SessionStart source=startup none->ready");
+    has("claude UserPromptSubmit ready->working");
+    has("claude PreToolUse tool=Bash tool_use_id=yes working->working");
+    has(
+        "claude PermissionRequest mode=bypassPermissions tool=Bash tool_use_id=no working->working",
+    );
+    has("claude Notification type=permission_prompt working->needs:permission");
+    has("claude SubagentStart subagent=yes needs:permission->needs:permission");
+    has("claude Stop needs:permission->done");
+    has("claude PreToolUse tool=Write tool_use_id=no ignored:not-its-agent");
+    // Time, then the server's socket name.
+    let first = lines[1].split(' ').collect::<Vec<_>>();
+    assert_eq!(first[0].len(), "2026-09-25".len(), "{}", lines[1]);
+    assert_eq!(first[1].len(), "11:00:47.123".len(), "{}", lines[1]);
+    assert_eq!(first[2], server.name);
+}
+
+#[test]
 fn t4_1_control_mode_session_of_its_own() {
     let Some(mut server) = Server::start() else {
         return;

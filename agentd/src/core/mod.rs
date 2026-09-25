@@ -91,6 +91,8 @@ pub struct Pane {
     pub since: String,
     pub prev: String,
     pub needs_id: String,
+    /// `@agent_needs`.
+    pub needs: String,
     pub tool: String,
     pub tests_sound_at: String,
     /// `@agent_session`: the sid the pane had before this event.

@@ -323,8 +323,15 @@ run `setup.sh` and reload the config (`prefix R`).
   `~/.config/tmux/agents/bin/agent-notify "$TMUX_PANE" normal test hello`.
 - **No sounds:** is the file there, with the right name? Sounds off or space
   muted (`prefix Q`)? Test: `~/.config/tmux/agents/bin/agent-sound enemy-down`.
+- **A state that was wrong (`▲` while nothing waited, say): what did the
+  agent send?** `~/.local/state/tmux-agents/events.log` (and `events.log.1`,
+  the one before) has a line per event agentd got and per check of its own,
+  with the state before and after:
+  `grep ' %12 ' ~/.local/state/tmux-agents/events.log | tail -30` (the pane
+  id is `#{pane_id}`: `tmux display -p '#{pane_id}'` in that pane). It holds
+  event names, modes and tool names only, never your prompts or commands.
 - **Anything else:** `touch ~/.local/state/tmux-agents/debug` makes the bash
-  hook log every event (with your prompts) and the scripts log their errors
-  into that folder; agentd writes its errors to `errors.log` there too, as
+  hook log every event (with your prompts, in `payloads.log`) and the scripts
+  log their errors into that folder; agentd writes its errors to `errors.log` there too, as
   `agentd[<pid>] ...`. Delete the `debug` file when done. `agentd ctl status` shows what agentd tracks; if it
   seems stuck, `agentd ctl stop` (the next hook starts it again).

@@ -51,8 +51,9 @@ spell it out; agentd does the same in one process.
 
 Runtime state lives outside the repo: `$XDG_RUNTIME_DIR/tmux-agents/` (running
 subagents per session, sound debounce, rounds; agentd's socket, lock and state
-file per tmux server) and `~/.local/state/tmux-agents/` (debug logs, only with
-the `debug` file; `agentd.off`, the way back to bash).
+file per tmux server) and `~/.local/state/tmux-agents/` (agentd's event log,
+always; debug logs, only with the `debug` file; `agentd.off`, the way back to
+bash).
 
 ## Pane options
 
@@ -323,8 +324,27 @@ session just made.
 
 **Debugging.** `agentd ctl status` prints the pid, the transport (`control`
 or `spawn`), its state, reminders, queues, observed panes and what blinks.
+`~/.local/state/tmux-agents/events.log` (always on, `src/daemon/eventlog.rs`)
+has one line per input the daemon handled: local time with milliseconds, the
+tmux socket's name, the pane, the agent kind, then the hook event with its
+structural fields (`mode=`, `type=` for the notification type, `source=`,
+`tool=`, `tool_use_id=yes|no`, `subagent=yes`) or an input of its own
+(`seen`, `reconcile`, `observe` when a tick changes the state, `reminder
+fired|skipped`, `background` counts), and the state before and after
+(`working->needs:permission`); a hook that isn't the pane's agent's says
+`ignored:not-its-agent`, one for a pane gone `pane-gone`. Nothing an agent or
+you wrote goes in (prompts, commands, paths, messages), so it can stay on.
+At 1 MiB it moves to `events.log.1` (one old file kept; several tmux servers
+share it). A write that fails changes nothing else.
+
+```
+2026-09-25 11:02:13.481 default %12 claude PermissionRequest mode=bypassPermissions tool=Bash tool_use_id=no working->working
+2026-09-25 11:02:16.902 default %12 claude Notification type=permission_prompt working->needs:permission
+```
+
 With `~/.local/state/tmux-agents/debug`, errors go to `errors.log` there as
-`agentd[<pid>] ...`. `agentd ctl stop` (or SIGTERM) saves, clears the blink
+`agentd[<pid>] ...` (and bash's hook, when it runs, logs each whole payload,
+prompts included, to `payloads.log`). `agentd ctl stop` (or SIGTERM) saves, clears the blink
 and exits (the next hook starts the installed binary); with `agentd.off` it
 first closes its open notifications, since no daemon will come back to close
 them when their panes are seen. To rule out control mode, stop it and

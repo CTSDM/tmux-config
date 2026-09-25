@@ -11,6 +11,7 @@ mod bar;
 mod blink;
 mod control;
 mod effects;
+mod eventlog;
 mod notify;
 mod procs;
 mod rollout;
@@ -18,6 +19,7 @@ mod sound;
 mod store;
 mod tmux;
 mod visibility;
+mod zone;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -159,7 +161,12 @@ async fn serve(
     let saved = store::load(&paths.state, instance);
     let save = Rc::new(Notify::new());
     let runtime_dir = identity::runtime_dir(env::var_os("XDG_RUNTIME_DIR").as_deref());
+    let server_name = socket
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let daemon = Rc::new(Daemon {
+        events: eventlog::EventLog::new(identity::state_dir(), &server_name),
         blink: blink::Blink::new(&runtime_dir, &socket),
         tmux: Tmux::new(socket, instance.pid),
         server: instance,
@@ -194,6 +201,9 @@ async fn serve(
         let left = r.due_ms.saturating_sub(now_ms()) as f64 / 1000.0;
         daemon.arm(&pane, left, r.since);
     }
+    daemon
+        .events
+        .line("-", "agentd", &format!("start pid={}", std::process::id()));
     spawn_local(daemon.clone().saver());
     // Phase 4: attach our control client now (spike-control-mode.md, case k).
     daemon.tmux.attach();
@@ -311,6 +321,8 @@ struct Daemon {
     /// The observation tick runs (only while something is watched).
     ticking: Cell<bool>,
     blink: blink::Blink,
+    /// What came in and what it did (eventlog.rs).
+    events: eventlog::EventLog,
     save: Rc<Notify>,
     effects_env: effects::Env,
     paths: Paths,
@@ -454,6 +466,9 @@ impl Daemon {
                         let mut effects = core::seen(&read.pane);
                         if let Some(Effect::Options(ops)) = effects.first() {
                             let _ = self.tmux.write(&pane, ops).await;
+                            let t = eventlog::transition(&read.pane, ops);
+                            self.events
+                                .line(&pane, &read.pane.agent, &format!("seen {t}"));
                         }
                         let _ = done.send(());
                         effects.remove(0);
@@ -624,6 +639,12 @@ impl Daemon {
                     "{} {}: read failed ({missing:?})",
                     request.pane, request.event.ev
                 ));
+                let why = match missing {
+                    Missing::Pane => "pane-gone",
+                    Missing::Tmux => "tmux-failed",
+                };
+                let what = format!("{} {why}", eventlog::hook(&request.event));
+                self.events.line(&request.pane, kind.as_str(), &what);
                 return Err(missing);
             }
         };
@@ -635,7 +656,10 @@ impl Daemon {
             .iter()
             .map(|(pid, comm, _)| (*pid, comm.as_str()));
         let Some(agent_pid) = core::owner(chain, read.pane_pid) else {
-            return Ok(None); // I4
+            // I4
+            let what = format!("{} ignored:not-its-agent", eventlog::hook(&request.event));
+            self.events.line(&request.pane, kind.as_str(), &what);
+            return Ok(None);
         };
         let vis = if want_vis {
             Some(self.visibility(&read).await)
@@ -673,7 +697,13 @@ impl Daemon {
             agent_pid,
             observing: false,
         };
-        let (batch, _) = self.run_core(&input, &facts, &read).await;
+        let (batch, ops) = self.run_core(&input, &facts, &read).await;
+        let what = format!(
+            "{} {}",
+            eventlog::hook(&request.event),
+            eventlog::transition(&read.pane, &ops)
+        );
+        self.events.line(&request.pane, kind.as_str(), &what);
         Ok(Some(batch))
     }
 
@@ -881,6 +911,8 @@ impl Daemon {
         };
         let n = view.children_matching(b.agent, SNAPSHOT_SHELL);
         if n != b.count {
+            self.events
+                .line(pane, "claude", &format!("background {}->{n}", b.count));
             let op = if n > 0 {
                 core::Op::Set("@agent_bg", n.to_string())
             } else {
@@ -923,7 +955,10 @@ impl Daemon {
             }
         };
         self.sweep(&read.others);
-        let Some((batch, after)) = self.observe_now(pane, &read, view, w.agent).await else {
+        let Some((batch, after)) = self
+            .observe_now(pane, &read, view, w.agent, "observe")
+            .await
+        else {
             self.watched.borrow_mut().remove(pane);
             return Ok(None);
         };
@@ -951,13 +986,15 @@ impl Daemon {
     }
 
     /// X5: what the rollout and /proc say that no hook did, now. `None` when
-    /// the pane holds no Codex session.
+    /// the pane holds no Codex session. `via` (`observe`, `reconcile`) is for
+    /// the event log, where a tick shows only when it changes the state.
     async fn observe_now(
         self: &Rc<Self>,
         pane: &str,
         read: &Read,
         view: Rc<ProcView>,
         fallback: u32,
+        via: &str,
     ) -> Option<(Batch, After)> {
         if read.pane.sid.is_empty() || read.pane.agent != "codex" {
             return None;
@@ -996,6 +1033,11 @@ impl Daemon {
             observing: true,
         };
         let (batch, ops) = self.run_core(&input, &facts, read).await;
+        if via != "observe" || eventlog::changes(&read.pane, &ops) {
+            let gone = if gone { " agent-gone" } else { "" };
+            let t = eventlog::transition(&read.pane, &ops);
+            self.events.line(pane, "codex", &format!("{via}{gone} {t}"));
+        }
         Some((batch, After::from(&read.pane, &ops)))
     }
 
@@ -1048,7 +1090,9 @@ impl Daemon {
             // One observation now, and observation again if it still runs.
             let agent = p.agent_pid.parse().ok().or(apid).unwrap_or(0);
             let view = self.proc_view(self.codex_roots(pane, agent)).await;
-            let Some((batch, after)) = self.observe_now(pane, &read, view, apid.unwrap_or(0)).await
+            let Some((batch, after)) = self
+                .observe_now(pane, &read, view, apid.unwrap_or(0), "reconcile")
+                .await
             else {
                 return Ok(None);
             };
@@ -1073,16 +1117,22 @@ impl Daemon {
                 observing: false,
             };
             let facts = self.facts(&read, None, 0, None);
-            let (batch, _) = self.run_core(&input, &facts, &read).await;
+            let (batch, ops) = self.run_core(&input, &facts, &read).await;
+            let t = eventlog::transition(p, &ops);
+            self.events
+                .line(pane, "claude", &format!("reconcile agent-gone {t}"));
             return Ok(Some((batch, true)));
         };
+        let mut ops = Vec::new();
         if core::reconcile::busy(&p.state) {
             let lines = procfs::tail_lines(&p.transcript, core::reconcile::TRANSCRIPT_LINES);
             if lines.is_some_and(|l| core::reconcile::turn_over(l.iter().map(String::as_str))) {
-                let now = (now_ms() / 1000) as i64;
-                let _ = self.tmux.write(pane, &core::reconcile::idle(now)).await;
+                ops = core::reconcile::idle((now_ms() / 1000) as i64);
+                let _ = self.tmux.write(pane, &ops).await;
             }
         }
+        let t = eventlog::transition(p, &ops);
+        self.events.line(pane, "claude", &format!("reconcile {t}"));
         // B2: background shells nobody watches.
         if !self.background.borrow().contains_key(pane) {
             let n = procfs::count_children_matching(apid, SNAPSHOT_SHELL);
@@ -1114,6 +1164,14 @@ impl Daemon {
         let read = self.tmux.read(pane, true, false).await?;
         let vis = self.visibility(&read).await;
         let effects = core::reminder(since, &self.facts(&read, Some(vis), 0, None));
+        let fired = if effects.is_empty() {
+            "skipped"
+        } else {
+            "fired"
+        };
+        let t = eventlog::transition(&read.pane, &[]);
+        self.events
+            .line(pane, &read.pane.agent, &format!("reminder {fired} {t}"));
         Ok(Some((self.ctx(pane, &read), effects)))
     }
 

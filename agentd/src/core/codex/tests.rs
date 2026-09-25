@@ -86,6 +86,7 @@ impl Sim {
             since: o("@agent_since"),
             prev: o("@agent_prev"),
             needs_id: o("@agent_needs_id"),
+            needs: o("@agent_needs"),
             tool: o("@agent_tool"),
             tests_sound_at: o("@agent_tests_sound_at"),
             sid: o("@agent_session"),
