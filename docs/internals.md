@@ -316,9 +316,10 @@ state machine's memory, reminders and notification ids; it belongs to one
 tmux server instance (pid and start time) and goes when that server dies.
 A pane that goes without its SessionEnd (killed, or its agent crashed) is
 forgotten by the sweep, which runs on every full pane list (a Stop, the
-observation tick): its reminders at once, its queues once drained, its state-machine
-memory (Codex bookkeeping, subagents, round) and notification at the second
-list that misses it, since one list may predate a pane or session just made.
+observation tick): its reminders at once, its queues once drained, its
+state-machine memory (Codex bookkeeping, subagents, round) and notification
+at the second list that misses it, since one list may predate a pane or
+session just made.
 
 **Debugging.** `agentd ctl status` prints the pid, the transport (`control`
 or `spawn`), its state, reminders, queues, observed panes and what blinks.
