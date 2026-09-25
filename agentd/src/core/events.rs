@@ -143,13 +143,22 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
             w.set("@agent_tool", escape_hashes(&label));
         }
         "PermissionRequest" => {
-            new_state = Some("needs".into()); // H4
-            needs = Some(match e.tool.as_str() {
+            let kind = match e.tool.as_str() {
                 "AskUserQuestion" => Needs::Question,
                 "ExitPlanMode" => Needs::Plan,
                 _ => Needs::Permission,
-            });
-            w.set("@agent_needs_id", e.tool_id.clone());
+            };
+            if kind == Needs::Permission && e.mode == "bypassPermissions" {
+                // H4b: asked, but the mode answers it; a dialog shown anyway
+                // comes as Notification permission_prompt (H6).
+                if cur != "needs" {
+                    new_state = Some("working".into());
+                }
+            } else {
+                new_state = Some("needs".into()); // H4
+                needs = Some(kind);
+                w.set("@agent_needs_id", e.tool_id.clone());
+            }
             w.set("@agent_tool", escape_hashes(&label));
         }
         "PostToolUse" | "PostToolUseFailure" => {
