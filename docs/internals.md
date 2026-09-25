@@ -28,7 +28,7 @@ spell it out; agentd does the same in one process.
 | `theme.conf` | colors (Catppuccin Mocha), status rows, window tabs, borders, menus, popups; the templates of the space line |
 | `agents/agents.conf` | agent formats (glyphs, labels, task names), hooks (seen/unseen, re-checks, relayout), keys |
 | `agents/install` | registers the hook (`agentd hook` with `--agentd <path>`, `agent-hook` with `--bash`) in every Claude Code profile and in Codex |
-| `setup.sh` | installs everything; builds agentd into `~/.local/bin/agentd` (a new file renamed over the old) |
+| `setup.sh` | installs everything; builds agentd (static and not position independent on glibc: it starts as fast as `/bin/true`) into `~/.local/bin/agentd` (a new file renamed over the old) |
 | `agentd/` | agentd, the Rust daemon: `src/core` (states, pure), `src/daemon` (tmux transport, effects, blink, observation), `src/hook.rs` (the hook client); `check.sh` |
 | `docs/daemon/` | agentd's design, the behavior contract, its tasks and the control-mode spike |
 | `tests/` | the contract suite, run against either implementation |
@@ -314,6 +314,11 @@ what changes from frame to frame), Codex observation and background shells
 [Spaces and the bar](#spaces-and-the-bar)). The state file keeps the
 state machine's memory, reminders and notification ids; it belongs to one
 tmux server instance (pid and start time) and goes when that server dies.
+A pane that goes without its SessionEnd (killed, or its agent crashed) is
+forgotten by the sweep, which runs on every full pane list (a Stop, the
+observation tick): its reminders at once, its queues once drained, its state-machine
+memory (Codex bookkeeping, subagents, round) and notification at the second
+list that misses it, since one list may predate a pane or session just made.
 
 **Debugging.** `agentd ctl status` prints the pid, the transport (`control`
 or `spawn`), its state, reminders, queues, observed panes and what blinks.
@@ -399,6 +404,11 @@ uv run --no-project --with jeepney --with pyright pyright
 - **In `client-session-changed`, `#{client_width}` is some client of the
   session,** not always the one that switched: `#{hook_client}` is, and a
   `#{L:}` loop gets its width.
+- **A popup loses its top rows on tmux 3.7c** when the status is at the
+  top and the pane under it prints: the pane paints over the popup's first
+  rows, one per status line, until the next full redraw.
+  `tests/upstream/tmux-3.7c-popup-overlay.patch` fixes it (one line; tmux
+  master has no popups any more), with a reproducer next to it.
 - **`#{client_name}` in a `#{L:}` loop crashes tmux 3.6** when a client has
   just connected and not identified yet (no name: a NULL `strdup`). Read it
   only behind `#{?client_session,...}`; `list-clients` and `choose-client`

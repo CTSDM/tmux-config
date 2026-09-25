@@ -287,8 +287,9 @@ same.
 - **Is it running?** `~/.local/bin/agentd ctl status` (inside tmux) prints its
   pid, how it talks to tmux (`control`, normally) and what it tracks.
 - **After updating the repo:** run `setup.sh` again, then
-  `~/.local/bin/agentd ctl stop` in each tmux server; the next hook starts the
-  new binary. Nothing is lost: it saves its state first.
+  `~/.local/bin/agentd ctl stop` in each tmux server and reload the config
+  (`prefix R`), which starts the new binary and sets any new hooks. Nothing
+  is lost: it saves its state first.
 - **Agents started before you installed it** keep calling the bash hook until
   they restart; the bash hook hands their events to agentd.
 
