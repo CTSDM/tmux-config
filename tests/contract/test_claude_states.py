@@ -145,6 +145,35 @@ def test_H4_permission_request(server: TmuxServer, tool: str, kind: str) -> None
     assert options["@agent_tool"] == f"{tool}: rm -r build"
 
 
+@rule("H4b")
+def test_H4b_bypass_mode_answers_a_permission_itself(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent, permission_mode="bypassPermissions")
+    mark = server.sink.mark()
+    agent.hook("PermissionRequest", tool_name="Bash", tool_use_id="d", permission_mode="bypassPermissions",
+               tool_input={"command": "make deploy"})
+    options = shown(agent)
+    assert options["@agent_state"] == "working"
+    assert "@agent_needs" not in options
+    assert options["@agent_tool"] == "Bash: make deploy"
+    # Neither a sound nor a notification: nothing waits for you.
+    time.sleep(1.0)
+    assert [line for line in server.sink.since(mark) if line["effect"] in ("sound", "notify")] == []
+    # A dialog shown anyway still asks for you (H6).
+    agent.hook("Notification", notification_type="permission_prompt", permission_mode="bypassPermissions")
+    assert (state(agent), shown(agent)["@agent_needs"]) == ("needs", "permission")
+
+
+@rule("H4b")
+@pytest.mark.parametrize(("tool", "kind"), [("AskUserQuestion", "question"), ("ExitPlanMode", "plan")])
+def test_H4b_a_question_or_plan_waits_in_bypass_mode(server: TmuxServer, tool: str, kind: str) -> None:
+    agent = server.agent("claude")
+    working(agent, permission_mode="bypassPermissions")
+    agent.hook("PermissionRequest", tool_name=tool, tool_use_id="q", permission_mode="bypassPermissions",
+               tool_input={})
+    assert (state(agent), shown(agent)["@agent_needs"]) == ("needs", kind)
+
+
 @rule("H5", "H13")
 @pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
 def test_H5_only_the_waiting_call_ends_the_wait(server: TmuxServer, event: str) -> None:

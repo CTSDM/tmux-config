@@ -190,13 +190,20 @@ case $ev in
     set_opt @agent_tool "${tool_label//#/##}"
     ;;
   PermissionRequest)
-    new_state=needs
     case $tool in
       AskUserQuestion) needs=question ;;
       ExitPlanMode) needs=plan ;;
       *) needs=permission ;;
     esac
-    set_opt @agent_needs_id "$tool_id"
+    if [[ $needs == permission && $mode == bypassPermissions ]]; then
+      # Asked, but the mode answers it; a dialog shown anyway comes as
+      # Notification permission_prompt.
+      needs=
+      [[ $cur_state == needs ]] || new_state=working
+    else
+      new_state=needs
+      set_opt @agent_needs_id "$tool_id"
+    fi
     set_opt @agent_tool "${tool_label//#/##}"
     ;;
   PostToolUse | PostToolUseFailure)

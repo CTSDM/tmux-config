@@ -246,6 +246,29 @@ fn h4_permission_request_kinds() {
 }
 
 #[test]
+fn h4b_bypass_mode_answers_a_permission_itself() {
+    let bypass = |tool: &str| Event {
+        mode: "bypassPermissions".into(),
+        ..tool_ev("PermissionRequest", tool, "t9", "make deploy")
+    };
+    let r = run(bypass("Bash"), in_state("working"));
+    assert_eq!(r.state(), Some("working"));
+    assert_eq!(r.opt("@agent_needs_id"), Some(None));
+    assert_eq!(r.opt("@agent_tool"), Some(Some("Bash: make deploy")));
+    assert!(r.sounds().is_empty());
+    assert!(r.0.iter().all(|e| !matches!(e, Effect::RemindArm { .. })));
+    // Already waiting for something else: that wait stays.
+    let r = run(bypass("Bash"), in_state("needs"));
+    assert_eq!(r.opt("@agent_state"), None);
+    // A question or a plan waits for you in any mode.
+    for (tool, kind) in [("AskUserQuestion", "question"), ("ExitPlanMode", "plan")] {
+        let r = run(bypass(tool), in_state("working"));
+        assert_eq!(r.state(), Some("needs"));
+        assert_eq!(r.opt("@agent_needs"), Some(Some(kind)));
+    }
+}
+
+#[test]
 fn h5_only_the_waiting_call_ends_the_wait() {
     for ev_name in ["PostToolUse", "PostToolUseFailure"] {
         let waiting = Pane {
