@@ -103,7 +103,7 @@ the current `@agent_state`.
 | H2 | UserPromptSubmit | `working` | unset tool, msg; pane joins its space's round (§8) |
 | H3 | PreToolUse | `working`, unless cur is `needs` (unchanged) | `@agent_tool` = label |
 | H4 | PermissionRequest | `needs` | kind `question` if tool is AskUserQuestion, `plan` if ExitPlanMode, else `permission`; `@agent_needs_id` = tool id; `@agent_tool` = label |
-| H4b | PermissionRequest of kind `permission` with `permission_mode` = `bypassPermissions` | `working`, unless cur is `needs` (unchanged) | `@agent_tool` = label. Claude Code sends the request in that mode too and answers it itself: the tool is already running. A dialog shown anyway comes as H6 |
+| H4b | PermissionRequest of kind `permission` with `permission_mode` = `bypassPermissions` | `working`, unless cur is `needs` (unchanged) | `@agent_tool` = label. Claude Code sends the request in that mode too (without `tool_use_id`) and answers it itself: the tool is already running. A dialog shown anyway (an `ask` rule, e.g. `Bash(ssh:*)`, holds in bypass mode) comes seconds later as H6 |
 | H5 | PostToolUse, PostToolUseFailure | `working`, except when cur is `needs`, `@agent_needs_id` is non-empty and differs from this tool id (unchanged: another parallel call is still waiting) | |
 | H6 | Notification `permission_prompt` | `needs permission`, unless cur is `needs` (unchanged) | |
 | H6b | Notification `elicitation_dialog`, `elicitation_url_dialog`, `agent_needs_input` | `needs question` | |
