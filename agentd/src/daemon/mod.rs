@@ -179,6 +179,7 @@ async fn serve(
         panes: RefCell::new(HashMap::new()),
         watched: RefCell::new(HashMap::new()),
         background: RefCell::new(HashMap::new()),
+        answering: RefCell::new(HashMap::new()),
         missing_panes: RefCell::new(HashSet::new()),
         missing_sids: RefCell::new(HashSet::new()),
         ticking: Cell::new(false),
@@ -266,6 +267,8 @@ enum Job {
     Seen(oneshot::Sender<()>),
     /// B1: count the pane's background shells, with this tick's /proc.
     Background(Rc<ProcView>),
+    /// H5b: look for the answer to the pane's permission dialog.
+    Answer,
 }
 
 /// B1: a Claude pane whose agent left shells running in the background.
@@ -275,6 +278,18 @@ struct Background {
     /// What `@agent_bg` says now.
     count: u32,
     /// A count of this pane is queued and not done yet.
+    queued: bool,
+}
+
+/// H5b: a Claude pane waiting for a permission, and the Bash tool's shells
+/// its agent had when the wait began: a new one means you answered Yes.
+#[derive(Debug, Clone)]
+struct Answer {
+    agent: u32,
+    /// The `@agent_since` of that wait.
+    since: i64,
+    before: HashSet<(u32, u64)>,
+    /// A look of this pane is queued and not done yet.
     queued: bool,
 }
 
@@ -315,6 +330,7 @@ struct Daemon {
     panes: RefCell<HashMap<String, PaneQueues>>,
     watched: RefCell<HashMap<String, Watch>>,
     background: RefCell<HashMap<String, Background>>,
+    answering: RefCell<HashMap<String, Answer>>,
     /// Panes and subagent sessions not listed at the last sweep (`forget`).
     missing_panes: RefCell<HashSet<String>>,
     missing_sids: RefCell<HashSet<String>>,
@@ -402,6 +418,7 @@ impl Daemon {
                 "background": self.background.borrow().iter()
                     .map(|(pane, b)| (pane.clone(), b.count))
                     .collect::<BTreeMap<_, _>>(),
+                "answering": self.answering.borrow().keys().cloned().collect::<BTreeSet<_>>(),
                 "blinking": self.blink.targets(),
             })),
             other => Reply::error(format!("unknown command: {other}")),
@@ -461,6 +478,14 @@ impl Daemon {
                     Err(missing) => missing == Missing::Pane,
                 },
                 Job::Background(view) => self.on_background(&pane, &view).await,
+                Job::Answer => match self.on_answer(&pane).await {
+                    Ok(Some((ctx, effects))) => {
+                        self.run_effects(ctx, effects);
+                        false
+                    }
+                    Ok(None) => false,
+                    Err(missing) => missing == Missing::Pane,
+                },
                 Job::Seen(done) => match self.tmux.read(&pane, false, false).await {
                     Ok(read) => {
                         let mut effects = core::seen(&read.pane);
@@ -529,6 +554,7 @@ impl Daemon {
             self.cancel(pane);
             self.watched.borrow_mut().remove(pane);
             self.background.borrow_mut().remove(pane);
+            self.answering.borrow_mut().remove(pane);
         }
     }
 
@@ -569,6 +595,9 @@ impl Daemon {
             .borrow_mut()
             .retain(|p, _| existing.contains(p.as_str()));
         self.background
+            .borrow_mut()
+            .retain(|p, _| existing.contains(p.as_str()));
+        self.answering
             .borrow_mut()
             .retain(|p, _| existing.contains(p.as_str()));
         self.forget(others, &existing);
@@ -759,6 +788,13 @@ impl Daemon {
                 .unwrap_or(0);
             self.watch_background(&input.pane, agent_pid, count);
         }
+        self.left_wait(&input.pane, &ops);
+        let answer = effects
+            .iter()
+            .position(|e| matches!(e, Effect::AwaitAnswer { .. }));
+        if let Some(Effect::AwaitAnswer { since }) = answer.map(|i| effects.remove(i)) {
+            self.await_answer(&input.pane, input.agent_pid, since);
+        }
         ((ctx, self.apply(&input.pane, effects).await), ops)
     }
 
@@ -825,10 +861,11 @@ impl Daemon {
     async fn ticker(self: Rc<Self>) {
         loop {
             sleep(TICK).await;
-            let (observe, count) = {
+            let (observe, count, answer) = {
                 let mut watched = self.watched.borrow_mut();
                 let mut background = self.background.borrow_mut();
-                if watched.is_empty() && background.is_empty() {
+                let mut answering = self.answering.borrow_mut();
+                if watched.is_empty() && background.is_empty() && answering.is_empty() {
                     self.ticking.set(false);
                     return;
                 }
@@ -848,8 +885,21 @@ impl Daemon {
                         pane.clone()
                     })
                     .collect();
-                (observe, count)
+                let answer: Vec<String> = answering
+                    .iter_mut()
+                    .filter(|(_, a)| !a.queued)
+                    .map(|(pane, a)| {
+                        a.queued = true;
+                        pane.clone()
+                    })
+                    .collect();
+                (observe, count, answer)
             };
+            // H5b looks at the agent's children itself, when its turn in the
+            // pane's queue comes: a view taken now could predate the wait.
+            for pane in answer {
+                self.queue(&pane, Job::Answer);
+            }
             if observe.is_empty() && count.is_empty() {
                 continue;
             }
@@ -930,6 +980,85 @@ impl Daemon {
             entry.count = n;
         }
         false
+    }
+
+    /// H5b: watch a Claude pane's permission wait (since `since`) for its
+    /// answer, from the Bash tool's shells its agent has now. Asked again
+    /// (another request), the wait starts again from what runs then.
+    fn await_answer(self: &Rc<Self>, pane: &str, agent: u32, since: i64) {
+        if agent == 0 {
+            return;
+        }
+        let before = procfs::children_matching(agent, SNAPSHOT_SHELL)
+            .into_iter()
+            .collect();
+        self.answering.borrow_mut().insert(
+            pane.to_string(),
+            Answer {
+                agent,
+                since,
+                before,
+                queued: false,
+            },
+        );
+        self.start_ticking();
+    }
+
+    /// H5b: writes that leave `needs permission` end its watch.
+    fn left_wait(&self, pane: &str, ops: &[core::Op]) {
+        let left = ops.iter().any(|op| match op {
+            core::Op::Set("@agent_state", s) => s != "needs",
+            core::Op::Set("@agent_needs", n) => n != "permission",
+            core::Op::Unset("@agent_state") => true,
+            _ => false,
+        });
+        if left {
+            self.answering.borrow_mut().remove(pane);
+        }
+    }
+
+    /// H5b, one tick: a Bash tool shell that wasn't there when the wait
+    /// began means the dialog was answered; the pane is `working` (as H5).
+    async fn on_answer(self: &Rc<Self>, pane: &str) -> Result<Option<Batch>, Missing> {
+        let Some(a) = self.answering.borrow_mut().get_mut(pane).map(|a| {
+            a.queued = false;
+            a.clone()
+        }) else {
+            return Ok(None);
+        };
+        if procfs::stat(a.agent).is_none() {
+            // The agent is gone: reconcile clears the pane.
+            self.answering.borrow_mut().remove(pane);
+            return Ok(None);
+        }
+        if procfs::children_matching(a.agent, SNAPSHOT_SHELL)
+            .iter()
+            .all(|id| a.before.contains(id))
+        {
+            return Ok(None);
+        }
+        self.answering.borrow_mut().remove(pane);
+        let read = self.tmux.read(pane, false, false).await?;
+        if read.pane.agent != "claude" {
+            return Ok(None);
+        }
+        let effects = core::answered(a.since, &self.facts(&read, None, 0, None));
+        let ops = match effects.first() {
+            Some(Effect::Options(ops)) => ops.clone(),
+            _ => Vec::new(),
+        };
+        // Too late: the wait ended by the time we read the pane.
+        let what = if ops.is_empty() {
+            "answered-late"
+        } else {
+            "answered"
+        };
+        let t = eventlog::transition(&read.pane, &ops);
+        self.events.line(pane, "claude", &format!("{what} {t}"));
+        Ok(Some((
+            self.ctx(pane, &read),
+            self.apply(pane, effects).await,
+        )))
     }
 
     /// X5, one tick: observe, then whether to go on observing (`watch()` of
@@ -1129,6 +1258,7 @@ impl Daemon {
             if lines.is_some_and(|l| core::reconcile::turn_over(l.iter().map(String::as_str))) {
                 ops = core::reconcile::idle((now_ms() / 1000) as i64);
                 let _ = self.tmux.write(pane, &ops).await;
+                self.left_wait(pane, &ops);
             }
         }
         let t = eventlog::transition(p, &ops);

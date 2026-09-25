@@ -156,6 +156,11 @@ pub fn children(pid: u32) -> Vec<u32> {
 /// Children of `parent` whose command line contains `needle`, like
 /// `pgrep -c -P <parent> -f <needle>` (B1).
 pub fn count_children_matching(parent: u32, needle: &str) -> u32 {
+    children_matching(parent, needle).len() as u32
+}
+
+/// Those children as pid and start time (H5b tells them apart by both).
+pub fn children_matching(parent: u32, needle: &str) -> Vec<(u32, u64)> {
     children(parent)
         .into_iter()
         .filter(|pid| {
@@ -165,7 +170,8 @@ pub fn count_children_matching(parent: u32, needle: &str) -> u32 {
                     .contains(needle)
             })
         })
-        .count() as u32
+        .filter_map(|pid| stat(pid).map(|s| (pid, s.starttime)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -243,6 +249,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(count_children_matching(me, "shell-snapshots/snapshot-"), 1);
+        let found = children_matching(me, "shell-snapshots/snapshot-");
+        assert_eq!(found, [(child.id(), stat(child.id()).unwrap().starttime)]);
         assert_eq!(count_children_matching(me, "no-such-marker"), 0);
         child.kill().unwrap();
         child.wait().unwrap();

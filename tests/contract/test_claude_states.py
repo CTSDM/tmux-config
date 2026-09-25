@@ -211,6 +211,83 @@ def test_H5_result_is_working(server: TmuxServer, event: str) -> None:
     assert state(agent) == "working"
 
 
+# --- H5b a permission answered in its dialog (CHANGE C10) -----------------------------
+
+ANSWERED = 3.5  # checked about every 2 s, with margin
+
+# What Claude's Bash tool runs for a command: a shell that sources the
+# session's shell snapshot first (and runs more after the command, so bash
+# doesn't replace itself with the last one).
+BASH_TOOL = "source /nonexistent/shell-snapshots/snapshot-zsh-1.sh 2>/dev/null || true && sleep 300; exit 0"
+
+
+def bash_tool_shell(agent: FakeAgent) -> int:
+    return agent.spawn(["/bin/bash", "-c", BASH_TOOL])
+
+
+def still(agent: FakeAgent, needs: str, seconds: float = 3.0) -> None:
+    """The wait stays for `seconds` (at least one check)."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        assert (state(agent), shown(agent).get("@agent_needs")) == ("needs", needs)
+        time.sleep(0.2)
+
+
+@rule("H5b", "N3")
+@change("C10")
+@pytest.mark.parametrize("dialog", ["PermissionRequest", "Notification"])
+def test_H5b_the_command_starting_ends_the_wait(server: TmuxServer, dialog: str) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    if dialog == "PermissionRequest":
+        ask(agent, "Bash", "a", command="make deploy")
+    else:
+        agent.hook("Notification", notification_type="permission_prompt")
+    assert (state(agent), shown(agent)["@agent_needs"]) == ("needs", "permission")
+    mark = server.sink.mark()
+    time.sleep(0.3)
+    bash_tool_shell(agent)  # you answered Yes: the command runs
+    end = time.monotonic() + ANSWERED
+    while state(agent) != "working":
+        assert time.monotonic() < end, f"still {state(agent)!r} {ANSWERED} s after the command started"
+        time.sleep(0.1)
+    options = shown(agent)
+    assert "@agent_needs" not in options and "@agent_needs_id" not in options
+    server.sink.wait_for(lambda line: line == {**line, "effect": "notify-close", "pane": agent.pane}, after=mark)
+    # Its result comes later, as usual.
+    post(agent, "Bash", "a")
+    assert state(agent) == "working"
+
+
+@rule("H5b")
+def test_H5b_a_hook_is_no_answer(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    ask(agent, "Bash", "a", command="make deploy")
+    agent.spawn(["/bin/sh", "-c", "sleep 300; exit 0", "agentd-hook-claude"])
+    still(agent, "permission")
+
+
+@rule("H5b")
+@pytest.mark.parametrize(("tool", "kind"), [("AskUserQuestion", "question"), ("ExitPlanMode", "plan")])
+def test_H5b_a_question_or_plan_waits_for_you(server: TmuxServer, tool: str, kind: str) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    ask(agent, tool, "q")
+    bash_tool_shell(agent)
+    still(agent, kind)
+
+
+@rule("H5b")
+def test_H5b_a_shell_from_before_the_wait_is_no_answer(server: TmuxServer) -> None:
+    agent = server.agent("claude")
+    working(agent)
+    bash_tool_shell(agent)  # a command left running in the background
+    time.sleep(0.3)
+    ask(agent, "Bash", "a", command="make deploy")
+    still(agent, "permission")
+
+
 # --- H6-H7 notifications and elicitations ----------------------------------------
 
 

@@ -604,6 +604,104 @@ fn b1_background_shells_are_counted_on_the_tick() {
 }
 
 #[test]
+fn h5b_a_shell_after_the_dialog_is_its_answer() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    // A fake claude with a shell of its Bash tool already running (in the
+    // background, say), and one more once `go` exists: the answer.
+    let fake = server.runtime.join("claude");
+    fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
+    let go = server.runtime.join("go");
+    let script = format!(
+        "sh -c 'sleep 600; :' shell-snapshots/snapshot-a & \
+         while [ ! -e {go} ]; do sleep 0.1; done; \
+         sh -c 'sleep 600; :' shell-snapshots/snapshot-b & sleep 600; :",
+        go = go.display()
+    );
+    let command = format!("{} -c \"{script}\"", fake.display());
+    let pane = server.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "main:",
+        &command,
+    ]);
+    let pane_pid: u32 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    let mut agent = 0;
+    wait_for("the fake claude", || {
+        agent = agentd::procfs::agent_of(pane_pid).unwrap_or(0);
+        agent != 0
+    });
+    let shells = || agentd::procfs::count_children_matching(agent, "shell-snapshots/snapshot-");
+    wait_for("the first shell", || shells() == 1);
+    let chain = if agent == pane_pid {
+        json!([[agent, "claude", 0]])
+    } else {
+        json!([[agent, "claude", 0], [pane_pid, "sh", 0]])
+    };
+    let hook = |event: Value| {
+        let reply = server.call(json!({
+            "v": 1, "kind": "claude", "pane": pane, "event": event, "chain": chain, "env": {}, "t": 0,
+        }));
+        assert_eq!(reply["ok"], true);
+    };
+    let state = || server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]);
+    hook(ev("UserPromptSubmit"));
+    hook(
+        json!({"hook_event_name": "PermissionRequest", "session_id": "s1",
+        "tool_name": "Bash", "tool_use_id": "t1"}),
+    );
+    assert_eq!(state(), "needs");
+    assert_eq!(server.status()["answering"], json!([pane]));
+    // The shell that ran before, and the loop's own children, are no answer.
+    sleep(Duration::from_millis(2500));
+    assert_eq!(state(), "needs");
+    fs::write(&go, "").unwrap();
+    wait_for("working", || state() == "working");
+    assert_eq!(shells(), 2);
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_needs"]),
+        ""
+    );
+    assert_eq!(server.status()["answering"], json!([]));
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l.ends_with(&format!("{pane} claude answered needs:permission->working"))),
+        "{log}"
+    );
+    // A question is answered in the dialog itself: not watched. Leaving the
+    // wait (for a question, for the end of the turn) ends the watch.
+    hook(
+        json!({"hook_event_name": "PermissionRequest", "session_id": "s1",
+        "tool_name": "AskUserQuestion", "tool_use_id": "q1"}),
+    );
+    assert_eq!(server.status()["answering"], json!([]));
+    hook(
+        json!({"hook_event_name": "Notification", "session_id": "s1",
+        "notification_type": "permission_prompt"}),
+    );
+    assert_eq!(server.status()["answering"], json!([]), "already waiting");
+    hook(json!({"hook_event_name": "PostToolUse", "session_id": "s1",
+        "tool_name": "AskUserQuestion", "tool_use_id": "q1"}));
+    hook(
+        json!({"hook_event_name": "Notification", "session_id": "s1",
+        "notification_type": "permission_prompt"}),
+    );
+    assert_eq!(server.status()["answering"], json!([pane]));
+    hook(ev("Stop"));
+    assert_eq!(server.status()["answering"], json!([]));
+}
+
+#[test]
 fn event_log_has_structure_and_no_text() {
     let Some(mut server) = Server::start() else {
         return;

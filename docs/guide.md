@@ -76,6 +76,11 @@ seen yet. Two levels stand out from the rest:
 Amber wins over green: a session with one agent that needs you and another
 that finished shows the amber band.
 
+Claude Code says nothing when you allow a command in its permission dialog.
+With agentd, the `▲` turns `●` within about two seconds of the command
+starting (a Bash command; other tools stay `▲` until they return, usually at
+once).
+
 Codex distinguishes a blocking question (`needs question`) from a permission
 request. Its interruptions become idle immediately, and terminal API/quota errors
 appear within about two seconds, even if you stay in the pane. Local commands that

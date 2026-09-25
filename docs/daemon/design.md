@@ -100,8 +100,9 @@ the daemon with `chain`, since the daemon knows each pane's `pane_pid`.
 - **Notifications:** one D-Bus session connection (zbus), signal match set
   once; notification id ↔ pane map in memory; a click runs `agent-jump`.
 - **Timers:** reminder (one per pane, re-armed or cancelled on every state
-  change), blink frames, background-shell polling and Codex observation (one
-  shared 2 s tick that scans `/proc` once for every watched pane).
+  change), blink frames, background-shell polling, Codex observation and
+  permission waits (contract H5b) (one shared 2 s tick that scans `/proc`
+  once for every watched pane; a permission wait reads its agent's children).
 - **State file:** small JSON snapshot (subagents, rounds, Codex bookkeeping,
   reminder due times, background groups) written on change, debounced, and
   read on start. Pane options stay the source of truth for anything shown;

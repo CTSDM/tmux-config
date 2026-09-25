@@ -293,6 +293,73 @@ fn h5_only_the_waiting_call_ends_the_wait() {
     }
 }
 
+fn awaits(r: &Run) -> Vec<i64> {
+    r.0.iter()
+        .filter_map(|e| match e {
+            Effect::AwaitAnswer { since } => Some(*since),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn h5b_a_permission_wait_is_watched_for_its_answer() {
+    let bash = tool_ev("PermissionRequest", "Bash", "a", "make deploy");
+    assert_eq!(awaits(&run(bash.clone(), in_state("working"))), [NOW]);
+    // Asked while another wait shows: that wait's since stays.
+    let question = Pane {
+        needs: "question".into(),
+        ..in_state("needs")
+    };
+    assert_eq!(awaits(&run(bash, question)), [NOW - 100]);
+    let prompt = notification("permission_prompt");
+    assert_eq!(awaits(&run(prompt.clone(), in_state("working"))), [NOW]);
+    // H6 on a wait already shown changes nothing, the watch goes on.
+    assert!(awaits(&run(prompt, in_state("needs"))).is_empty());
+    // A question, a plan, or bypass mode's own answer: no dialog to answer.
+    for tool in ["AskUserQuestion", "ExitPlanMode"] {
+        let r = run(
+            tool_ev("PermissionRequest", tool, "q", ""),
+            in_state("working"),
+        );
+        assert!(awaits(&r).is_empty(), "{tool}");
+    }
+    let bypass = Event {
+        mode: "bypassPermissions".into(),
+        ..tool_ev("PermissionRequest", "Bash", "", "")
+    };
+    assert!(awaits(&run(bypass, in_state("working"))).is_empty());
+}
+
+#[test]
+fn h5b_answered_is_working() {
+    let waiting = Pane {
+        needs: "permission".into(),
+        needs_id: "a".into(),
+        ..in_state("needs")
+    };
+    let r = Run(answered(NOW - 100, &facts(waiting.clone())));
+    assert_eq!(r.state(), Some("working"));
+    let since = NOW.to_string();
+    assert_eq!(r.opt("@agent_since"), Some(Some(since.as_str())));
+    assert_eq!(r.opt("@agent_needs"), Some(None));
+    assert_eq!(r.opt("@agent_needs_id"), Some(None));
+    assert!(r.has(&Effect::NotifyClose) && r.has(&Effect::RemindCancel));
+    assert!(r.sounds().is_empty() && r.notifies().is_empty());
+    // Another wait by now, or none: nothing.
+    assert!(answered(NOW - 99, &facts(waiting.clone())).is_empty());
+    let question = Pane {
+        needs: "question".into(),
+        ..waiting.clone()
+    };
+    assert!(answered(NOW - 100, &facts(question)).is_empty());
+    let working = Pane {
+        state: "working".into(),
+        ..waiting
+    };
+    assert!(answered(NOW - 100, &facts(working)).is_empty());
+}
+
 fn notification(ntype: &str) -> Event {
     Event {
         ntype: ntype.into(),
