@@ -21,13 +21,30 @@ could not be built or is switched off (`agentd.off`, see the guide).
 from `spaces.example` (your folders, never committed) and the folder for the
 sounds.
 
-Needs tmux 3.7 or later, `git`, `jq`, `python3`, `fzf`, `uv`, a notification
-daemon (mako, dunst, ...), for sounds PipeWire's `pw-play`, and for agentd a
+Needs Linux, tmux 3.7 or later, `git`, `jq`, `python3`, `fzf`, `uv`, a
+notification server and a sound player (see Desktop below), and for agentd a
 Rust toolchain (`cargo`); committing needs `gitleaks`. tmux 3.6 leaks memory
 while it redraws this bar. tmux 3.7c loses a popup's top rows when a pane
 under it prints: build it from the release tarball with
 `tests/upstream/tmux-3.7c-popup-overlay.patch` (see
 [tests/upstream/README.md](tests/upstream/README.md)).
+
+### Desktop
+
+Any Linux desktop works (Hyprland, sway, i3, GNOME, KDE...); no launcher such
+as rofi is involved, and `setup.sh` says what your desktop will be missing.
+
+- **Notifications** go through the standard D-Bus notification service, so any
+  notification server shows them (mako, dunst, your desktop's own...).
+  Clicking one jumps to its pane when the server runs the notification's
+  default action on a click: mako does; dunst does with
+  `mouse_left_click = do_action, close_current`.
+- **Sounds** play with `pw-play`, else `ffplay`, `mpv` or `aplay`.
+- **Hyprland** adds two things: whether you're looking at a pane is asked of
+  it (elsewhere it comes from the terminal's focus events, which kitty, foot,
+  alacritty and wezterm send), and a click on a notification raises the
+  terminal window that already shows that session (elsewhere the pane is shown
+  in the terminal you used last).
 
 ## Documentation
 

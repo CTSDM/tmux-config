@@ -11,7 +11,8 @@ set -euo pipefail
 #   ./setup.sh --no-layouts     # skip copying tmuxifier layouts
 #
 # Assumes:
-#   - tmux is already installed
+#   - Linux (the agent layer reads /proc); any desktop, see "Desktop" below
+#   - tmux 3.7 or later is already installed
 #   - git is available
 #   - This repo is cloned to ~/.config/tmux (or gets linked there)
 #   - jq is available (for the agent hooks)
@@ -47,6 +48,42 @@ fi
 if ! command -v git &>/dev/null; then
     error "git is not installed. Install it first, then re-run this script."
     exit 1
+fi
+
+# The agent layer reads /proc (agents' processes, their shells).
+if [ "$(uname -s)" != Linux ]; then
+    error "The agent layer needs Linux (it reads /proc). Nothing installed."
+    exit 1
+fi
+
+tmux_version="$(tmux -V | sed -n 's/^tmux \([0-9]*\.[0-9]*\).*/\1/p')"
+if [ -n "$tmux_version" ] && [ "$(printf '%s\n' 3.7 "$tmux_version" | sort -V | head -n1)" != 3.7 ]; then
+    warn "tmux $tmux_version: 3.7 or later is needed; older versions leak memory while they redraw the bar."
+fi
+
+for cmd in fzf python3; do
+    command -v "$cmd" &>/dev/null || warn "$cmd is not installed: the popups (prefix a, e, u...) need it."
+done
+
+# --- Desktop: notifications, sounds, focus ----------------------------------
+# Any Linux desktop works (Hyprland, sway, i3, GNOME, KDE...): nothing here is
+# required, this only says what will be missing.
+
+if ! command -v busctl &>/dev/null || ! busctl --user list &>/dev/null; then
+    info "Notifications: no session bus to check from here (over ssh?)."
+elif busctl --user list 2>/dev/null | grep -q '^org\.freedesktop\.Notifications '; then
+    ok "Notifications: a notification server is on the session bus."
+else
+    warn "Notifications: no notification server (mako, dunst, your desktop's own...): no desktop notifications."
+fi
+
+if ! command -v pw-play &>/dev/null && ! command -v ffplay &>/dev/null \
+    && ! command -v mpv &>/dev/null && ! command -v aplay &>/dev/null; then
+    warn "Sounds: none of pw-play, ffplay, mpv or aplay is installed: no sounds."
+fi
+
+if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
+    info "Not on Hyprland: which pane you're looking at comes from your terminal's focus events, and clicking a notification shows the pane in your last used terminal instead of raising the window that already has it."
 fi
 
 # --- 1. Tmux configuration --------------------------------------------------
