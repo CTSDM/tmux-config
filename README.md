@@ -16,9 +16,18 @@ git clone <this repo> ~/.config/tmux
 runs `agents/install`, which registers the agent hook with every Claude Code
 profile (`~/.claude`, `~/.config/claude/*/`) and with Codex
 (`~/.codex/hooks.json`): `agentd hook`, or the bash `agent-hook` when agentd
-could not be built. `agents/install --uninstall` removes it again. Needs `jq`,
-`python3`, `fzf`, `uv`, a notification daemon (mako, dunst, ...), for sounds
-PipeWire's `pw-play`, and for agentd a Rust toolchain (`cargo`).
+could not be built or is switched off (`agentd.off`, see the guide).
+`agents/install --uninstall` removes it again. It also creates `spaces.conf`
+from `spaces.example` (your folders, never committed) and the folder for the
+sounds.
+
+Needs tmux 3.7 or later, `git`, `jq`, `python3`, `fzf`, `uv`, a notification
+daemon (mako, dunst, ...), for sounds PipeWire's `pw-play`, and for agentd a
+Rust toolchain (`cargo`); committing needs `gitleaks`. tmux 3.6 leaks memory
+while it redraws this bar. tmux 3.7c loses a popup's top rows when a pane
+under it prints: build it from the release tarball with
+`tests/upstream/tmux-3.7c-popup-overlay.patch` (see
+[tests/upstream/README.md](tests/upstream/README.md)).
 
 ## Documentation
 
