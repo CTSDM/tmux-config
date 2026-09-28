@@ -1,11 +1,12 @@
 # Cloned by TPM on each machine.
 plugins/
 
-# Machine-local Claude Code permissions.
-.claude/settings.local.json
+# Claude Code's machine-local state: permissions, agents' worktrees.
+.claude/
 
 # Which folders are personal and which are work names clients: keep it local.
 spaces.conf
 
-# Drafts of bug reports to other projects (tmux...), filed by hand.
-upstream/
+# Drafts of bug reports to other projects (tmux...), filed by hand. Only at
+# the top: tests/upstream/ holds the reproducers, which are committed.
+/upstream/
