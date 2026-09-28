@@ -19,3 +19,6 @@ regex = '''[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+'''
 [[rules.allowlists]]
 description = "SSH remotes such as git@github.com:user/repo"
 regexes = ['''^git@''']
+[[rules.allowlists]]
+description = "No-reply addresses in commit trailers (Co-Authored-By, Signed-off-by)"
+regexes = ['''^noreply@''', '''@users\.noreply\.github\.com$''']

@@ -70,5 +70,6 @@ uv run --no-project --with jeepney --with pyright pyright
 ## Privacy guard
 
 Commits run gitleaks (`.gitleaks.toml`: default rules plus absolute home paths
-and email addresses) and refuse any word listed in `.git/info/private-words`
-(one per line, never committed).
+and email addresses other than no-reply ones) and refuse any word listed in
+`.git/info/private-words` (one per line, never committed): `pre-commit` checks
+the staged changes and file names, `commit-msg` the commit message.

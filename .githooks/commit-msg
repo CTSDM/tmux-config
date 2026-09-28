@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Refuse commit messages that would publish secrets or private data: the same
+# checks as pre-commit (gitleaks with .gitleaks.toml, and the words in
+# .git/info/private-words), on the message, which pre-commit never sees.
+# Merge commits run it too.
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "commit-msg: gitleaks is not installed, refusing to commit." >&2
+  exit 1
+fi
+
+# Only what the commit keeps: git drops the comment lines.
+message=$(git stripspace --strip-comments <"$1")
+
+if ! gitleaks stdin --redact --no-banner --log-level warn \
+  --config "$(git rev-parse --show-toplevel)/.gitleaks.toml" <<<"$message"; then
+  echo "commit-msg: the commit message contains a secret or personal data." >&2
+  exit 1
+fi
+
+words_file="$(git rev-parse --git-common-dir)/info/private-words" # shared by every worktree
+if [[ -s $words_file ]]; then
+  patterns=$(sed -e '/^[[:space:]]*$/d' -e '/^#/d' "$words_file")
+  if [[ -n $patterns ]]; then
+    hits=$(grep -o -i -F -f <(printf '%s\n' "$patterns") <<<"$message" | sort -u || true)
+    if [[ -n $hits ]]; then
+      echo "commit-msg: the commit message contains private words:" >&2
+      sed 's/^/  /' <<<"$hits" >&2
+      exit 1
+    fi
+  fi
+fi

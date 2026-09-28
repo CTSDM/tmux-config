@@ -242,8 +242,8 @@ contract is unclear, ask; don't infer it from either implementation.
 6. **No private data in commits.** Fixtures are synthetic. Never copy
    `~/.local/state/tmux-agents/payloads.log` (bash's debug log: it holds
    prompts; before 2026-09-25 it was `events.log`, now agentd's structural
-   log). The pre-commit leak guard (gitleaks + private words) must pass;
-   never bypass it.
+   log). The leak guard (gitleaks + private words, on the changes and on the
+   message) must pass; never bypass it.
 7. **Dependencies:** Rust crates only from crates.io, each new one approved by
    the architect, `Cargo.lock` committed, `cargo deny check` clean. Python via
    `uv` (PEP 723 or a `pyproject.toml` in `tests/`) and `pyright` strict.

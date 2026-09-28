@@ -6,6 +6,8 @@
 #     project names, hostnames, usernames. That file lives inside .git, so the
 #     list itself is never committed.
 #
+# commit-msg runs the same checks on the commit message.
+#
 # Enabled per clone with: git config core.hooksPath .githooks (setup.sh does it).
 set -euo pipefail
 
