@@ -2,13 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# Tmux + Tmuxifier setup script
-# Installs tmux config, TPM (plugin manager), the Claude Code / Codex agent
-# hooks, and tmuxifier with layouts.
+# Tmux setup script
+# Installs the tmux config, TPM (plugin manager), agentd and the Claude Code /
+# Codex agent hooks.
 #
 # Usage:
-#   ./setup.sh                  # install everything
-#   ./setup.sh --no-layouts     # skip copying tmuxifier layouts
+#   ./setup.sh
 #
 # Assumes:
 #   - Linux (the agent layer reads /proc); any desktop, see "Desktop" below
@@ -19,14 +18,11 @@ set -euo pipefail
 # =============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKIP_LAYOUTS=false
 
 for arg in "$@"; do
     case "$arg" in
-        --no-layouts) SKIP_LAYOUTS=true ;;
         -h|--help)
-            echo "Usage: $0 [--no-layouts]"
-            echo "  --no-layouts  Skip copying tmuxifier session layouts"
+            echo "Usage: $0"
             exit 0
             ;;
         *) echo "Unknown option: $arg"; exit 1 ;;
@@ -189,62 +185,7 @@ fi
 SOUNDS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tmux-agents/sounds"
 mkdir -p "$SOUNDS_DIR"
 ok "Agent sounds go in $SOUNDS_DIR (names in agents/bin/agent-sound)"
-command -v uv &>/dev/null || warn "uv is not installed: desktop notifications (agents/bin/agent-notify) need it."
-
-# --- 4. Tmuxifier -----------------------------------------------------------
-
-TMUXIFIER_DIR="$HOME/.tmuxifier"
-info "Installing tmuxifier"
-
-if [ -d "$TMUXIFIER_DIR" ]; then
-    ok "Tmuxifier already installed at $TMUXIFIER_DIR"
-else
-    git clone https://github.com/jimeh/tmuxifier.git "$TMUXIFIER_DIR"
-    ok "Tmuxifier installed"
-fi
-
-# --- 5. Tmuxifier layouts ----------------------------------------------------
-
-LAYOUTS_SRC="$SCRIPT_DIR/layouts"
-LAYOUTS_DST="$TMUXIFIER_DIR/layouts"
-
-if [ "$SKIP_LAYOUTS" = true ]; then
-    info "Skipping layout copy (--no-layouts)"
-elif [ -d "$LAYOUTS_SRC" ]; then
-    info "Copying tmuxifier session layouts"
-    mkdir -p "$LAYOUTS_DST"
-    cp "$LAYOUTS_SRC"/*.session.sh "$LAYOUTS_DST/" 2>/dev/null || true
-    ok "Layouts copied to $LAYOUTS_DST"
-else
-    warn "No layouts directory found at $LAYOUTS_SRC — skipping"
-    warn "If your layouts are in ~/.tmuxifier/layouts, they are already in place."
-fi
-
-# --- 6. Shell integration ----------------------------------------------------
-
-info "Checking shell integration for tmuxifier"
-
-SHELL_RC=""
-case "$(basename "${SHELL:-bash}")" in
-    zsh)  SHELL_RC="$HOME/.zshrc" ;;
-    bash) SHELL_RC="$HOME/.bashrc" ;;
-    fish) SHELL_RC="$HOME/.config/fish/config.fish" ;;
-    *)    SHELL_RC="$HOME/.profile" ;;
-esac
-
-TMUXIFIER_INIT='eval "$(~/.tmuxifier/bin/tmuxifier init -)"'
-
-if [ -f "$SHELL_RC" ] && grep -qF 'tmuxifier init' "$SHELL_RC"; then
-    ok "Tmuxifier init already present in $SHELL_RC"
-else
-    info "Adding tmuxifier init to $SHELL_RC"
-    {
-        echo ""
-        echo "# Tmuxifier"
-        echo "$TMUXIFIER_INIT"
-    } >> "$SHELL_RC"
-    ok "Added tmuxifier init to $SHELL_RC"
-fi
+command -v uv &>/dev/null || warn "uv is not installed: the bash implementation's notifications (agents/bin/agent-notify) and the tests need it."
 
 # --- Done --------------------------------------------------------------------
 
@@ -252,8 +193,7 @@ echo ""
 ok "Setup complete!"
 echo ""
 echo "  Next steps:"
-echo "    1. Restart your shell or run: source $SHELL_RC"
-echo "    2. Open tmux. Plugins should already be installed."
-echo "       If not, press Alt+a then I to install them."
-echo "    3. Use tmuxifier: tmuxifier list-sessions"
+echo "    1. Open tmux, or reload its config if it runs (Alt+a then R)."
+echo "    2. Plugins should already be installed. If not, press Alt+a then I."
+echo "    3. Agents started before now report once they restart."
 echo ""
