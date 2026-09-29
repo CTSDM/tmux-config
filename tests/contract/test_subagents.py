@@ -162,6 +162,6 @@ def test_A4_background_glyph_while_subagents_run(server: TmuxServer, current: st
         # done: the turn ends; idle: a compaction with nothing to go back to
         agent.hook("Stop" if current == "done" else "PostCompact")
     assert state(agent) == current
-    assert "◐" in glyph(server, agent)
+    assert "◐" in glyph(server, agent) and "\u3099" not in glyph(server, agent)
     stop(agent, "x")
     assert "◐" not in glyph(server, agent)

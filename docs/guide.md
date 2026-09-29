@@ -50,7 +50,8 @@ when you resize, attach or switch sessions.
 | `▲` | needs you | waiting for a permission, an answer to a question, or your approval of a plan |
 | `✓` | done | finished, and you haven't looked at it yet |
 | `○` | idle | finished and seen, or not started yet |
-| `◐` | background | its turn ended but work it started is still running: subagents or local shell executions (Claude and Codex) |
+| `◐` | background | its turn ended but subagents it started are still running |
+| `○゙` `◐゙` | background | the dakuten (the two strokes): local shell executions it started are still running (Claude and Codex), with or without subagents |
 | `↻` | compacting | summarizing its context |
 | `✗` | error | its turn stopped on an API error or a rate limit |
 | `◇` | untracked | a Claude or Codex that doesn't report (see below) |

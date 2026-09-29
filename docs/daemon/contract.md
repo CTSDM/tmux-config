@@ -154,7 +154,9 @@ order from `sort` under the user's locale (en_US.UTF-8); under `C` it would
 put upper case first.
 **A3.** Subagents are per agent session (sid): H1 and H11 forget them.
 **A4.** While subagents run, a pane in `done`, `idle` or `ready` shows `◐`
-(formats); for the effects, "subagents running" suppresses the done sound and
+(formats); while background shells run (`@agent_bg`) it shows `○`, and either
+circle carries a combining dakuten (U+3099: `○゙`, `◐゙`) while shells run. For
+the effects, "subagents running" suppresses the done sound and
 notification (§8, §11).
 
 ## 6. Codex

@@ -205,19 +205,23 @@ impl Pane {
 
     /// `@agent-glyph`, as agents.conf defines it.
     fn glyph(&self) -> String {
-        let base = match self.state.as_str() {
-            "needs" => "#[fg=#{@ac-needs}]▲",
-            "error" => "#[fg=#{@ac-error}]✗",
-            "working" => "#[fg=#{@ac-working}]●",
-            "compacting" => "#[fg=#{@ac-compact}]↻",
-            _ if self.background() => "#[fg=#{@ac-working}]◐",
-            "done" => "#[fg=#{@ac-done}]✓",
+        let mut glyph = match self.state.as_str() {
+            "needs" => "#[fg=#{@ac-needs}]▲".to_string(),
+            "error" => "#[fg=#{@ac-error}]✗".to_string(),
+            "working" => "#[fg=#{@ac-working}]●".to_string(),
+            "compacting" => "#[fg=#{@ac-compact}]↻".to_string(),
+            // ◐ for subagents, else ○, with a dakuten (U+3099) for shells.
+            _ if self.background() => {
+                let circle = if positive(&self.subs) { "◐" } else { "○" };
+                let shells = if positive(&self.bg) { "\u{3099}" } else { "" };
+                format!("#[fg=#{{@ac-working}}]{circle}{shells}")
+            }
+            "done" => "#[fg=#{@ac-done}]✓".to_string(),
             // `#{@agent}` is true unless empty or 0.
-            _ if !self.agent.is_empty() && self.agent != "0" => "#[fg=#{@ac-idle}]○",
-            _ if self.untracked => "#[fg=#{@ac-dim}]◇",
-            _ => "",
+            _ if !self.agent.is_empty() && self.agent != "0" => "#[fg=#{@ac-idle}]○".to_string(),
+            _ if self.untracked => "#[fg=#{@ac-dim}]◇".to_string(),
+            _ => String::new(),
         };
-        let mut glyph = base.to_string();
         if positive(&self.subs) {
             glyph.push_str(&format!("#[fg=#{{@ac-dim}}]+{}", self.subs));
         }
@@ -376,9 +380,17 @@ mod tests {
         // Background work wins over done and idle, not over needs or working.
         let mut bg = pane("claude", "done");
         bg.bg = "2".into();
-        assert_eq!(g(bg.clone()), "#[fg=#{@ac-working}]◐");
+        assert_eq!(g(bg.clone()), "#[fg=#{@ac-working}]○\u{3099}");
+        // ◐ is for subagents; the dakuten, for shells.
+        bg.subs = "1".into();
+        assert_eq!(
+            g(bg.clone()),
+            "#[fg=#{@ac-working}]◐\u{3099}#[fg=#{@ac-dim}]+1"
+        );
+        bg.bg = "0".into();
+        assert_eq!(g(bg.clone()), "#[fg=#{@ac-working}]◐#[fg=#{@ac-dim}]+1");
         bg.state = "needs".into();
-        assert_eq!(g(bg), "#[fg=#{@ac-needs}]▲");
+        assert_eq!(g(bg), "#[fg=#{@ac-needs}]▲#[fg=#{@ac-dim}]+1");
         // Subagents add their count.
         let mut subs = pane("claude", "working");
         subs.subs = "2".into();

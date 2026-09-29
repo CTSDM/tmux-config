@@ -157,7 +157,9 @@ processes started through Claude's shell snapshot (`shell-snapshots/snapshot-`
 in the command line, which MCP servers and other children lack); if there are
 any, `agent-bgwatch` rechecks every 2 s and keeps `@agent_bg` until they are
 gone. `agent-reconcile` starts a missing watcher (after a reload, say). The
-formats treat `@agent_bg` like `@agent_subs`: `◐`, counted as working.
+formats treat `@agent_bg` like `@agent_subs` (counted as working), but draw
+it as a combining dakuten (U+3099) on the circle: `○゙`, or `◐゙` with
+subagents. It keeps the glyph one cell wide; the spacing `゛` takes two.
 Codex's observer also maintains `@agent_bg`: it finds execution roots with the
 thread's `CODEX_THREAD_ID` and a new Unix session, then counts each root and its
 descendants once (including nested bubblewrap/sandbox processes). PID/starttime

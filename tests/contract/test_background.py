@@ -120,7 +120,8 @@ def test_A4_background_glyph_while_shells_run(server: TmuxServer) -> None:
     agent.hook("Stop")
     wait_bg(agent, "1")
     glyph = lambda: server.tmux("display", "-p", "-t", agent.pane, "#{E:@agent-glyph}")  # noqa: E731
-    assert "◐" in glyph()
+    # ○ with a dakuten: shells, no subagents (◐ is for subagents)
+    assert "○\u3099" in glyph() and "◐" not in glyph()
     agent.signal(shell)
     wait_bg(agent, "")
     assert "✓" in glyph()
