@@ -60,7 +60,9 @@ describe() {
   local shells_note=
   ((${bg:-0} > 0)) && shells_note="$bg shell$( ((bg > 1)) && echo s) still running"
   if ((subs > 0 || ${bg:-0} > 0)) && [[ $state == done || $state == idle || $state == ready ]]; then
-    glyph=◐ color=$C_WORKING rank=3
+    glyph=○ color=$C_WORKING rank=3
+    ((subs > 0)) && glyph=◐
+    ((${bg:-0} > 0)) && glyph+=$'\u3099' # dakuten: shells still running
     if ((subs > 0)); then summary="waiting on subagents"; else summary=$shells_note shells_note=; fi
   fi
   summary+=$subs_note${shells_note:+ · $shells_note}

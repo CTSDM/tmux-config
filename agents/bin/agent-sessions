@@ -22,7 +22,11 @@ glyph() { # <state> <subs> <background shells>: the pane's glyph, colored as on 
     working) printf '%s●' "$C_WORKING" ;;
     compacting) printf '%s↻' "$C_COMPACT" ;;
     *)
-      if ((subs > 0 || bg > 0)); then printf '%s◐' "$C_WORKING"
+      if ((subs > 0 || bg > 0)); then # ◐ subagents, a dakuten for shells
+        local g=○ d=
+        ((subs > 0)) && g=◐
+        ((bg > 0)) && d=$'\u3099'
+        printf '%s%s%s' "$C_WORKING" "$g" "$d"
       elif [[ $state == done ]]; then printf '%s✓' "$C_DONE"
       elif [[ -n $state ]]; then printf '%s○' "$C_IDLE"
       fi ;;
