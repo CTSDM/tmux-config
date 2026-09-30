@@ -244,6 +244,9 @@ async fn serve(
         .events
         .line("-", "agentd", &format!("start pid={}", std::process::id()));
     spawn_local(daemon.clone().saver());
+    if let Some(link) = daemon.effects_env.link.clone() {
+        spawn_local(link.keep());
+    }
     // Phase 4: attach our control client now (spike-control-mode.md, case k).
     daemon.tmux.attach();
     spawn_local(daemon.clone().sessions());

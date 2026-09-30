@@ -292,7 +292,7 @@ it doesn't have:
 
   ```
   Host <server>
-      RemoteForward /run/user/<uid on the server>/tmux-agents/bridge.sock /run/user/%i/tmux-agents/desktop.sock
+      RemoteForward /run/user/<uid on the server>/agentd-bridge.sock /run/user/%i/tmux-agents/desktop.sock
   ```
 
 - **On the server,** agentd, the config and the hooks as usual (tmux 3.7,
@@ -306,12 +306,24 @@ it doesn't have:
   your local tmux.
 - **A click** selects the pane on the server and raises the kitty window the
   ssh runs in (Hyprland).
-- **Without the bridge** (no forward, ssh gone) agentd on the server works as
-  on a desktop: the bar and borders are all you get.
+- **While the ssh is gone** (the laptop sleeps, the network drops) the
+  server keeps its notifications for you: when you connect again, the ones
+  still open show up, and the ones that were answered meanwhile are closed.
+  Sounds from that time are not played late. A connection that died without
+  closing (a suspended laptop) is noticed within a minute.
+- **Without any bridge** (the server never saw one since agentd started)
+  agentd there works as on a desktop: the bar and borders are all you get.
 - **"remote port forwarding failed"** on reconnecting: sshd keeps the socket
   of the previous connection unless the server has `StreamLocalBindUnlink
-  yes` in `sshd_config`. agentd removes a dead one the next time it has
-  something to send.
+  yes` in `sshd_config`. Without it (no root), agentd removes that dead
+  socket within seconds of the ssh going, so usually only a very quick
+  reconnect meets it.
+- **What a server can do through it:** root there, and anything running as
+  you there (your agents included), can show you notifications labelled
+  with that server and play your own sounds (only from your sounds folder,
+  at most at full volume). Nothing else: no commands on your desktop, no
+  other host's notifications. Forward it only to servers you trust that
+  much, and only to `/run/user/<uid>`, never to a shared folder.
 - **After logging out**, `/run/user/<uid>` goes away with agentd's socket
   unless the user lingers (`loginctl enable-linger <user>`); tmux itself
   keeps running.

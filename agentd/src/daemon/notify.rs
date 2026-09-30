@@ -52,6 +52,9 @@ pub struct Notifier {
     markup: Cell<bool>,
     /// Instead of agent-jump (the desktop bridge's clicks go back).
     on_click: Option<OnClick>,
+    /// A notification dismissed or expired (the desktop bridge tells its
+    /// daemon).
+    on_closed: Option<OnClick>,
     /// The desktop bridge, tried before D-Bus.
     link: Option<Rc<Link>>,
     save: Rc<Notify>,
@@ -67,12 +70,18 @@ impl Notifier {
         let ids = Rc::new(RefCell::new(ids));
         let jump = Rc::new(RefCell::new((String::new(), String::new())));
         if let Some(link) = &link {
-            let (ids, jump, save) = (ids.clone(), jump.clone(), save.clone());
+            let (open, jump_to, saving) = (ids.clone(), jump.clone(), save.clone());
             link.on_click(Rc::new(move |pane: &str| {
-                if ids.borrow_mut().remove(pane).is_some() {
-                    save.notify_one();
-                    let (bin, tmux) = jump.borrow().clone();
+                if open.borrow_mut().remove(pane).is_some() {
+                    saving.notify_one();
+                    let (bin, tmux) = jump_to.borrow().clone();
                     clicked(&bin, &tmux, pane);
+                }
+            }));
+            let (open, saving) = (ids.clone(), save.clone());
+            link.on_closed(Rc::new(move |pane: &str| {
+                if open.borrow_mut().remove(pane).is_some() {
+                    saving.notify_one();
                 }
             }));
         }
@@ -88,6 +97,7 @@ impl Notifier {
             jump,
             markup: Cell::new(false),
             on_click: None,
+            on_closed: None,
             link,
             save,
         }
@@ -96,6 +106,11 @@ impl Notifier {
     /// Clicks go to `f` (with the pane) instead of agent-jump.
     pub fn on_click(&mut self, f: OnClick) {
         self.on_click = Some(f);
+    }
+
+    /// Dismissed and expired notifications' panes go to `f`.
+    pub fn on_closed(&mut self, f: OnClick) {
+        self.on_closed = Some(f);
     }
 
     /// A made-up id, as a notification server keeps the one it replaces.
@@ -318,6 +333,7 @@ impl Notifier {
         let mut closed = proxy.receive_signal("NotificationClosed").await?;
         let (ids, jump, save) = (self.ids.clone(), self.jump.clone(), self.save.clone());
         let on_click = self.on_click.clone();
+        let on_closed = self.on_closed.clone();
         tokio::task::spawn_local(async move {
             loop {
                 tokio::select! {
@@ -337,8 +353,11 @@ impl Notifier {
                     }
                     Some(msg) = next(&mut closed) => {
                         let Ok((id, _reason)) = msg.body().deserialize::<(u32, u32)>() else { continue };
-                        if forget(&ids, id).is_some() {
+                        if let Some(pane) = forget(&ids, id) {
                             save.notify_one();
+                            if let Some(f) = &on_closed {
+                                f(&pane);
+                            }
                         }
                     }
                     else => break,
