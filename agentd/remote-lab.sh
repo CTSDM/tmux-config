@@ -59,6 +59,10 @@ start() {
     build
     if ! t has-session 2>/dev/null; then
         t -f "$here/../tmux.conf" new-session -d -s lab -c "$HOME"
+    elif [[ $(t show -gqv @agents_bin) != "$here/../agents/bin" ]]; then
+        # Another config was loaded since (the live one's prefix R, before
+        # it reloaded its own file): this checkout's scripts again.
+        t source-file "$here/../tmux.conf"
     fi
     # For ctl seen, reconcile and the blink, until a reload sets it back.
     t set -g @agentd "$bin"
