@@ -42,6 +42,10 @@ pub struct Remote {
     pub name: String,
     /// The agent's pid there, as the holder's I4 found it.
     pub agent: u32,
+    /// An event already shown in another pane, sent again so a new pane
+    /// shows the agent's state: its option writes only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay: bool,
 }
 
 /// I5: a session Claude Code runs in the background, shown by the `claude`

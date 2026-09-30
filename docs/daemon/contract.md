@@ -75,8 +75,9 @@ Here, instead of I4: the walk from `agentd remote` (the request's chain)
 reaches `pane_pid` within 13 processes, none of them named `claude` or
 `codex`. The event then counts as the pane agent's, with no local agent
 process: B1, B2, H5b and E2's transcript check see nothing, and E2 leaves a
-pane whose `@agent_remote` is set alone. Codex events from a remote pane are
-dropped. Bash has no remote panes.
+pane whose `@agent_remote` is set alone. An event marked `replay` (sent
+again for a new pane) only writes its options: no sound, notification,
+reminder or blink. Codex events from a remote pane are dropped. Bash has no remote panes.
 
 ## 2. Pane options (the output)
 

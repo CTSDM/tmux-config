@@ -719,6 +719,7 @@ impl Daemon {
             self.sweep(&read.others);
         }
         let remote = request.remote.is_some();
+        let replay = request.remote.as_ref().is_some_and(|r| r.replay);
         if remote && kind == Kind::Codex {
             // I6: Codex's facts (rollout, /proc) are on the other host.
             let what = format!("{} ignored:remote-codex", eventlog::hook(&request.event));
@@ -776,11 +777,12 @@ impl Daemon {
             agent_pid,
             observing: false,
         };
-        let (batch, ops) = self.run_core(&input, &facts, &read).await;
+        let (batch, ops) = self.run_core(&input, &facts, &read, replay).await;
         let what = format!(
             "{}{} {}",
             eventlog::hook(&request.event),
             match (request.parked.is_some(), remote) {
+                (_, true) if replay => " remote replay",
                 (_, true) => " remote",
                 (true, _) => " parked",
                 _ => "",
@@ -793,12 +795,14 @@ impl Daemon {
 
     /// The core on one event, then everything up to the ack: the close that
     /// must come first, the writes, the timers, observation. Returns the
-    /// effects left for the effect queue, and the writes made.
+    /// effects left for the effect queue, and the writes made. `quiet`: the
+    /// writes only (I6, an event replayed for a new pane).
     async fn run_core(
         self: &Rc<Self>,
         input: &Input,
         facts: &Facts,
         read: &Read,
+        quiet: bool,
     ) -> (Batch, Vec<core::Op>) {
         let mut effects = {
             let mut state = self.state.borrow_mut();
@@ -809,7 +813,10 @@ impl Daemon {
                 state.rounds.clone(),
                 state.codex.get(&input.pane).cloned(),
             );
-            let effects = core::handle(&mut state, input, facts);
+            let mut effects = core::handle(&mut state, input, facts);
+            if quiet {
+                effects.retain(|e| matches!(e, Effect::Options(_)));
+            }
             if (
                 &state.subagents,
                 &state.rounds,
@@ -1216,7 +1223,7 @@ impl Daemon {
             agent_pid: agent,
             observing: true,
         };
-        let (batch, ops) = self.run_core(&input, &facts, read).await;
+        let (batch, ops) = self.run_core(&input, &facts, read, false).await;
         if via != "observe" || eventlog::changes(&read.pane, &ops) {
             let gone = if gone { " agent-gone" } else { "" };
             let t = eventlog::transition(&read.pane, &ops);
@@ -1313,7 +1320,7 @@ impl Daemon {
                 observing: false,
             };
             let facts = self.facts(&read, None, 0, None);
-            let (batch, ops) = self.run_core(&input, &facts, &read).await;
+            let (batch, ops) = self.run_core(&input, &facts, &read, false).await;
             let t = eventlog::transition(p, &ops);
             self.events
                 .line(pane, "claude", &format!("reconcile agent-gone {t}"));

@@ -337,9 +337,10 @@ tmux new-session -s api 'agentd remote <server> api'
   installed as usual (`agents/install --agentd`), and ssh without a password
   prompt is best (a key, or `ControlMaster` to share one connection).
   `-` as the server holds the shell on this machine (to try it out).
-- Not yet: Codex (its events are dropped), background shells,
-  reconnecting after a local reboot restores the screen but the glyph only
-  comes back with the agent's next event.
+- In a new pane (another window, after a reboot) it comes back with its
+  screen and its agent's state, without sounding again. Taking it in one
+  pane lets it go in the other.
+- Not yet: Codex (its events are dropped), background shells.
 
 ## Install, uninstall
 

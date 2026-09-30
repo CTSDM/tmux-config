@@ -205,18 +205,34 @@ fn a_new_pane_gets_the_screen_back() {
     attached(&mut a);
     a.input("echo first-$((1+1))\n");
     assert!(a.output_has("first-2"));
-    // Another pane takes it: the first is told, the second gets everything.
+    a.input(&hook_keys("SessionStart", "0"));
+    let (_, live) = a.until(|k, _, _| k == EVENT).unwrap();
+    assert_eq!(json_of(&live)["remote"].get("replay"), None);
+    // Another pane takes it: the first is told, the second gets everything,
+    // and the agent's events again, to show its state.
     let mut b = lab.attach("web", None);
     let (kind, why) = a.until(|k, _, _| k == DETACHED).unwrap();
     assert_eq!(kind, DETACHED);
     assert_eq!(json_of(&why)["why"], "attached somewhere else");
     let hello = attached(&mut b);
     assert_eq!(hello, json!({"new": false, "at": 0}));
+    let (_, again) = b.until(|k, _, _| k == EVENT).unwrap();
+    let again = json_of(&again);
+    assert_eq!(again["event"]["hook_event_name"], "SessionStart");
+    assert_eq!(again["remote"]["replay"], true);
     assert!(b.output_has("first-2"));
+    // A reconnect of the same pane: no replay.
+    let have = b.shown.len() as u64;
+    b.drop_connection();
+    let mut c = lab.attach("web", Some(have));
+    attached(&mut c);
+    c.input("echo third\n");
+    assert!(c.output_has("third"));
+    assert!(c.frames.try_iter().all(|(k, _)| k != EVENT));
     let list = lab.command(&["hold"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&list.stdout), "web\tattached\n");
-    b.input("exit\n");
-    b.until(|k, _, _| k == EXIT).unwrap();
+    c.input("exit\n");
+    c.until(|k, _, _| k == EXIT).unwrap();
 }
 
 #[test]

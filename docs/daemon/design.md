@@ -218,7 +218,10 @@ local agentd daemon                             └── agentd hook claude (AG
   (`window-style`) and the status line says it once; ctrl-c or ctrl-d
   gives up, the shell stays held. On attach it sends that count, and the holder replays what the
   pane missed, if it still has it; a new pane (count absent) gets the whole
-  buffer from its first full line. Either way the holder then resizes the
+  buffer from its first full line, and before it the events of the agent's
+  session (since its SessionStart) again, marked `replay`: the daemon only
+  writes their options, so the pane shows the agent's state without a
+  second sound or notification. Either way the holder then resizes the
   pty one column narrower and back, so a TUI draws its screen again (over
   the "connection lost" line). Events kept while nobody was attached go
   down before the output.
@@ -237,7 +240,8 @@ Not yet: Codex on a remote pane (its facts are the rollout file and /proc,
 on the server: events are dropped), B1/B2/H5b there (the holder could count
 the shells and send them), parked sessions (I5) there, peek and the
 transcript-based reconcile, rebuilding the local sessions after a local
-reboot from `agentd hold`'s list, and a remote pane in the `prefix N` form.
+reboot from `agentd hold`'s list (each one comes back by hand, with its
+screen and state), and a remote pane in the `prefix N` form.
 
 ## Test seams (both implementations)
 

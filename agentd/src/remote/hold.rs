@@ -39,8 +39,10 @@ use crate::proto::{HookRequest, Remote};
 
 /// What a new pane gets back of the program's screen.
 const KEEP_OUTPUT: usize = 1 << 20;
-/// Events kept while nobody is attached; the oldest go first.
+/// Events kept while nobody is attached, and events of the agent's session
+/// for a new pane; the oldest go first.
 const KEEP_EVENTS: usize = 1000;
+const KEEP_HISTORY: usize = 2000;
 /// A program that exited waits this long for a client to hear it.
 const KEEP_EXITED: Duration = Duration::from_secs(24 * 3600);
 /// A client that takes longer to read a frame is dropped: it comes back and
@@ -245,6 +247,7 @@ pub fn serve(name: &str) -> ExitCode {
             client: None,
             ring: Ring::new(KEEP_OUTPUT),
             events: VecDeque::new(),
+            history: VecDeque::new(),
             program: None,
             exit: None,
         }),
@@ -278,7 +281,10 @@ struct Shared {
     client: Option<(u64, UnixStream)>,
     ring: Ring,
     /// Events for the next client.
-    events: VecDeque<Vec<u8>>,
+    events: VecDeque<HookRequest>,
+    /// The events a client got since the agent's session started: a new
+    /// pane gets them again, to show its state.
+    history: VecDeque<HookRequest>,
     /// The pty's master and the program's pid, once started.
     program: Option<(File, u32)>,
     exit: Option<i32>,
@@ -359,11 +365,21 @@ impl Holder {
             let redraw = !new;
             let mut stream = stream;
             let attached = json!({"new": new, "at": at});
+            let replay: Vec<&HookRequest> = if hello.have.is_none() {
+                s.history.iter().collect()
+            } else {
+                Vec::new()
+            };
             let sent = frame::write(&mut stream, ATTACHED, attached.to_string().as_bytes())
+                .and_then(|()| {
+                    replay
+                        .into_iter()
+                        .try_for_each(|e| send_event(&mut stream, e, true))
+                })
                 .and_then(|()| {
                     s.events
                         .iter()
-                        .try_for_each(|e| frame::write(&mut stream, EVENT, e))
+                        .try_for_each(|e| send_event(&mut stream, e, false))
                 })
                 .and_then(|()| {
                     missed
@@ -373,7 +389,10 @@ impl Holder {
             if sent.is_err() {
                 return;
             }
-            s.events.clear();
+            let delivered: Vec<HookRequest> = s.events.drain(..).collect();
+            for e in delivered {
+                remember(&mut s, e);
+            }
             if let Some(code) = s.exit {
                 let _ = frame::write(
                     &mut stream,
@@ -529,22 +548,22 @@ impl Holder {
             host: String::new(),
             name: self.name.clone(),
             agent,
+            replay: false,
         });
-        let Ok(event) = serde_json::to_vec(&request) else {
-            return;
-        };
         let sent = match s.client.as_mut() {
-            Some((_, client)) => frame::write(client, EVENT, &event).is_ok(),
+            Some((_, client)) => send_event(client, &request, false).is_ok(),
             None => false,
         };
-        if !sent {
+        if sent {
+            remember(&mut s, request);
+        } else {
             if let Some((_, client)) = s.client.take() {
                 let _ = client.shutdown(std::net::Shutdown::Both);
             }
             if s.events.len() >= KEEP_EVENTS {
                 s.events.pop_front();
             }
-            s.events.push_back(event);
+            s.events.push_back(request);
         }
         drop(s);
         reply(&mut stream, json!({"ok": true}));
@@ -555,6 +574,27 @@ impl Holder {
         let _ = fs::remove_file(&self.lock);
         std::process::exit(0)
     }
+}
+
+fn send_event(stream: &mut UnixStream, event: &HookRequest, replay: bool) -> io::Result<()> {
+    let mut event = event.clone();
+    if let Some(remote) = event.remote.as_mut() {
+        remote.replay = replay;
+    }
+    frame::write(stream, EVENT, &serde_json::to_vec(&event)?)
+}
+
+/// A delivered event, for the next new pane. The agent's (not a
+/// subagent's) SessionStart begins them again: what came before it no
+/// longer shows.
+fn remember(s: &mut Shared, event: HookRequest) {
+    if event.event.ev == "SessionStart" && event.event.agent_id.is_empty() {
+        s.history.clear();
+    }
+    if s.history.len() >= KEEP_HISTORY {
+        s.history.pop_front();
+    }
+    s.history.push_back(event);
 }
 
 /// Resizes the pty one column narrower and back: two SIGWINCH, and a TUI

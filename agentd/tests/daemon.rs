@@ -1612,9 +1612,20 @@ fn l1_the_top_rows_values_follow_the_panes() {
 
 /// I6: a remote pane's event, as its `agentd remote` (the chain) sends it.
 fn remote_hook(server: &Server, pane: &str, kind: &str, chain: Value, event: Value) -> Value {
+    remote_event(server, pane, kind, chain, event, false)
+}
+
+fn remote_event(
+    server: &Server,
+    pane: &str,
+    kind: &str,
+    chain: Value,
+    event: Value,
+    replay: bool,
+) -> Value {
     server.call(json!({
-        "v": 1, "kind": kind, "pane": pane, "event": event, "chain": chain,
-        "env": {}, "t": 0, "remote": {"host": "box", "name": "api", "agent": 4242},
+        "v": 1, "kind": kind, "pane": pane, "event": event, "chain": chain, "env": {}, "t": 0,
+        "remote": {"host": "box", "name": "api", "agent": 4242, "replay": replay},
     }))
 }
 
@@ -1663,4 +1674,42 @@ fn i6_remote_events_are_the_panes_own_and_reconcile_leaves_them() {
     );
     assert!(log.contains("ignored:remote-codex"), "{log}");
     assert!(log.contains("reconcile remote"), "{log}");
+}
+
+#[test]
+fn i6_a_replayed_event_writes_the_state_and_nothing_else() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane();
+    let pane_pid: u64 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    let chain = json!([[pane_pid, "agentd", 0]]);
+    let sink = server.runtime.join("sink.jsonl");
+    for name in ["SessionStart", "UserPromptSubmit", "Stop"] {
+        remote_event(&server, &pane, "claude", chain.clone(), ev(name), true);
+    }
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]),
+        "done"
+    );
+    sleep(Duration::from_millis(300));
+    let shown = fs::read_to_string(&sink).unwrap_or_default();
+    assert!(!shown.contains("notify"), "{shown}");
+    // Live again: the next turn's end notifies as usual.
+    remote_event(
+        &server,
+        &pane,
+        "claude",
+        chain.clone(),
+        ev("UserPromptSubmit"),
+        false,
+    );
+    remote_event(&server, &pane, "claude", chain, ev("Stop"), false);
+    wait_for("the notification", || {
+        fs::read_to_string(&sink).is_ok_and(|s| s.contains("\"notify\""))
+    });
 }
