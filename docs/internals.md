@@ -245,16 +245,37 @@ advertises `body-markup` (mako does), the body is escaped, or a command with
 `&&` or `<` in it would be read as markup; the title never is.
 
 **The desktop bridge** (`daemon/bridge.rs`): before D-Bus and the sound
-player, a daemon tries `$XDG_RUNTIME_DIR/tmux-agents/bridge.sock`, which
-only exists when ssh forwards `agentd bridge`'s `desktop.sock` from a
-desktop. One JSON object per line: the daemon sends `hello` (its
-`host/server` and `$USER`), then `notify`, `close` and `sound`; the bridge
-sends `clicked` back. The bridge keys notifications by `host/server pane`,
-so a daemon that reconnects can still close its own, and plays sounds with
-its own sound folder and debounce. A connection refused means a socket left
-by a closed ssh (sshd's `StreamLocalBindUnlink no`): the daemon deletes it so
-the next ssh can bind. Tests never meet it: with `AG_SINK` set there is no
-bridge.
+player, a daemon uses `$XDG_RUNTIME_DIR/agentd-bridge.sock`, which only
+exists when ssh forwards `agentd bridge`'s `desktop.sock` from a desktop (in
+the runtime folder itself, which exists at login: sshd binds the forward
+before any agentd ran). The daemon looks for it every 5 s and stays
+connected. One JSON object per line, at most 16 KiB, protocol version 2 in
+both hellos:
+
+- daemon → desktop: `hello` (version, `host/server`, `$USER`), `sync` (the
+  panes of its open notifications), those notifications again, then
+  `notify`, `close`, `sound`, and `ping` every 20 s;
+- desktop → daemon: `hello` (version), `pong`, `clicked`, `closed`
+  (dismissed or expired there).
+
+The desktop keys notifications by `user@host/server pane`, so a daemon that
+reconnects closes its own, and two daemons of one host never share keys.
+Once a daemon has had a bridge, its notifications wait for it (it keeps the
+last one of each pane) instead of going to a D-Bus the server doesn't have;
+on reconnecting, `sync` closes on the desktop what was closed meanwhile.
+Sounds from that time are dropped. A v2 desktop not heard from for 60 s is
+gone (an ssh that died with a sleeping laptop stays open on the server): the
+daemon connects again.
+
+A connection refused means a socket left by a closed ssh (sshd's
+`StreamLocalBindUnlink no`): the daemon deletes it so the next ssh can bind,
+only if it is still the same socket (same inode: not one a new ssh bound
+meanwhile). A socket whose peer is another user (a shared `/tmp`) gets
+nothing. On the desktop, what a server says is checked: names
+(`[A-Za-z0-9._-]`, pane ids `%n`), texts without control characters and cut
+to 300 characters, sound names without paths (`sound::file`), volume at
+most 1. A failed `accept` waits and goes on. Tests never meet a bridge:
+with `AG_SINK` set there is none.
 
 ## Sounds
 

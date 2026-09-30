@@ -190,7 +190,7 @@ UNIT
     # A new binary: the running bridge picks it up.
     systemctl --user restart agentd-bridge.service
     ok "Desktop bridge running (agentd-bridge.service). For a server, in ~/.ssh/config under its Host:"
-    echo "      RemoteForward /run/user/<uid on the server>/tmux-agents/bridge.sock /run/user/%i/tmux-agents/desktop.sock"
+    echo "      RemoteForward /run/user/<uid on the server>/agentd-bridge.sock /run/user/%i/tmux-agents/desktop.sock"
 fi
 
 # --- 3b. Agent hooks (Claude Code, Codex) ------------------------------------

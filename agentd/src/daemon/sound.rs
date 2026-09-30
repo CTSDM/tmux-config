@@ -58,8 +58,17 @@ pub fn priority(name: &str) -> u8 {
     }
 }
 
-/// The first readable `<name>.<ext>` in the folder.
+/// The first readable `<name>.<ext>` in the folder. Only a plain name: one
+/// that comes over the desktop bridge must not reach another folder.
 pub fn file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let plain = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    if !plain {
+        return None;
+    }
     EXTENSIONS
         .iter()
         .map(|ext| dir.join(format!("{name}.{ext}")))
@@ -343,6 +352,15 @@ mod tests {
         fs::write(dir.join("oh-man.mp3"), "").unwrap();
         fs::write(dir.join("oh-man.ogg"), "").unwrap();
         assert_eq!(file(&dir, "oh-man").unwrap(), dir.join("oh-man.ogg"));
+        // Only names: never another folder (a server's, over the bridge).
+        let outside = dir.join("out");
+        fs::create_dir_all(dir.join("in")).unwrap();
+        fs::write(outside.with_extension("wav"), "").unwrap();
+        let inside = dir.join("in");
+        assert!(file(&inside, "../out").is_none());
+        assert!(file(&inside, &outside.to_string_lossy()).is_none());
+        assert!(file(&dir, "Oh-Man").is_none());
+        assert!(file(&dir, "").is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 
