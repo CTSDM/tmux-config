@@ -282,6 +282,21 @@ pub fn owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32)
     None
 }
 
+/// I6: an event a remote pane's `agentd remote` passes on, from its own chain.
+/// The walk must reach `pane_pid` within 13 processes, none of them an agent
+/// (the agent runs on the other host).
+pub fn remote_owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32) -> bool {
+    for (pid, comm) in chain.into_iter().take(13) {
+        if comm == "claude" || comm == "codex" {
+            return false;
+        }
+        if pid == pane_pid {
+            return true;
+        }
+    }
+    false
+}
+
 /// Handles one hook event (or Codex observation).
 pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
     events::handle(state, input, facts)

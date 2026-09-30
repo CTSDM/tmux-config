@@ -1609,3 +1609,58 @@ fn l1_the_top_rows_values_follow_the_panes() {
     // Ours has none of them.
     assert_eq!(get("_peek-agentd:", "@s-other-untracked"), "");
 }
+
+/// I6: a remote pane's event, as its `agentd remote` (the chain) sends it.
+fn remote_hook(server: &Server, pane: &str, kind: &str, chain: Value, event: Value) -> Value {
+    server.call(json!({
+        "v": 1, "kind": kind, "pane": pane, "event": event, "chain": chain,
+        "env": {}, "t": 0, "remote": {"host": "box", "name": "api", "agent": 4242},
+    }))
+}
+
+#[test]
+fn i6_remote_events_are_the_panes_own_and_reconcile_leaves_them() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane();
+    let pane_pid: u64 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    let state = |server: &Server| server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]);
+    // agentd remote is the pane's process: no agent on the way.
+    let chain = json!([[pane_pid, "agentd", 0]]);
+    remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
+    remote_hook(
+        &server,
+        &pane,
+        "claude",
+        chain.clone(),
+        ev("UserPromptSubmit"),
+    );
+    assert_eq!(state(&server), "working");
+    // A local agent on the way ran it: not the pane's.
+    let run_by_agent = json!([[1, "agentd", 0], [2, "claude", 0], [pane_pid, "zsh", 0]]);
+    remote_hook(&server, &pane, "claude", run_by_agent, ev("Stop"));
+    assert_eq!(state(&server), "working");
+    // Codex's facts are on the other host.
+    remote_hook(&server, &pane, "codex", chain, ev("Stop"));
+    assert_eq!(state(&server), "working");
+    // Reconcile finds no local agent, and leaves a remote pane alone...
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(state(&server), "working");
+    // ...until agentd remote has left it.
+    server.tmux(&["set", "-pu", "-t", &pane, "@agent_remote"]);
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(server.pane_options(&pane), Vec::<String>::new());
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(
+        log.contains("UserPromptSubmit remote ready->working"),
+        "{log}"
+    );
+    assert!(log.contains("ignored:remote-codex"), "{log}");
+    assert!(log.contains("reconcile remote"), "{log}");
+}

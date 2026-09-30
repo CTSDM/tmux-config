@@ -28,6 +28,20 @@ pub struct HookRequest {
     /// I5: the event of a parked session, which runs outside the pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked: Option<Parked>,
+    /// I6: the event of a remote pane, passed on by its `agentd remote`;
+    /// `chain` is then that process's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<Remote>,
+}
+
+/// I6: where a remote pane's event comes from (design.md, "Remote panes").
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Remote {
+    pub host: String,
+    /// The held session's name on that host.
+    pub name: String,
+    /// The agent's pid there, as the holder's I4 found it.
+    pub agent: u32,
 }
 
 /// I5: a session Claude Code runs in the background, shown by the `claude`

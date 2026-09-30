@@ -1,4 +1,4 @@
-//! The command line: one binary, five subcommands (design.md, "Shape").
+//! The command line: one binary, seven subcommands (design.md, "Shape").
 
 pub const USAGE: &str = "\
 usage: agentd hook claude|codex     the agent hook: event JSON on stdin
@@ -6,6 +6,10 @@ usage: agentd hook claude|codex     the agent hook: event JSON on stdin
        agentd ensure                start the daemon of this tmux server unless it runs
        agentd bridge                on the desktop: show and play what daemons on other hosts
                                     send over ssh (RemoteForward to their bridge.sock)
+       agentd remote <host> [name]  in a tmux pane: the shell <name> held on <host> (over ssh,
+                                    `-` for this host), as this pane; without a name, list them
+       agentd hold [name]           on that host: join the shell <name>, starting it if needed;
+                                    without a name, list the held shells
        agentd ctl <command> [args]  a request to the daemon: seen <pane>, reconcile [panes],
                                     blink, blink-demo <session> <window> [secs], bar, status, stop";
 
@@ -19,9 +23,30 @@ pub enum Command {
     Daemon,
     Ensure,
     Bridge,
+    /// A remote pane's local end; no name: the host's held shells.
+    Remote {
+        host: String,
+        name: Option<String>,
+    },
+    Hold(Hold),
     Ctl {
         command: String,
         args: Vec<String>,
+    },
+}
+
+/// `agentd hold`, on the host of a remote pane.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Hold {
+    List,
+    /// What ssh runs: stdio joined to the holder.
+    Attach(String),
+    /// Internal: the holder itself.
+    Serve(String),
+    /// Internal: the held program, on its pty.
+    Exec {
+        pts: String,
+        program: Vec<String>,
     },
 }
 
@@ -32,6 +57,8 @@ impl Command {
             Command::Daemon => "daemon",
             Command::Ensure => "ensure",
             Command::Bridge => "bridge",
+            Command::Remote { .. } => "remote",
+            Command::Hold(_) => "hold",
             Command::Ctl { .. } => "ctl",
         }
     }
@@ -51,6 +78,31 @@ pub fn parse(args: &[String]) -> Option<Command> {
         "daemon" if rest.is_empty() => Some(Command::Daemon),
         "ensure" if rest.is_empty() => Some(Command::Ensure),
         "bridge" if rest.is_empty() => Some(Command::Bridge),
+        "remote" => match rest {
+            [host] => Some(Command::Remote {
+                host: host.clone(),
+                name: None,
+            }),
+            [host, name] => Some(Command::Remote {
+                host: host.clone(),
+                name: Some(name.clone()),
+            }),
+            _ => None,
+        },
+        "hold" => Some(Command::Hold(match rest {
+            [] => Hold::List,
+            [flag, name] if flag == "--serve" => Hold::Serve(name.clone()),
+            [flag, pts, dashes, program @ ..]
+                if flag == "--exec" && dashes == "--" && !program.is_empty() =>
+            {
+                Hold::Exec {
+                    pts: pts.clone(),
+                    program: program.to_vec(),
+                }
+            }
+            [name] if !name.starts_with('-') => Hold::Attach(name.clone()),
+            _ => return None,
+        })),
         "ctl" => {
             let (command, args) = rest.split_first()?;
             Some(Command::Ctl {
@@ -112,6 +164,43 @@ mod tests {
                 args: vec!["api".into(), "@3".into(), "5".into()],
             })
         );
+    }
+
+    #[test]
+    fn remote_and_hold() {
+        assert_eq!(
+            parse_str(&["remote", "box", "api"]),
+            Some(Command::Remote {
+                host: "box".into(),
+                name: Some("api".into())
+            })
+        );
+        assert_eq!(
+            parse_str(&["remote", "box"]),
+            Some(Command::Remote {
+                host: "box".into(),
+                name: None
+            })
+        );
+        assert_eq!(parse_str(&["remote"]), None);
+        assert_eq!(parse_str(&["hold"]), Some(Command::Hold(Hold::List)));
+        assert_eq!(
+            parse_str(&["hold", "api"]),
+            Some(Command::Hold(Hold::Attach("api".into())))
+        );
+        assert_eq!(
+            parse_str(&["hold", "--serve", "api"]),
+            Some(Command::Hold(Hold::Serve("api".into())))
+        );
+        assert_eq!(
+            parse_str(&["hold", "--exec", "/dev/pts/3", "--", "zsh", "-l"]),
+            Some(Command::Hold(Hold::Exec {
+                pts: "/dev/pts/3".into(),
+                program: vec!["zsh".into(), "-l".into()]
+            }))
+        );
+        assert_eq!(parse_str(&["hold", "--exec", "/dev/pts/3", "--"]), None);
+        assert_eq!(parse_str(&["hold", "--bogus"]), None);
     }
 
     #[test]

@@ -1285,6 +1285,23 @@ fn i4_the_panes_own_agent() {
 }
 
 #[test]
+fn i6_remote_panes_reach_the_pane_without_an_agent() {
+    // agentd remote <- zsh (pane_pid)
+    assert!(remote_owner(chain(&["agentd", "zsh"]), 101));
+    // agentd remote is the pane's process.
+    assert!(remote_owner(chain(&["agentd"]), 100));
+    // A local agent on the way: an agent ran it, not the pane.
+    assert!(!remote_owner(chain(&["agentd", "claude", "zsh"]), 102));
+    assert!(!remote_owner(chain(&["agentd", "codex"]), 101));
+    // Never reaches the pane, or too far.
+    assert!(!remote_owner(chain(&["agentd", "zsh"]), 999));
+    let mut names = vec!["sh"; 13];
+    names.push("zsh");
+    assert!(remote_owner(chain(&names), 112));
+    assert!(!remote_owner(chain(&names), 113));
+}
+
+#[test]
 fn c4_thirteen_processes_all_counted() {
     let mut names = vec!["sh"; 12];
     names[0] = "claude";

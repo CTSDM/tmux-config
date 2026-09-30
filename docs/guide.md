@@ -316,6 +316,31 @@ it doesn't have:
   unless the user lingers (`loginctl enable-linger <user>`); tmux itself
   keeps running.
 
+### Remote panes (experimental)
+
+The other way round: no tmux on the server, only agentd. A pane of your
+local tmux runs a shell held on the server, and its agents are local agents
+for the bar, the borders, the blink, `prefix u` and the notifications:
+
+```
+agentd remote <server> <name>      # in a pane, or as its command:
+tmux new-session -s api 'agentd remote <server> api'
+```
+
+- The shell `<name>` keeps running on the server when the connection drops,
+  the laptop sleeps or you close the pane. `agentd remote <server> <name>`
+  again (in any pane) brings it back with its screen; `agentd remote
+  <server>` lists them. It ends when you exit it.
+- A dropped connection retries by itself (the pane says so); ctrl-c stops
+  trying, the shell stays held.
+- The server needs agentd in its PATH or in `~/.local/bin`, its hooks
+  installed as usual (`agents/install --agentd`), and ssh without a password
+  prompt is best (a key, or `ControlMaster` to share one connection).
+  `-` as the server holds the shell on this machine (to try it out).
+- Not yet: Codex (its events are dropped), background shells,
+  reconnecting after a local reboot restores the screen but the glyph only
+  comes back with the agent's next event.
+
 ## Install, uninstall
 
 ```sh

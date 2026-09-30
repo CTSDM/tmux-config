@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +19,7 @@ use crate::identity;
 use crate::parked;
 use crate::procfs;
 use crate::proto::{HookRequest, Link, Parked, Request, VERSION};
+use crate::remote::{self, frame};
 
 /// A bigger payload is cut here; the fields we keep are short anyway.
 const MAX_PAYLOAD: u64 = 64 << 20;
@@ -43,10 +45,19 @@ pub fn run(kind: Option<Kind>) {
         .lock()
         .take(MAX_PAYLOAD)
         .read_to_end(&mut payload);
-    // I1: exactly claude or codex, inside tmux; I5: or a parked Claude session.
+    // I1: exactly claude or codex, inside tmux; I5: or a parked Claude
+    // session; I6: or held by `agentd hold`, for a remote pane.
     let Some(kind) = kind else {
         return;
     };
+    if env::var_os("TMUX").is_none_or(|v| v.is_empty())
+        && let Some(hold) = env::var_os(remote::HOLD_VAR).filter(|v| !v.is_empty())
+    {
+        if !identity::off() {
+            held(kind, &payload, started, Path::new(&hold));
+        }
+        return;
+    }
     let (tmux, pane, parked) = match (
         env::var_os("TMUX").filter(|v| !v.is_empty()),
         env::var("TMUX_PANE").ok().filter(|v| !v.is_empty()),
@@ -76,22 +87,9 @@ pub fn run(kind: Option<Kind>) {
     let Some(event) = event_from_json(&json) else {
         return;
     };
-    let chain = links(std::os::unix::process::parent_id());
-    let mut agent_env = BTreeMap::new();
-    if let Ok(dir) = env::var("CLAUDE_CONFIG_DIR") {
-        agent_env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
-    }
     let request = Request::Hook(Box::new(HookRequest {
-        v: VERSION,
-        kind,
-        pane,
-        event,
-        chain,
-        env: agent_env,
-        t: started
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64),
         parked,
+        ..request(kind, pane, event, started)
     }));
     let Some(paths) = client::paths(&tmux) else {
         return;
@@ -99,6 +97,50 @@ pub fn run(kind: Option<Kind>) {
     // No daemon after the budget: give up, reconciliation repairs it.
     if let Some(stream) = client::connect_or_start(&paths, START_BUDGET) {
         let _ = client::call(stream, &request, REPLY_TIMEOUT);
+    }
+}
+
+/// The request for an event, with the hook's parent chain.
+fn request(kind: Kind, pane: String, event: Event, started: SystemTime) -> HookRequest {
+    let mut agent_env = BTreeMap::new();
+    if let Ok(dir) = env::var("CLAUDE_CONFIG_DIR") {
+        agent_env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
+    }
+    HookRequest {
+        v: VERSION,
+        kind,
+        pane,
+        event,
+        chain: links(std::os::unix::process::parent_id()),
+        env: agent_env,
+        t: started
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as u64),
+        parked: None,
+        remote: None,
+    }
+}
+
+/// I6: a held agent's event goes to its holder, which checks I4 against the
+/// held program and passes it to the remote pane (remote/hold.rs). No pane
+/// here: the local end knows it.
+fn held(kind: Kind, payload: &[u8], started: SystemTime, hold: &Path) {
+    let Ok(json) = serde_json::from_str::<Value>(&String::from_utf8_lossy(payload)) else {
+        return;
+    };
+    let Some(event) = event_from_json(&json) else {
+        return;
+    };
+    let Ok(body) = serde_json::to_vec(&request(kind, String::new(), event, started)) else {
+        return;
+    };
+    let Ok(mut stream) = UnixStream::connect(hold) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(REPLY_TIMEOUT));
+    let _ = stream.set_read_timeout(Some(REPLY_TIMEOUT));
+    if frame::write(&mut stream, frame::HOOK, &body).is_ok() {
+        let _ = frame::read(&mut stream);
     }
 }
 

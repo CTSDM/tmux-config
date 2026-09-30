@@ -319,13 +319,15 @@ closed panes wait for the next news too.
 
 ## agentd
 
-**Shape.** One binary, four commands: `agentd hook claude|codex` (what the
+**Shape.** One binary; the main commands: `agentd hook claude|codex` (what the
 agents run: reads the event, keeps the fields the contract uses, sends them
 with its parent process chain to the daemon, waits for the ack; never prints,
 always exits 0), `agentd daemon`, `agentd ensure` (start it unless it runs)
-and `agentd ctl status|seen|reconcile|blink|blink-demo|bar|stop`. One daemon per
-tmux server: its files are `agentd-<socket name>-<hash>.{sock,lock,state.json}`
-in `$XDG_RUNTIME_DIR/tmux-agents/`; the lock makes a second one exit at once,
+and `agentd ctl status|seen|reconcile|blink|blink-demo|bar|stop`; `agentd
+bridge`, `agentd remote` and `agentd hold` are for other hosts (design.md,
+"Remote panes"). One daemon per tmux server: its files are
+`agentd-<socket name>-<hash>.{sock,lock,state.json}` in
+`$XDG_RUNTIME_DIR/tmux-agents/`; the lock makes a second one exit at once,
 and a pidfd on the tmux server makes it exit with the server. A hook that
 finds no daemon starts one and waits up to 300 ms. Inside, one thread: each
 pane has an event queue (its events in order; the ack goes out once its

@@ -718,15 +718,24 @@ impl Daemon {
         if want_panes {
             self.sweep(&read.others);
         }
-        let owner = match &request.parked {
-            None => core::owner(links(&request.chain), read.pane_pid),
+        let remote = request.remote.is_some();
+        if remote && kind == Kind::Codex {
+            // I6: Codex's facts (rollout, /proc) are on the other host.
+            let what = format!("{} ignored:remote-codex", eventlog::hook(&request.event));
+            self.events.line(&request.pane, kind.as_str(), &what);
+            return Ok(None);
+        }
+        let owner = match (&request.parked, remote) {
+            // I6: no local agent process, so nothing local looks at one.
+            (_, true) => core::remote_owner(links(&request.chain), read.pane_pid).then_some(0),
+            (None, false) => core::owner(links(&request.chain), read.pane_pid),
             // I5: the pane's agent shows the session, which sent the hook.
-            Some(p) => core::owner(links(&p.viewer), read.pane_pid)
+            (Some(p), false) => core::owner(links(&p.viewer), read.pane_pid)
                 .filter(|_| request.chain.iter().any(|(pid, _, _)| *pid == p.agent))
                 .map(|_| p.agent),
         };
         let Some(agent_pid) = owner else {
-            // I4
+            // I4, I6
             let what = format!("{} ignored:not-its-agent", eventlog::hook(&request.event));
             self.events.line(&request.pane, kind.as_str(), &what);
             return Ok(None);
@@ -736,7 +745,7 @@ impl Daemon {
         } else {
             None
         };
-        let bg_shells = if core::may_need_bg_shells(kind, ev) {
+        let bg_shells = if !remote && core::may_need_bg_shells(kind, ev) {
             procfs::count_children_matching(agent_pid, SNAPSHOT_SHELL)
         } else {
             0
@@ -771,10 +780,10 @@ impl Daemon {
         let what = format!(
             "{}{} {}",
             eventlog::hook(&request.event),
-            if request.parked.is_some() {
-                " parked"
-            } else {
-                ""
+            match (request.parked.is_some(), remote) {
+                (_, true) => " remote",
+                (true, _) => " parked",
+                _ => "",
             },
             eventlog::transition(&read.pane, &ops)
         );
@@ -1258,6 +1267,12 @@ impl Daemon {
         let read = self.tmux.read(pane, true, true).await?;
         let p = &read.pane;
         if p.agent.is_empty() {
+            return Ok(None);
+        }
+        if !read.remote.is_empty() {
+            // I6: its agent runs on another host; `agentd remote` reconciles
+            // the pane when it exits.
+            self.events.line(pane, &p.agent, "reconcile remote");
             return Ok(None);
         }
         let apid = procfs::agent_of(read.pane_pid);

@@ -13,3 +13,4 @@ pub mod identity;
 pub mod parked;
 pub mod procfs;
 pub mod proto;
+pub mod remote;
