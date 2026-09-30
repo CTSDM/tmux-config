@@ -284,12 +284,19 @@ Notifications and sounds come to your desktop through a bridge:
 server, where agentd sends them over it instead of to a notification server
 it doesn't have:
 
-```sh
-agentd bridge &     # on your machine, once
-kitten ssh -R /run/user/<server uid>/tmux-agents/bridge.sock:/run/user/$(id -u)/tmux-agents/desktop.sock <server>
-```
+- **On your machine,** `setup.sh` leaves the bridge running as a systemd
+  user service, `agentd-bridge` (without systemd, start `agentd bridge` when
+  you log in). It sits idle on a private socket until an ssh forwards it.
+- **For each server,** forward it in `~/.ssh/config`, and `kitten ssh
+  <server>` (or plain ssh) does the rest:
 
-(`RemoteForward` in `~/.ssh/config` does the same for every connection.)
+  ```
+  Host <server>
+      RemoteForward /run/user/<uid on the server>/tmux-agents/bridge.sock /run/user/%i/tmux-agents/desktop.sock
+  ```
+
+- **On the server,** agentd, the config and the hooks as usual (tmux 3.7,
+  see Install), plus the two settings below.
 
 - **You can tell where it comes from:** the title is `シ SSH · user@host`,
   the body the usual title in bold and the text. The app name is
