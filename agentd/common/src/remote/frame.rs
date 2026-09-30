@@ -49,8 +49,16 @@ pub fn write(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
     w.flush()
 }
 
+/// Keys, sizes, a hello, a hook's request, a question: all small.
+pub const SMALL: usize = 64 << 10;
+
 /// One frame; `None` when the stream ends cleanly before it.
 pub fn read(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
+    read_max(r, MAX)
+}
+
+/// One frame of at most `max` bytes, refused before it is read.
+pub fn read_max(r: &mut impl Read, max: usize) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut head = [0u8; 5];
     loop {
         match r.read(&mut head[..1]) {
@@ -62,7 +70,7 @@ pub fn read(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     }
     r.read_exact(&mut head[1..])?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
-    if len > MAX {
+    if len > max.min(MAX) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too big"));
     }
     let mut payload = vec![0u8; len];

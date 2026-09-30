@@ -735,8 +735,16 @@ impl Daemon {
             return Ok(None);
         }
         let owner = match (&request.parked, remote) {
-            // I6: no local agent process, so nothing local looks at one.
-            (_, true) => core::remote_owner(links(&request.chain), read.pane_pid).then_some(0),
+            // I6: no local agent process, so nothing local looks at one; and
+            // only a pane its `agentd remote` marked for that host and shell.
+            (_, true) => core::remote_owner(links(&request.chain), read.pane_pid)
+                .then_some(0)
+                .filter(|_| {
+                    request
+                        .remote
+                        .as_ref()
+                        .is_some_and(|r| read.remote == format!("{}:{}", r.host, r.name))
+                }),
             (None, false) => core::owner(links(&request.chain), read.pane_pid),
             // I5: the pane's agent shows the session, which sent the hook.
             (Some(p), false) => core::owner(links(&p.viewer), read.pane_pid)

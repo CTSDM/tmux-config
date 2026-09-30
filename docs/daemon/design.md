@@ -244,6 +244,16 @@ local agentd daemon                             └── agentd hook claude (AG
 - **Ends:** the held program exits → the holder sends its status, the
   client exits with it (the pane closes). Killing the local pane only
   detaches: the program keeps running on the server.
+- **Trust.** The holders' folder is private (0700, ours, never a link)
+  and every socket there answers only this user (`SO_PEERCRED`, checked on
+  both ends). Within the user nothing is hidden, as with tmux's socket: any
+  process of theirs can attach to a held shell and type into it, and every
+  program in it has `AGENTD_HOLD`. A hook is checked on its own chain,
+  read from /proc from the process that connected, never on the chain it
+  sends; the hook talks only to a socket in that folder. The server is
+  less trusted than the desktop: nothing of its events is taken as it came
+  (contract I6), frames are at most 256 KiB, and a host is never an ssh
+  option.
 - **Frames:** one type byte, a 4-byte big-endian length, the payload.
   Up: `H` hello (JSON: `term`, `rows`, `cols`, `have`, `dir`), `I` input, `R`
   resize (JSON). Down: `A` attached (JSON: `new`), `O` output, `E` event

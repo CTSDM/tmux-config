@@ -248,12 +248,24 @@ fn only_the_held_programs_agent_is_passed_on() {
     let lab = Lab::new();
     let mut a = lab.attach("ops", None);
     attached(&mut a);
-    // Not run from the held shell: I4 against the held program says no.
+    // Not run from the held shell, whatever chain it claims: even one with
+    // an agent on it that reaches the held shell's real pid. The holder
+    // walks the sender's own chain in /proc.
+    // Split so the echo of what is typed doesn't match.
+    a.input("echo \"p\"\"id:$$:\"\n");
+    assert!(a.output_has("pid:"));
+    let shown = String::from_utf8_lossy(&a.shown).into_owned();
+    let shell: u32 = shown
+        .rsplit("pid:")
+        .next()
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|n| n.parse().ok())
+        .expect("the shell's pid");
     let mut hook = UnixStream::connect(lab.hold().join("hold-ops.sock")).unwrap();
     hook.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let request = json!({
         "v": 1, "kind": "claude", "pane": "", "event": {"hook_event_name": "Stop"},
-        "chain": [[std::process::id(), "claude", 0]], "env": {}, "t": 0,
+        "chain": [[424242, "claude", 1], [shell, "sh", 2]], "env": {}, "t": 0,
     });
     frame::write(&mut hook, HOOK, request.to_string().as_bytes()).unwrap();
     let (kind, reply) = frame::read(&mut hook).unwrap().unwrap();

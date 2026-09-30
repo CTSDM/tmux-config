@@ -19,7 +19,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +35,7 @@ use super::frame::{
 };
 use super::{HOLD_VAR, Ring};
 use crate::ownership;
+use crate::procfs;
 use crate::proto::{HookRequest, Remote};
 
 /// What a new pane gets back of the program's screen.
@@ -45,6 +46,10 @@ const KEEP_EVENTS: usize = 1000;
 const KEEP_HISTORY: usize = 2000;
 /// A program that exited waits this long for a client to hear it.
 const KEEP_EXITED: Duration = Duration::from_secs(24 * 3600);
+/// Connections at once (a thread each): a client, hooks, listings.
+const MAX_CONNECTIONS: usize = 64;
+/// Parent chain read for I4 (which looks at 13).
+const MAX_CHAIN: usize = 16;
 /// A client that takes longer to read a frame is dropped: it comes back and
 /// gets what it missed from the buffer.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -56,6 +61,9 @@ const FIRST_FRAME: Duration = Duration::from_secs(5);
 /// `agentd hold` with no name: the held sessions, one per line.
 pub fn list() -> ExitCode {
     let dir = super::dir();
+    if super::ensure_dir(&dir).is_err() {
+        return ExitCode::SUCCESS;
+    }
     let Ok(entries) = fs::read_dir(&dir) else {
         return ExitCode::SUCCESS;
     };
@@ -64,7 +72,8 @@ pub fn list() -> ExitCode {
         .filter_map(|e| {
             let file = e.file_name().to_string_lossy().into_owned();
             let name = file.strip_prefix("hold-")?.strip_suffix(".sock")?;
-            Some(name.to_string())
+            // Printed to a terminal: never a name we wouldn't make.
+            super::valid_name(name).then(|| name.to_string())
         })
         .collect();
     names.sort();
@@ -91,10 +100,10 @@ struct Status {
 }
 
 fn query(socket: &Path) -> Option<Status> {
-    let mut stream = UnixStream::connect(socket).ok()?;
+    let mut stream = super::connect(socket).ok()?;
     stream.set_read_timeout(Some(FIRST_FRAME)).ok()?;
     frame::write(&mut stream, QUERY, b"").ok()?;
-    match frame::read(&mut stream).ok()? {
+    match frame::read_max(&mut stream, frame::SMALL).ok()? {
         Some((QUERY, p)) => serde_json::from_slice(&p).ok(),
         _ => None,
     }
@@ -116,7 +125,7 @@ pub fn attach(name: &str) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let stream = match UnixStream::connect(&socket) {
+    let stream = match super::connect(&socket) {
         Ok(s) => s,
         Err(_) => match start(name, &socket) {
             Some(s) => s,
@@ -174,7 +183,7 @@ fn start(name: &str, socket: &Path) -> Option<UnixStream> {
     let deadline = Instant::now() + START_BUDGET;
     while Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
-        if let Ok(s) = UnixStream::connect(socket) {
+        if let Ok(s) = super::connect(socket) {
             return Some(s);
         }
     }
@@ -241,20 +250,29 @@ pub fn serve(name: &str) -> ExitCode {
     let holder = Arc::new(Holder {
         name: name.to_string(),
         socket,
-        lock: lock_path,
         next: AtomicU64::new(0),
+        connections: AtomicUsize::new(0),
         shared: Mutex::new(Shared {
             client: None,
             ring: Ring::new(KEEP_OUTPUT),
             events: VecDeque::new(),
             history: VecDeque::new(),
             program: None,
+            alive: false,
             exit: None,
         }),
     });
     for stream in listener.incoming().flatten() {
+        // A thread each, but not without end.
+        if holder.connections.fetch_add(1, Ordering::Relaxed) >= MAX_CONNECTIONS {
+            holder.connections.fetch_sub(1, Ordering::Relaxed);
+            continue;
+        }
         let holder = holder.clone();
-        thread::spawn(move || holder.connection(stream));
+        thread::spawn(move || {
+            holder.clone().connection(stream);
+            holder.connections.fetch_sub(1, Ordering::Relaxed);
+        });
     }
     ExitCode::FAILURE
 }
@@ -274,8 +292,8 @@ struct Hello {
 struct Holder {
     name: String,
     socket: PathBuf,
-    lock: PathBuf,
     next: AtomicU64,
+    connections: AtomicUsize,
     shared: Mutex<Shared>,
 }
 
@@ -290,6 +308,8 @@ struct Shared {
     history: VecDeque<HookRequest>,
     /// The pty's master and the program's pid, once started.
     program: Option<(File, u32)>,
+    /// Not reaped yet: its pid is still its own.
+    alive: bool,
     exit: Option<i32>,
 }
 
@@ -299,9 +319,14 @@ impl Holder {
     }
 
     fn connection(self: Arc<Self>, mut stream: UnixStream) {
+        // The folder is private already; a peer of another user (a socket
+        // passed on) is not served either.
+        if super::same_user(&stream).is_err() {
+            return;
+        }
         let _ = stream.set_read_timeout(Some(FIRST_FRAME));
         let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
-        match frame::read(&mut stream) {
+        match frame::read_max(&mut stream, frame::SMALL) {
             Ok(Some((HELLO, p))) => {
                 if let Ok(hello) = serde_json::from_slice::<Hello>(&p) {
                     let _ = stream.set_read_timeout(None);
@@ -342,6 +367,7 @@ impl Holder {
                         let pid = child.id();
                         let output = master.try_clone();
                         s.program = Some((master, pid));
+                        s.alive = true;
                         if let Ok(output) = output {
                             let holder = self.clone();
                             thread::spawn(move || holder.output(output));
@@ -418,7 +444,7 @@ impl Holder {
         let Some(mut input) = input else {
             return;
         };
-        while let Ok(Some((kind, payload))) = frame::read(&mut reader) {
+        while let Ok(Some((kind, payload))) = frame::read_max(&mut reader, frame::SMALL) {
             match kind {
                 INPUT => {
                     if input.write_all(&payload).is_err() {
@@ -517,6 +543,9 @@ impl Holder {
                 .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)),
             Err(_) => 1,
         };
+        // Reaped: its pid may be another process's from now on, which a
+        // hook's chain must not match.
+        self.shared().alive = false;
         // Its last output, still on its way through the pty.
         thread::sleep(Duration::from_millis(100));
         let mut s = self.shared();
@@ -538,8 +567,9 @@ impl Holder {
         });
     }
 
-    /// A hook of the held program (hook.rs): I4 against the program, then
-    /// down to the client, or kept for the next one.
+    /// A hook of the held program (hook.rs): I4 against the program, on the
+    /// chain of the process that connected as /proc has it (never the one it
+    /// sends), then down to the client, or kept for the next one.
     fn hook(&self, mut stream: UnixStream, payload: &[u8]) {
         let reply = |stream: &mut UnixStream, v: serde_json::Value| {
             let _ = frame::write(stream, HOOK, v.to_string().as_bytes());
@@ -547,8 +577,18 @@ impl Holder {
         let Ok(mut request) = serde_json::from_slice::<HookRequest>(payload) else {
             return reply(&mut stream, json!({"ok": false, "error": "bad request"}));
         };
+        // The hook waits for our answer: its pid is its own while we look.
+        let Some(hook) = super::peer_pid(&stream) else {
+            return reply(&mut stream, json!({"ok": false, "error": "no peer"}));
+        };
+        request.chain = procfs::chain(hook, MAX_CHAIN + 1)
+            .into_iter()
+            .skip(1)
+            .map(|p| (p.pid, p.comm, p.starttime))
+            .collect();
+        request.event = std::mem::take(&mut request.event).from_remote();
         let mut s = self.shared();
-        let Some(pid) = s.program.as_ref().map(|(_, pid)| *pid) else {
+        let Some(pid) = s.program.as_ref().filter(|_| s.alive).map(|(_, pid)| *pid) else {
             return reply(&mut stream, json!({"ok": false, "error": "no program"}));
         };
         let chain = request.chain.iter().map(|(p, c, _)| (*p, c.as_str()));
@@ -582,7 +622,8 @@ impl Holder {
 
     fn finish(&self) -> ! {
         let _ = fs::remove_file(&self.socket);
-        let _ = fs::remove_file(&self.lock);
+        // The lock file stays: removed, a holder starting now could lock the
+        // old one while the next locks a new one, two holders for a name.
         std::process::exit(0)
     }
 }
@@ -628,11 +669,14 @@ fn nudge(master: &File, size: Winsize) {
 /// The client's terminal type if this host knows it, else the nearest one it
 /// does: a program without its terminfo draws nothing right.
 fn terminal(term: &str) -> String {
-    let wanted = if term.is_empty() {
-        "xterm-256color"
-    } else {
-        term
+    // A name, never a path: it is looked up in terminfo folders.
+    let name = |t: &str| {
+        !t.is_empty()
+            && t.len() <= 64
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
     };
+    let wanted = if name(term) { term } else { "xterm-256color" };
     [wanted, "tmux-256color", "screen-256color", "xterm-256color"]
         .into_iter()
         .find(|t| has_terminfo(t))
