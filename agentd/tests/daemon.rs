@@ -1713,3 +1713,38 @@ fn i6_a_replayed_event_writes_the_state_and_nothing_else() {
         fs::read_to_string(&sink).is_ok_and(|s| s.contains("\"notify\""))
     });
 }
+
+#[test]
+fn i6_a_remote_event_cannot_shift_the_panes_fields_or_name_a_local_file() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane();
+    let pane_pid: u64 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
+    let chain = json!([[pane_pid, "agentd", 0]]);
+    let hostile = json!({
+        "hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+        "detail": "ls\u{1f}x\u{1f}\u{1f}\u{1e}evil\u{1b}[2J",
+        "transcript_path": "/etc/passwd",
+    });
+    remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
+    remote_hook(&server, &pane, "claude", chain, hostile);
+    let tool = server.tmux(&["show", "-pqv", "-t", &pane, "@agent_tool"]);
+    assert!(!tool.chars().any(|c| c.is_control()), "{tool:?}");
+    assert_eq!(tool, "Bash: ls x evil [2J");
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_transcript"]),
+        ""
+    );
+    // The daemon still reads the pane as remote: its fields are where they were.
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]),
+        "working"
+    );
+}

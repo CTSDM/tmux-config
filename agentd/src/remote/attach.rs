@@ -8,8 +8,8 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -34,6 +34,8 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// I4 looks at 13; the chain starts at this process.
 const MAX_CHAIN: usize = 16;
+/// Events waiting for the local daemon; more are dropped.
+const EVENTS_QUEUED: usize = 256;
 const KEYS_POLL: Duration = Duration::from_millis(100);
 /// While the pane is offline: the pane's colors, and what the status line says.
 const OFFLINE_STYLE: &str = "bg=#2a1618";
@@ -49,6 +51,10 @@ const CONNECTED: u8 = 1;
 const OFFLINE: u8 = 2;
 
 pub fn run(host: &str, name: &str, dir: Option<&str>) -> ExitCode {
+    if !valid_host(host) {
+        eprintln!("agentd remote: {host:?} is not a host");
+        return ExitCode::from(2);
+    }
     if !super::valid_name(name) {
         eprintln!("agentd remote: a name is letters, digits, '.', '_' and '-'");
         return ExitCode::from(2);
@@ -174,8 +180,9 @@ struct Session {
     up: Arc<Mutex<Option<ChildStdin>>>,
     mode: Arc<AtomicU8>,
     quit: Arc<AtomicBool>,
-    /// The transport's pid while it runs, for a quit to end it.
-    transport: Arc<AtomicU32>,
+    /// The transport while it runs, for a quit to end it: killed through
+    /// its handle, never a pid that may have been reaped and reused.
+    transport: Arc<Mutex<Option<Child>>>,
 }
 
 impl Session {
@@ -214,19 +221,16 @@ impl Session {
         };
         loop {
             let end = match self.transport() {
-                Ok(child) => {
-                    self.transport.store(child.id(), Ordering::Relaxed);
-                    self.connection(
-                        child,
-                        &cooked,
-                        &mut out,
-                        &events,
-                        &mut have,
-                        &mut attached_before,
-                        &mut retry,
-                        &mut offline,
-                    )
-                }
+                Ok(child) => self.connection(
+                    child,
+                    &cooked,
+                    &mut out,
+                    &events,
+                    &mut have,
+                    &mut attached_before,
+                    &mut retry,
+                    &mut offline,
+                ),
                 Err(e) => {
                     eprint!("agentd remote: {e}\r\n");
                     End::Lost
@@ -288,7 +292,7 @@ impl Session {
         mut child: Child,
         cooked: &Termios,
         out: &mut File,
-        events: &Sender<Vec<u8>>,
+        events: &SyncSender<Vec<u8>>,
         have: &mut Option<u64>,
         attached_before: &mut bool,
         retry: &mut Duration,
@@ -299,6 +303,7 @@ impl Session {
             let _ = child.wait();
             return End::Lost;
         };
+        *lock(&self.transport) = Some(child);
         let (rows, cols) = self.size();
         let hello = json!({
             "term": env::var("TERM").unwrap_or_default(),
@@ -346,17 +351,19 @@ impl Session {
                         if out.write_all(&p).is_err() {
                             break End::Lost;
                         }
-                        *have = have.map(|h| h + p.len() as u64);
+                        *have = have.map(|h| h.saturating_add(p.len() as u64));
                     }
                     Ok(Some((EVENT, p))) => {
-                        let _ = events.send(p);
+                        // Full: the daemon is behind (or the holder floods).
+                        let _ = events.try_send(p);
                     }
                     Ok(Some((EXIT, p))) => {
                         let code = serde_json::from_slice::<serde_json::Value>(&p)
                             .ok()
                             .and_then(|v| v["code"].as_i64())
                             .unwrap_or(0);
-                        break End::Exit(code as i32);
+                        // A status is 0..=255; anything else is a failure.
+                        break End::Exit(i32::try_from(code).unwrap_or(1));
                     }
                     Ok(Some((DETACHED, p))) => {
                         let why = serde_json::from_slice::<serde_json::Value>(&p)
@@ -374,14 +381,15 @@ impl Session {
             self.mode.store(OFFLINE, Ordering::Relaxed);
         }
         *self.lock_up() = None;
-        self.transport.store(0, Ordering::Relaxed);
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(mut child) = lock(&self.transport).take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         end
     }
 
     fn lock_up(&self) -> std::sync::MutexGuard<'_, Option<ChildStdin>> {
-        self.up.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.up)
     }
 
     fn size(&self) -> (u16, u16) {
@@ -498,8 +506,10 @@ impl Session {
 
     /// The held agents' events to the local daemon, in order, as the pane's
     /// own (I6).
-    fn events(&self) -> Sender<Vec<u8>> {
-        let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
+    fn events(&self) -> SyncSender<Vec<u8>> {
+        // Bounded: a holder that floods events can't grow it (they are
+        // dropped, and the pane catches up at the agent's next one).
+        let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::sync_channel(EVENTS_QUEUED);
         let Some((tmux, pane)) = self.pane.tmux.clone() else {
             return tx;
         };
@@ -519,12 +529,20 @@ impl Session {
                 let Some(remote) = request.remote.as_mut() else {
                     continue;
                 };
+                if !super::valid_name(&remote.name) {
+                    continue;
+                }
                 remote.host = host.clone();
                 request.pane = pane.clone();
                 request.chain = chain.clone();
                 request.parked = None;
-                if let Some(stream) = client::connect_or_start(&paths, START_BUDGET) {
-                    let _ = client::call(stream, &Request::Hook(Box::new(request)), REPLY_TIMEOUT);
+                let request = Request::Hook(Box::new(request));
+                let sent = client::connect_or_start(&paths, START_BUDGET)
+                    .ok_or_else(|| io::Error::other("no daemon"))
+                    .and_then(|stream| client::call(stream, &request, REPLY_TIMEOUT));
+                // Lost: the pane shows the agent's state again at its next event.
+                if let Err(e) = sent {
+                    crate::debug::log(&format!("agentd remote {host}: an event was lost: {e}"));
                 }
             }
         });
@@ -534,6 +552,10 @@ impl Session {
 
 /// `agentd remote <host>`: the shells held there.
 pub fn list(host: &str) -> ExitCode {
+    if !valid_host(host) {
+        eprintln!("agentd remote: {host:?} is not a host");
+        return ExitCode::from(2);
+    }
     match hold_command(host, None).and_then(|mut c| c.status()) {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
@@ -554,6 +576,11 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
     let var = |n| env::var_os(n).filter(|v| !v.is_empty());
     let agentd = var("AGENTD_REMOTE_AGENTD").map(|v| v.to_string_lossy().into_owned());
     let mut c = Command::new(var("AGENTD_SSH").unwrap_or_else(|| "ssh".into()));
+    if name.is_none() {
+        // The listing runs unattended (the prefix N form asks it): a prompt
+        // would stop it, and the form, for good.
+        c.args(["-o", "BatchMode=yes"]);
+    }
     // No forwards: the desktop bridge's RemoteForward belongs to the
     // interactive ssh, and a second one would only fail to bind.
     c.args([
@@ -566,6 +593,8 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
         "ServerAliveInterval=10",
         "-o",
         "ServerAliveCountMax=3",
+        // The host is never an option, whatever it looks like.
+        "--",
         host,
     ]);
     c.arg(remote_script(agentd.as_deref(), name));
@@ -590,12 +619,25 @@ fn remote_script(agentd: Option<&str>, name: Option<&str>) -> String {
 }
 
 /// Stops trying: the transport, if one is connecting, and the wait.
-fn give_up(quit: &AtomicBool, transport: &AtomicU32, wake: &Sender<()>) {
+fn give_up(quit: &AtomicBool, transport: &Mutex<Option<Child>>, wake: &Sender<()>) {
     quit.store(true, Ordering::Relaxed);
-    if let Some(pid) = rustix::process::Pid::from_raw(transport.load(Ordering::Relaxed) as i32) {
-        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    if let Some(child) = lock(transport).as_mut() {
+        let _ = child.kill();
     }
     let _ = wake.send(());
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A host as ssh takes it, or `-` for this one: never something ssh would
+/// read as an option (`-oProxyCommand=...` runs a local command).
+pub fn valid_host(host: &str) -> bool {
+    host == "-"
+        || (!host.is_empty()
+            && !host.starts_with('-')
+            && !host.chars().any(|c| c.is_whitespace() || c.is_control()))
 }
 
 /// One frame up, if connected; a failure shows as the connection ending.
@@ -655,5 +697,15 @@ mod tests {
         assert!(err.starts_with("no agentd-server (or agentd) on "), "{err}");
         // Named: that one, found in ~/.local/bin too.
         assert_eq!(run(&["mine"], Some("mine")).1, "mine hold api");
+    }
+
+    #[test]
+    fn a_host_is_never_an_option() {
+        for ok in ["-", "box", "user@box", "box:22", "10.0.0.1"] {
+            assert!(valid_host(ok), "{ok}");
+        }
+        for bad in ["", "-oProxyCommand=touch x", "-p", "a b", "a\nb", "--"] {
+            assert!(!valid_host(bad), "{bad:?}");
+        }
     }
 }

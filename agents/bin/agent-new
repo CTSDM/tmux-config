@@ -93,9 +93,15 @@ fi
 host=local
 if [[ -n $agentd ]]; then
   bind -x '"\t": complete_host' 2>/dev/null
-  read -r -e -p "$(label 'host')" -i "$default_host" host || exit 0
-  host=${host//[[:space:]]/}
-  [[ -z $host || ${host,,} == local ]] && host=local
+  while :; do
+    read -r -e -p "$(label 'host')" -i "$default_host" host || exit 0
+    host=${host//[[:space:]]/}
+    [[ -z $host || ${host,,} == local ]] && host=local
+    # Never an ssh option (-oProxyCommand=... runs a command here); `-` is
+    # this machine, held (agentd remote -).
+    [[ $host == - || $host != -* ]] && break
+    say "${WARN}$host is not a host$RESET"
+  done
 fi
 
 if [[ $host == local ]]; then
@@ -104,7 +110,7 @@ if [[ $host == local ]]; then
   while :; do
     read -r -e -p "$(label 'path')" -i "${here/#$HOME/\~}" path || exit 0
     path=${path/#\~/$HOME}
-    path=${path%/}
+    [[ $path == / ]] || path=${path%/}
     [[ -n $path ]] || path=$HOME
     [[ -d $path ]] && break
     if [[ -e $path ]]; then
@@ -124,7 +130,7 @@ else
   # starts at home there if it isn't a folder.
   bind -x '"\t": :' 2>/dev/null
   read -r -e -p "$(label 'path')" -i '~' path || exit 0
-  path=${path%/}
+  [[ $path == / ]] || path=${path%/}
   [[ -n $path ]] || path='~'
   if [[ -z $name ]]; then
     name=$(basename -- "$path")
@@ -156,7 +162,11 @@ else
   hold=${name//[^A-Za-z0-9._-]/-}
   while [[ $hold == [-.]* ]]; do hold=${hold:1}; done
   hold=${hold:0:64}
-  hold=${hold:-$host}
+  if [[ -z $hold ]]; then
+    hold=${host//[^A-Za-z0-9._-]/-}
+    while [[ $hold == [-.]* ]]; do hold=${hold:1}; done
+    hold=${hold:-shell}
+  fi
   say "${DIM}asking $host…$RESET"
   held=""
   if timeout 6 "$agentd" remote "$host" </dev/null 2>/dev/null | cut -f1 | grep -qxF -- "$hold"; then
@@ -174,8 +184,17 @@ if [[ $host == local ]]; then
   # A folder only "*" matches follows the space you are in.
   [[ $how != named && -n $target ]] && tmux set -t "=$name:" @space "$target"
 else
-  tmux new-session -d -s "$name" -c "$HOME" "$(printf '%q ' "$agentd" remote "$host" "$hold" "$path")" ||
+  # As arguments, not a shell command: nothing in them is read by a shell.
+  tmux new-session -d -s "$name" -c "$HOME" "$agentd" remote "$host" "$hold" "$path" ||
     { sleep 2; exit 1; }
+  # agentd remote refused it (or an old agentd has no `remote`): its pane is
+  # gone at once, and without this the popup would just close.
+  sleep 0.3
+  if ! tmux has-session -t "=$name" 2>/dev/null; then
+    say "${WARN}the session ended at once: \`agentd remote $host $hold\` failed$RESET${DIM} · any key$RESET"
+    IFS= read -r -s -n1 _
+    exit 1
+  fi
   # Its local folder is home, which says nothing of its space.
   [[ -n $target ]] && tmux set -t "=$name:" @space "$target"
 fi

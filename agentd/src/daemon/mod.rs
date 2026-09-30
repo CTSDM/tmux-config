@@ -411,7 +411,15 @@ impl Daemon {
         }
     }
 
-    async fn hook(self: &Rc<Self>, request: Box<HookRequest>) -> Reply {
+    async fn hook(self: &Rc<Self>, mut request: Box<HookRequest>) -> Reply {
+        if request.remote.is_some() {
+            // I6: from another host; nothing it sent is taken as it came.
+            request.event = std::mem::take(&mut request.event).from_remote();
+            request.env.retain(|k, _| k == "CLAUDE_CONFIG_DIR");
+            for v in request.env.values_mut() {
+                *v = core::line(v);
+            }
+        }
         let (ack, acked) = oneshot::channel();
         let pane = request.pane.clone();
         self.queue(&pane, Job::Hook(request, ack));
