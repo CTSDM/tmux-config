@@ -37,6 +37,10 @@ One binary, `agentd`, with subcommands:
 - `agentd daemon`: one per tmux server. Runs until the tmux server is gone.
 - `agentd ensure`: starts the daemon for the current tmux server unless it
   runs; idempotent (flock). `tmux.conf` calls it on load.
+- `agentd bridge`: on the desktop, for tmux servers on other hosts: shows
+  and plays the notifications and sounds their daemons send over an
+  ssh-forwarded socket, and sends clicks back (`daemon/bridge.rs`,
+  guide.md "On a remote server").
 - `agentd ctl <command> [args]`: small requests for tmux hooks, key bindings
   and scripts, e.g. `seen <pane>` (pane-focus-in), `reconcile [pane...]`,
   `blink-demo <session> <window> [seconds]`, `status` (JSON dump for

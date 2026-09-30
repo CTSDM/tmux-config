@@ -240,6 +240,22 @@ its own pid in the pane, then waits for `ActionInvoked` (a click: run
 with SIGTERM. Urgency is `critical` for needs/error/reminder, `normal` for
 done; mako decides how long each stays.
 
+agentd does the same in-process (`daemon/notify.rs`). When the server
+advertises `body-markup` (mako does), the body is escaped, or a command with
+`&&` or `<` in it would be read as markup; the title never is.
+
+**The desktop bridge** (`daemon/bridge.rs`): before D-Bus and the sound
+player, a daemon tries `$XDG_RUNTIME_DIR/tmux-agents/bridge.sock`, which
+only exists when ssh forwards `agentd bridge`'s `desktop.sock` from a
+desktop. One JSON object per line: the daemon sends `hello` (its
+`host/server` and `$USER`), then `notify`, `close` and `sound`; the bridge
+sends `clicked` back. The bridge keys notifications by `host/server pane`,
+so a daemon that reconnects can still close its own, and plays sounds with
+its own sound folder and debounce. A connection refused means a socket left
+by a closed ssh (sshd's `StreamLocalBindUnlink no`): the daemon deletes it so
+the next ssh can bind. Tests never meet it: with `AG_SINK` set there is no
+bridge.
+
 ## Sounds
 
 `agent-sound <name>`: priority 4 for needs/question/plan/error/reminder, 3 for

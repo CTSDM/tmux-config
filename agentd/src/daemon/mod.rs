@@ -9,6 +9,7 @@
 
 mod bar;
 mod blink;
+mod bridge;
 mod control;
 mod effects;
 mod eventlog;
@@ -86,6 +87,23 @@ pub fn run() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             log(&format!("daemon: {e}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `agentd bridge`: the desktop's end of the bridge (bridge.rs), until
+/// killed.
+pub fn bridge() -> ExitCode {
+    let runtime = identity::runtime_dir(env::var_os("XDG_RUNTIME_DIR").as_deref());
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .and_then(|rt| LocalSet::new().block_on(&rt, bridge::serve(runtime)));
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("agentd bridge: {e}");
             ExitCode::FAILURE
         }
     }
@@ -174,15 +192,26 @@ async fn serve(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let sink = env::var_os("AG_SINK")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_default();
+    // Tests keep to their sink: never a bridge.
+    let link = sink.is_none().then(|| {
+        Rc::new(bridge::Link::new(
+            bridge::remote(&runtime_dir),
+            format!("{host}/{server_name}"),
+        ))
+    });
     let daemon = Rc::new(Daemon {
         events: eventlog::EventLog::new(identity::state_dir(), &server_name),
         blink: blink::Blink::new(&runtime_dir, &socket),
         tmux: Tmux::new(socket, instance.pid),
         server: instance,
         seams: Seams::from_env(),
-        host: fs::read_to_string("/proc/sys/kernel/hostname")
-            .map(|h| h.trim().to_string())
-            .unwrap_or_default(),
+        host,
         state: RefCell::new(saved.core),
         reminders: RefCell::new(HashMap::new()),
         panes: RefCell::new(HashMap::new()),
@@ -195,12 +224,12 @@ async fn serve(
         effects_env: effects::Env {
             sound: sound::Config::from_env(runtime_dir),
             notifier: Rc::new(notify::Notifier::new(
-                env::var_os("AG_SINK")
-                    .filter(|v| !v.is_empty())
-                    .map(PathBuf::from),
+                sink.clone(),
                 saved.notifications,
                 save.clone(),
+                link.clone(),
             )),
+            link,
         },
         save,
         paths,

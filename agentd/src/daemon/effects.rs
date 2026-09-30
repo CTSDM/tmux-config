@@ -3,6 +3,9 @@
 
 use std::rc::Rc;
 
+use serde_json::json;
+
+use super::bridge::Link;
 use super::notify::Notifier;
 use super::sound;
 use crate::core::Effect;
@@ -11,6 +14,8 @@ use crate::core::Effect;
 pub struct Env {
     pub sound: sound::Config,
     pub notifier: Rc<Notifier>,
+    /// The desktop bridge: sounds play there when it is up.
+    pub link: Option<Rc<Link>>,
 }
 
 /// What the effects of one event need besides themselves.
@@ -29,7 +34,18 @@ pub struct Ctx {
 /// Runs one effect; the pane's effects run one after the other (O3).
 pub async fn run(env: &Env, ctx: &Ctx, effect: &Effect) {
     match effect {
-        Effect::Sound(name) => sound::play(&env.sound, name, ctx.sound_on, &ctx.volume).await,
+        Effect::Sound(name) => {
+            if ctx.sound_on
+                && env.sound.sink.is_none()
+                && let Some(link) = &env.link
+                && link
+                    .send(&json!({"sound": {"name": name, "volume": ctx.volume}}))
+                    .await
+            {
+                return;
+            }
+            sound::play(&env.sound, name, ctx.sound_on, &ctx.volume).await
+        }
         Effect::Notify {
             urgency,
             title,

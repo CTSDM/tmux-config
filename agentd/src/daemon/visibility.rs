@@ -77,9 +77,17 @@ pub fn visibility(focused: Option<&Client>, read: &Read) -> Visibility {
 }
 
 /// The pid of Hyprland's active window; `None` when Hyprland can't be asked
-/// or has no active window. As `ag_hyprctl`: a stale or missing signature
-/// falls back to the most recent instance.
+/// or has no active window.
 async fn hypr_active_pid(seams: &Seams) -> Option<i64> {
+    let reply = hypr(seams, "j/activewindow").await?;
+    let json: serde_json::Value = serde_json::from_slice(&reply).ok()?;
+    json.get("pid")?.as_i64()
+}
+
+/// One request to Hyprland's request socket, and its reply. As
+/// `ag_hyprctl`: a stale or missing signature falls back to the most recent
+/// instance.
+pub async fn hypr(seams: &Seams, request: &str) -> Option<Vec<u8>> {
     let dir = seams.runtime_dir.join("hypr");
     let named = seams
         .hypr_signature
@@ -92,11 +100,10 @@ async fn hypr_active_pid(seams: &Seams) -> Option<i64> {
     };
     let ask = async {
         let mut stream = UnixStream::connect(&socket).await.ok()?;
-        stream.write_all(b"j/activewindow").await.ok()?;
+        stream.write_all(request.as_bytes()).await.ok()?;
         let mut reply = Vec::new();
         stream.read_to_end(&mut reply).await.ok()?;
-        let json: serde_json::Value = serde_json::from_slice(&reply).ok()?;
-        json.get("pid")?.as_i64()
+        Some(reply)
     };
     timeout(HYPR_TIMEOUT, ask).await.ok().flatten()
 }
