@@ -8,7 +8,8 @@
 #                                          kitty window when run inside tmux)
 #   agentd/remote-lab.sh new NAME [HOST]   a session NAME whose pane is the
 #                                          shell NAME held on HOST (default -,
-#                                          this machine; else over ssh)
+#                                          this machine; else over ssh, with
+#                                          AGENTD_REMOTE_AGENTD and AGENTD_SSH)
 #   agentd/remote-lab.sh holds             the shells held on this machine
 #   agentd/remote-lab.sh stop              kill the lab's tmux server (held
 #                                          shells stay: exit them to end them)
@@ -22,7 +23,13 @@ set -euo pipefail
 here=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 bin=$here/target/release/agentd
 lab=remote-lab
-t() { env -u TMUX -u TMUX_PANE tmux -L "$lab" "$@"; }
+# Nor what an agent that runs this passes on (a Claude Code session started
+# in the lab would take itself for that agent's child).
+unset_agent=()
+for var in $(compgen -e | grep -E '^(CLAUDE|ANTHROPIC)'); do
+    unset_agent+=(-u "$var")
+done
+t() { env -u TMUX -u TMUX_PANE "${unset_agent[@]}" tmux -L "$lab" "$@"; }
 
 build() {
     cargo build --release --locked --quiet --manifest-path "$here/Cargo.toml"
@@ -70,7 +77,11 @@ attach)
 new)
     name=${2:?usage: remote-lab.sh new NAME [HOST]}
     start
-    t new-session -d -s "$name" -c "$HOME" "$bin remote ${3:--} $name"
+    pass=()
+    for var in AGENTD_REMOTE_AGENTD AGENTD_SSH; do
+        [[ -n ${!var:-} ]] && pass+=(-e "$var=${!var}")
+    done
+    t new-session -d -s "$name" -c "$HOME" "${pass[@]}" "$bin remote ${3:--} $name"
     echo "remote-lab: session $name (prefix e in the lab to go there)"
     ;;
 holds) "$bin" hold ;;

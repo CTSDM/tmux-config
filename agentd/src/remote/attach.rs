@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::process::{Child, ChildStdin, Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -34,9 +34,19 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// I4 looks at 13; the chain starts at this process.
 const MAX_CHAIN: usize = 16;
-/// Keys are only read while the holder is there: until then ssh may be
-/// asking for a password on the same terminal.
 const KEYS_POLL: Duration = Duration::from_millis(100);
+/// While the pane is offline: the pane's colors, and what the status line says.
+const OFFLINE_STYLE: &str = "bg=#2a1618";
+
+/// Where the session is, for the keys.
+/// Before the first attach the terminal is cooked and its keys are left
+/// alone: ssh may be asking for a password or a host key on it.
+const CONNECTING: u8 = 0;
+/// Keys go to the holder.
+const CONNECTED: u8 = 1;
+/// Lost after an attach: still raw, since echo and our messages would
+/// scramble the screen a TUI keeps track of; ctrl-c or ctrl-d gives up.
+const OFFLINE: u8 = 2;
 
 pub fn run(host: &str, name: &str) -> ExitCode {
     if !super::valid_name(name) {
@@ -89,6 +99,27 @@ impl Pane {
         }
     }
 
+    /// The pane's look while the connection is gone: tinted, and said once
+    /// in the status line. Outside tmux, a line in the terminal.
+    fn offline(&self, on: bool, what: &str) {
+        let Some((_, pane)) = &self.tmux else {
+            if on {
+                eprint!("\r\n[{what}]\r\n");
+            }
+            return;
+        };
+        for option in ["window-style", "window-active-style"] {
+            if on {
+                tmux(&["set", "-p", "-t", pane, option, OFFLINE_STYLE]);
+            } else {
+                tmux(&["set", "-pu", "-t", pane, option]);
+            }
+        }
+        if on {
+            tmux(&["display-message", "-d", "5000", "-t", pane, what]);
+        }
+    }
+
     fn reconcile(&self) {
         let Some((tmux, pane)) = &self.tmux else {
             return;
@@ -137,8 +168,10 @@ struct Session {
     pane: Pane,
     /// Where keys and sizes go: ssh's stdin, while connected.
     up: Arc<Mutex<Option<ChildStdin>>>,
-    connected: Arc<AtomicBool>,
+    mode: Arc<AtomicU8>,
     quit: Arc<AtomicBool>,
+    /// The transport's pid while it runs, for a quit to end it.
+    transport: Arc<AtomicU32>,
 }
 
 impl Session {
@@ -149,8 +182,9 @@ impl Session {
             stdin,
             pane,
             up: Arc::default(),
-            connected: Arc::default(),
+            mode: Arc::default(),
             quit: Arc::default(),
+            transport: Arc::default(),
         }
     }
 
@@ -163,47 +197,73 @@ impl Session {
         };
         let mut out = File::from(stdout);
         let (wake, woken) = mpsc::channel::<()>();
-        self.keys();
+        self.keys(wake.clone());
         self.signals(wake);
         let events = self.events();
         let mut have: Option<u64> = None;
         let mut attached_before = false;
+        let mut offline = false;
         let mut retry = RETRY_FIRST;
+        let restore = || {
+            let _ = tcsetattr(&self.stdin, OptionalActions::Now, &cooked);
+        };
         loop {
             let end = match self.transport() {
-                Ok(child) => self.connection(
-                    child,
-                    &cooked,
-                    &mut out,
-                    &events,
-                    &mut have,
-                    &mut attached_before,
-                    &mut retry,
-                ),
+                Ok(child) => {
+                    self.transport.store(child.id(), Ordering::Relaxed);
+                    self.connection(
+                        child,
+                        &cooked,
+                        &mut out,
+                        &events,
+                        &mut have,
+                        &mut attached_before,
+                        &mut retry,
+                        &mut offline,
+                    )
+                }
                 Err(e) => {
                     eprint!("agentd remote: {e}\r\n");
                     End::Lost
                 }
             };
-            let _ = tcsetattr(&self.stdin, OptionalActions::Now, &cooked);
+            let quit = self.quit.load(Ordering::Relaxed);
+            if !matches!(end, End::Lost) || quit {
+                restore();
+                if offline {
+                    self.pane.offline(false, "");
+                }
+            }
             match end {
                 End::Exit(code) => return ExitCode::from(code.clamp(0, 255) as u8),
                 End::Detached(why) => {
-                    eprint!("\r\n[{} on {}: {why}]\r\n", self.name, self.host);
+                    eprint!("\r\n[{}@{}: {why}]\r\n", self.name, self.host);
                     return ExitCode::SUCCESS;
                 }
-                End::Lost if self.quit.load(Ordering::Relaxed) => return ExitCode::SUCCESS,
+                End::Lost if quit => return ExitCode::SUCCESS,
                 End::Lost => {}
             }
-            eprint!(
-                "\r\n[{} on {}: connection lost, trying again in {}s; ctrl-c gives up, it stays held there]\r\n",
-                self.name,
-                self.host,
-                retry.as_secs()
+            let what = format!(
+                "{}@{}: connection lost, retrying · ctrl-c in the pane gives up, it stays held there",
+                self.name, self.host
             );
+            if !attached_before {
+                restore();
+                eprint!("\r\n[{what}]\r\n");
+            } else if !offline {
+                self.mode.store(OFFLINE, Ordering::Relaxed);
+                self.pane.offline(true, &what);
+                offline = true;
+            }
             match woken.recv_timeout(retry) {
                 Err(RecvTimeoutError::Timeout) => {}
-                _ => return ExitCode::SUCCESS,
+                _ => {
+                    restore();
+                    if offline {
+                        self.pane.offline(false, "");
+                    }
+                    return ExitCode::SUCCESS;
+                }
             }
             retry = (retry * 2).min(RETRY_LAST);
         }
@@ -227,6 +287,7 @@ impl Session {
         have: &mut Option<u64>,
         attached_before: &mut bool,
         retry: &mut Duration,
+        offline: &mut bool,
     ) -> End {
         let (Some(mut up), Some(mut down)) = (child.stdin.take(), child.stdout.take()) else {
             let _ = child.kill();
@@ -260,14 +321,18 @@ impl Session {
                             self.pane.mark();
                             let _ = write!(
                                 out,
-                                "\r\n[{} on {}: a new shell, the old one is gone]\r\n",
+                                "\r\n[{}@{}: a new shell, the old one is gone]\r\n",
                                 self.name, self.host
                             );
                         }
                         *have = Some(a.at);
                         *attached_before = true;
                         *retry = RETRY_FIRST;
-                        self.connected.store(true, Ordering::Relaxed);
+                        if *offline {
+                            self.pane.offline(false, "");
+                            *offline = false;
+                        }
+                        self.mode.store(CONNECTED, Ordering::Relaxed);
                         // It may have changed since the hello.
                         self.resize();
                     }
@@ -299,8 +364,11 @@ impl Session {
                 }
             }
         };
-        self.connected.store(false, Ordering::Relaxed);
+        if self.mode.load(Ordering::Relaxed) == CONNECTED {
+            self.mode.store(OFFLINE, Ordering::Relaxed);
+        }
         *self.lock_up() = None;
+        self.transport.store(0, Ordering::Relaxed);
         let _ = child.kill();
         let _ = child.wait();
         end
@@ -323,13 +391,15 @@ impl Session {
         );
     }
 
-    /// Keys to the holder, read only while it is there.
-    fn keys(&self) {
-        let (Ok(stdin), up, connected, quit) = (
+    /// Keys to the holder while it is there; offline, only ctrl-c or
+    /// ctrl-d, which give up.
+    fn keys(&self, wake: Sender<()>) {
+        let (Ok(stdin), up, mode, quit, transport) = (
             self.stdin.try_clone(),
             self.up.clone(),
-            self.connected.clone(),
+            self.mode.clone(),
             self.quit.clone(),
+            self.transport.clone(),
         ) else {
             return;
         };
@@ -340,7 +410,8 @@ impl Session {
                 tv_nsec: KEYS_POLL.as_nanos() as i64,
             };
             while !quit.load(Ordering::Relaxed) {
-                if !connected.load(Ordering::Relaxed) {
+                let now = mode.load(Ordering::Relaxed);
+                if now == CONNECTING {
                     thread::sleep(KEYS_POLL);
                     continue;
                 }
@@ -351,11 +422,17 @@ impl Session {
                 if fds[0].revents().intersects(PollFlags::HUP | PollFlags::ERR) {
                     return;
                 }
-                match rustix::io::read(&stdin, &mut buf) {
+                let n = match rustix::io::read(&stdin, &mut buf) {
                     Ok(0) => return,
-                    Ok(n) => send(&up, INPUT, &buf[..n]),
-                    Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => {}
+                    Ok(n) => n,
+                    Err(rustix::io::Errno::INTR | rustix::io::Errno::AGAIN) => continue,
                     Err(_) => return,
+                };
+                if now == CONNECTED {
+                    send(&up, INPUT, &buf[..n]);
+                } else if buf[..n].iter().any(|&b| b == 0x03 || b == 0x04) {
+                    give_up(&quit, &transport, &wake);
+                    return;
                 }
             }
         });
@@ -364,10 +441,11 @@ impl Session {
     /// Window sizes to the holder; ctrl-c (the terminal is cooked while
     /// connecting), a hangup or a TERM give up.
     fn signals(&self, wake: Sender<()>) {
-        let (up, connected, quit, stdin) = (
+        let (up, mode, quit, transport, stdin) = (
             self.up.clone(),
-            self.connected.clone(),
+            self.mode.clone(),
             self.quit.clone(),
+            self.transport.clone(),
             self.stdin.try_clone(),
         );
         let Ok(stdin) = stdin else {
@@ -393,7 +471,7 @@ impl Session {
                 loop {
                     tokio::select! {
                         _ = winch.recv() => {
-                            if connected.load(Ordering::Relaxed) {
+                            if mode.load(Ordering::Relaxed) == CONNECTED {
                                 let (rows, cols) = tcgetwinsize(&stdin)
                                     .map_or((24, 80), |w| (w.ws_row, w.ws_col));
                                 let size = json!({"rows": rows, "cols": cols}).to_string();
@@ -405,10 +483,9 @@ impl Session {
                         _ = term.recv() => break,
                     }
                 }
-                quit.store(true, Ordering::Relaxed);
                 // ssh goes with the connection: closing its stdin ends it.
                 *up.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                let _ = wake.send(());
+                give_up(&quit, &transport, &wake);
             });
         });
     }
@@ -481,6 +558,8 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
         "-o",
         "ClearAllForwardings=yes",
         "-o",
+        "ConnectTimeout=10",
+        "-o",
         "ServerAliveInterval=10",
         "-o",
         "ServerAliveCountMax=3",
@@ -492,6 +571,15 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
         name.unwrap_or("")
     ));
     Ok(c)
+}
+
+/// Stops trying: the transport, if one is connecting, and the wait.
+fn give_up(quit: &AtomicBool, transport: &AtomicU32, wake: &Sender<()>) {
+    quit.store(true, Ordering::Relaxed);
+    if let Some(pid) = rustix::process::Pid::from_raw(transport.load(Ordering::Relaxed) as i32) {
+        let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    }
+    let _ = wake.send(());
 }
 
 /// One frame up, if connected; a failure shows as the connection ending.

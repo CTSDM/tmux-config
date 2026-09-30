@@ -354,8 +354,9 @@ impl Holder {
                 let _ = old.shutdown(std::net::Shutdown::Both);
             }
             let (at, missed) = s.ring.since(if new { None } else { hello.have });
-            // Not where the pane left off: a TUI has to draw itself again.
-            let redraw = !new && hello.have != Some(at);
+            // A new pane, or one we wrote "connection lost" on: a TUI has to
+            // draw itself again.
+            let redraw = !new;
             let mut stream = stream;
             let attached = json!({"new": new, "at": at});
             let sent = frame::write(&mut stream, ATTACHED, attached.to_string().as_bytes())

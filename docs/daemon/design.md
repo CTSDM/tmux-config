@@ -211,12 +211,17 @@ local agentd daemon                             └── agentd hook claude (AG
   with `@agent_remote` alone; `agentd remote` unsets it and reconciles the
   pane when it exits.
 - **Reconnecting.** The client counts the output bytes it has shown. When
-  ssh drops without the holder's exit frame it says so in the pane and
-  tries again (1 s, doubling, up to 30 s; ctrl-c gives up, the shell stays
-  held). On attach it sends that count, and the holder replays what the
+  ssh drops without the holder's exit frame it tries again (1 s, doubling,
+  up to 30 s). Nothing is written into the pane meanwhile, and the terminal
+  stays raw (no echo): a TUI keeps track of its screen by the cursor, and
+  a line of ours would scramble its next redraw. The pane is tinted
+  (`window-style`) and the status line says it once; ctrl-c or ctrl-d
+  gives up, the shell stays held. On attach it sends that count, and the holder replays what the
   pane missed, if it still has it; a new pane (count absent) gets the whole
-  buffer from its first full line, so a TUI's screen comes back. Events
-  kept while nobody was attached go down before the output.
+  buffer from its first full line. Either way the holder then resizes the
+  pty one column narrower and back, so a TUI draws its screen again (over
+  the "connection lost" line). Events kept while nobody was attached go
+  down before the output.
 - **Ends:** the held program exits → the holder sends its status, the
   client exits with it (the pane closes). Killing the local pane only
   detaches: the program keeps running on the server.
