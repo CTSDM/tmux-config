@@ -53,6 +53,11 @@ impl Lab {
 
     /// A client of the held shell `name`, as ssh runs it.
     fn attach(&self, name: &str, have: Option<u64>) -> Client {
+        self.attach_in(name, have, None)
+    }
+
+    /// The same, asking for the shell to start in `dir`.
+    fn attach_in(&self, name: &str, have: Option<u64>, dir: Option<&str>) -> Client {
         let mut child = self
             .command(&["hold", name])
             .stdin(Stdio::piped())
@@ -70,7 +75,8 @@ impl Lab {
                 }
             }
         });
-        let hello = json!({"term": "xterm-256color", "rows": 24, "cols": 80, "have": have});
+        let hello =
+            json!({"term": "xterm-256color", "rows": 24, "cols": 80, "have": have, "dir": dir});
         frame::write(&mut up, HELLO, hello.to_string().as_bytes()).unwrap();
         Client {
             child,
@@ -271,4 +277,28 @@ fn only_the_held_programs_agent_is_passed_on() {
         sleep(Duration::from_millis(20));
     }
     assert!(!lab.hold().join("hold-ops.sock").exists());
+}
+
+#[test]
+fn a_new_shell_starts_in_the_folder_asked_for() {
+    let lab = Lab::new();
+    fs::create_dir_all(lab.dir.join("src/api")).unwrap();
+    for (name, dir, expect) in [
+        ("in-dir", "~/src/api", lab.dir.join("src/api")),
+        ("absolute", "/", PathBuf::from("/")),
+        ("missing", "~/no/such/folder", lab.dir.clone()),
+    ] {
+        let mut c = lab.attach_in(name, None, Some(dir));
+        attached(&mut c);
+        c.input("echo \"at:$(pwd):\"\n");
+        let want = format!("at:{}:", expect.display());
+        assert!(
+            c.output_has(&want),
+            "{name}: {}",
+            String::from_utf8_lossy(&c.shown)
+        );
+        // Only when it starts: attaching again elsewhere keeps where it is.
+        c.input("exit\n");
+        c.until(|k, _, _| k == EXIT).unwrap();
+    }
 }

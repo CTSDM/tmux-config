@@ -18,8 +18,8 @@ fn main() -> ExitCode {
         Some(Command::Daemon) => agentd::daemon::run(),
         Some(Command::Ensure) => agentd::ctl::ensure(),
         Some(Command::Bridge) => agentd::daemon::bridge(),
-        Some(Command::Remote { host, name }) => match name {
-            Some(name) => remote::attach::run(&host, &name),
+        Some(Command::Remote { host, name, dir }) => match name {
+            Some(name) => remote::attach::run(&host, &name, dir.as_deref()),
             None => remote::attach::list(&host),
         },
         Some(Command::Hold(hold)) => match hold {

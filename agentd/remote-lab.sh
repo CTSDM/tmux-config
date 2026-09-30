@@ -22,7 +22,7 @@ set -euo pipefail
 
 here=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
 bin=$here/target/release/agentd
-lab=remote-lab
+lab=${REMOTE_LAB:-remote-lab} # another name: a second lab beside it
 # Nor what an agent that runs this passes on (a Claude Code session started
 # in the lab would take itself for that agent's child).
 unset_agent=()
@@ -62,6 +62,10 @@ start() {
     fi
     # For ctl seen, reconcile and the blink, until a reload sets it back.
     t set -g @agentd "$bin"
+    # For the sessions prefix N makes.
+    for var in AGENTD_REMOTE_AGENTD AGENTD_SSH; do
+        [[ -n ${!var:-} ]] && t set-environment -g "$var" "${!var}"
+    done
     own_daemon
 }
 
