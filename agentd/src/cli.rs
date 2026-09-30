@@ -6,8 +6,10 @@ usage: agentd hook claude|codex     the agent hook: event JSON on stdin
        agentd ensure                start the daemon of this tmux server unless it runs
        agentd bridge                on the desktop: show and play what daemons on other hosts
                                     send over ssh (RemoteForward to their bridge.sock)
-       agentd remote <host> [name]  in a tmux pane: the shell <name> held on <host> (over ssh,
-                                    `-` for this host), as this pane; without a name, list them
+       agentd remote <host> [name [dir]]
+                                    in a tmux pane: the shell <name> held on <host> (over ssh,
+                                    `-` for this host), as this pane, started in <dir> if it
+                                    isn't held yet; without a name, list them
        agentd hold [name]           on that host: join the shell <name>, starting it if needed;
                                     without a name, list the held shells
        agentd ctl <command> [args]  a request to the daemon: seen <pane>, reconcile [panes],
@@ -27,6 +29,8 @@ pub enum Command {
     Remote {
         host: String,
         name: Option<String>,
+        /// Where the shell starts, on that host, if it isn't held yet.
+        dir: Option<String>,
     },
     Hold(Hold),
     Ctl {
@@ -82,10 +86,12 @@ pub fn parse(args: &[String]) -> Option<Command> {
             [host] => Some(Command::Remote {
                 host: host.clone(),
                 name: None,
+                dir: None,
             }),
-            [host, name] => Some(Command::Remote {
+            [host, name, dir @ ..] if dir.len() <= 1 => Some(Command::Remote {
                 host: host.clone(),
                 name: Some(name.clone()),
+                dir: dir.first().cloned(),
             }),
             _ => None,
         },
@@ -172,14 +178,25 @@ mod tests {
             parse_str(&["remote", "box", "api"]),
             Some(Command::Remote {
                 host: "box".into(),
-                name: Some("api".into())
+                name: Some("api".into()),
+                dir: None,
             })
         );
+        assert_eq!(
+            parse_str(&["remote", "box", "api", "~/src/api"]),
+            Some(Command::Remote {
+                host: "box".into(),
+                name: Some("api".into()),
+                dir: Some("~/src/api".into()),
+            })
+        );
+        assert_eq!(parse_str(&["remote", "box", "api", "a", "b"]), None);
         assert_eq!(
             parse_str(&["remote", "box"]),
             Some(Command::Remote {
                 host: "box".into(),
-                name: None
+                name: None,
+                dir: None,
             })
         );
         assert_eq!(parse_str(&["remote"]), None);

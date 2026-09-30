@@ -266,6 +266,9 @@ struct Hello {
     rows: u16,
     cols: u16,
     have: Option<u64>,
+    /// Where the program starts: `~` is this host's home.
+    #[serde(default)]
+    dir: Option<String>,
 }
 
 struct Holder {
@@ -334,7 +337,7 @@ impl Holder {
             let mut s = self.shared();
             let new = s.program.is_none() && s.exit.is_none();
             if new {
-                match self.start(&hello.term, size) {
+                match self.start(&hello.term, hello.dir.as_deref(), size) {
                     Ok((master, child)) => {
                         let pid = child.id();
                         let output = master.try_clone();
@@ -446,7 +449,7 @@ impl Holder {
 
     /// The program, in a new pty of the client's size, with the client's
     /// terminal type and `AGENTD_HOLD` for its agents' hooks.
-    fn start(&self, term: &str, size: Winsize) -> io::Result<(File, Child)> {
+    fn start(&self, term: &str, dir: Option<&str>, size: Winsize) -> io::Result<(File, Child)> {
         let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)?;
         grantpt(&master)?;
         unlockpt(&master)?;
@@ -455,7 +458,15 @@ impl Holder {
         let shell = env::var_os("SHELL")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "/bin/sh".into());
-        let home = env::var_os("HOME").unwrap_or_else(|| "/".into());
+        let home = PathBuf::from(env::var_os("HOME").unwrap_or_else(|| "/".into()));
+        // A folder that isn't there (a typo, another host's layout): home.
+        let cwd = dir
+            .map(|d| match d.strip_prefix('~') {
+                Some(rest) => home.join(rest.trim_start_matches('/')),
+                None => PathBuf::from(d),
+            })
+            .filter(|d| d.is_dir())
+            .unwrap_or_else(|| home.clone());
         let child = Command::new(env::current_exe()?)
             .arg("hold")
             .arg("--exec")
@@ -468,7 +479,7 @@ impl Holder {
             .env(HOLD_VAR, &self.socket)
             .env("AGENTD_HOLD_NAME", &self.name)
             .env("TERM", terminal(term))
-            .current_dir(home)
+            .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

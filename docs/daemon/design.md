@@ -181,8 +181,8 @@ agentd remote <host> <name>  ──ssh -T──▶  agentd hold <name>   (a byte
 local agentd daemon                             └── agentd hook claude (AGENTD_HOLD)
 ```
 
-- **`agentd remote <host> <name>`** runs in a local pane (the pane's
-  command, or typed in its shell). It marks the pane `@agent_remote
+- **`agentd remote <host> <name> [<dir>]`** runs in a local pane (the pane's
+  command, or typed in its shell; `prefix N` makes one with a host). It marks the pane `@agent_remote
   <host>:<name>`, runs `ssh -T <host> agentd hold <name>` and speaks frames
   over its stdio: keys and window sizes up, output and hook events down. It
   puts the terminal in raw mode only once the holder answers, so ssh can ask
@@ -192,8 +192,9 @@ local agentd daemon                             └── agentd hook claude (AG
   `<name>`, starting it if there is none. **The holder** (`hold --serve`,
   its own session, a lock per name) owns a pty and the program in it (the
   login shell, started on the first attach with that client's `TERM` and
-  size), keeps its last 1 MiB of output, and serves one client at a time: a
-  new one detaches the old (the pane moved). Its files are
+  size, in the client's `dir` if it is a folder there, else home), keeps its
+  last 1 MiB of output, and serves one client at a time: a new one
+  detaches the old (the pane moved). Its files are
   `${TMUX_TMPDIR:-/tmp}/agentd-<uid>/hold-<name>.{sock,lock}`, not the
   runtime folder: logind removes that at logout (no linger), and the held
   shell must outlive the ssh. `agentd hold` with no name lists them.
@@ -229,7 +230,7 @@ local agentd daemon                             └── agentd hook claude (AG
   client exits with it (the pane closes). Killing the local pane only
   detaches: the program keeps running on the server.
 - **Frames:** one type byte, a 4-byte big-endian length, the payload.
-  Up: `H` hello (JSON: `term`, `rows`, `cols`, `have`), `I` input, `R`
+  Up: `H` hello (JSON: `term`, `rows`, `cols`, `have`, `dir`), `I` input, `R`
   resize (JSON). Down: `A` attached (JSON: `new`), `O` output, `E` event
   (the hook's request, plus `agent`, the pid I4 found), `X` exit (JSON:
   `code`), `D` detached (JSON: `why`). The hook's connection to the holder
@@ -241,7 +242,7 @@ on the server: events are dropped), B1/B2/H5b there (the holder could count
 the shells and send them), parked sessions (I5) there, peek and the
 transcript-based reconcile, rebuilding the local sessions after a local
 reboot from `agentd hold`'s list (each one comes back by hand, with its
-screen and state), and a remote pane in the `prefix N` form.
+screen and state; #9).
 
 ## Test seams (both implementations)
 

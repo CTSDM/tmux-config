@@ -233,9 +233,10 @@ notification). Moving with `( ) g e` switches the terminal you are in.
 `prefix N` opens a small form:
 
 ```
-  in personal · Tab completes the path · ctrl-c cancels
+  in personal · Tab completes · ctrl-c cancels
 
   session name › grammar
+  host         › local
   path         › ~/repos/github.com/<me>/japan-grammar
 
   → grammar in ~/repos/…/japan-grammar · personal
@@ -247,8 +248,15 @@ notification). Moving with `( ) g e` switches the terminal you are in.
   doesn't exist can be created.
 - **session name** left empty takes the folder's name. If a session with that
   name exists, the form just opens it.
-- **Space:** the one `spaces.conf` names for the folder, or else the space you
-  are in (not the `*` default). The last line says which, and warns when the
+- **host** (with agentd) is `local`: Enter keeps it. A server there (Tab
+  completes the hosts in `~/.ssh/config`, again for the next one) makes a
+  remote session: its shell is held on that server (see "Remote panes"),
+  **path** is the server's (from `~`, no completion; a folder that isn't
+  there starts it at home), and the last line says when the server already
+  holds a shell of that name, which the session then re-attaches to. For a
+  server by default: `set -g @agent_new_host <server>`.
+- **Space:** the one `spaces.conf` names for the folder (a server's `~` counts
+  as yours), or else the space you are in (not the `*` default). The last line says which, and warns when the
   folder belongs to another space.
 - Enter creates it and switches this terminal to it.
 
@@ -322,9 +330,11 @@ The other way round: no tmux on the server, only agentd. A pane of your
 local tmux runs a shell held on the server, and its agents are local agents
 for the bar, the borders, the blink, `prefix u` and the notifications:
 
+`prefix N` makes one (host field, above), or by hand:
+
 ```
-agentd remote <server> <name>      # in a pane, or as its command:
-tmux new-session -s api 'agentd remote <server> api'
+agentd remote <server> <name> [<dir>]    # in a pane, or as its command:
+tmux new-session -s api 'agentd remote <server> api ~/src/api'
 ```
 
 - The shell `<name>` keeps running on the server when the connection drops,

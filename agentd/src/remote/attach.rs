@@ -48,7 +48,7 @@ const CONNECTED: u8 = 1;
 /// scramble the screen a TUI keeps track of; ctrl-c or ctrl-d gives up.
 const OFFLINE: u8 = 2;
 
-pub fn run(host: &str, name: &str) -> ExitCode {
+pub fn run(host: &str, name: &str, dir: Option<&str>) -> ExitCode {
     if !super::valid_name(name) {
         eprintln!("agentd remote: a name is letters, digits, '.', '_' and '-'");
         return ExitCode::from(2);
@@ -62,7 +62,9 @@ pub fn run(host: &str, name: &str) -> ExitCode {
     }
     let pane = Pane::from_env(host, name);
     pane.mark();
-    let code = Session::new(host, name, stdin, pane.clone()).run();
+    let mut session = Session::new(host, name, stdin, pane.clone());
+    session.dir = dir.map(str::to_string);
+    let code = session.run();
     pane.unmark();
     code
 }
@@ -164,6 +166,8 @@ enum End {
 struct Session {
     host: String,
     name: String,
+    /// Where the shell starts, if the holder starts it.
+    dir: Option<String>,
     stdin: OwnedFd,
     pane: Pane,
     /// Where keys and sizes go: ssh's stdin, while connected.
@@ -179,6 +183,7 @@ impl Session {
         Session {
             host: host.to_string(),
             name: name.to_string(),
+            dir: None,
             stdin,
             pane,
             up: Arc::default(),
@@ -300,6 +305,7 @@ impl Session {
             "rows": rows,
             "cols": cols,
             "have": *have,
+            "dir": self.dir,
         });
         let end = if frame::write(&mut up, HELLO, hello.to_string().as_bytes()).is_err() {
             End::Lost
