@@ -68,6 +68,15 @@ then the pane's agent for everything that looks at it (B1, H5b, E2's
 background shells). Nothing found: the event is dropped, as before. Bash
 drops them all (it exits without `TMUX_PANE`). The registry is not
 documented; seen on Claude Code 2.1.285.
+**I6. Remote panes** (design.md, "Remote panes"). A Claude event whose hook
+ran on another host under `agentd hold` reaches the daemon from the
+`agentd remote` in the pane; I4 ran on that host, against the held program.
+Here, instead of I4: the walk from `agentd remote` (the request's chain)
+reaches `pane_pid` within 13 processes, none of them named `claude` or
+`codex`. The event then counts as the pane agent's, with no local agent
+process: B1, B2, H5b and E2's transcript check see nothing, and E2 leaves a
+pane whose `@agent_remote` is set alone. Codex events from a remote pane are
+dropped. Bash has no remote panes.
 
 ## 2. Pane options (the output)
 
