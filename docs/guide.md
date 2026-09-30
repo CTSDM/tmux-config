@@ -92,6 +92,12 @@ agent is planning, not necessarily waiting for approval. An asynchronous questio
 can coexist with ongoing work; its badge is dismissed by your next message, not
 by the tool's acknowledgement that the question was sent.
 
+**Sessions sent to the background.** A Claude Code session you send to the
+background (a slash command, `claude --bg`) keeps running in Claude Code's own
+daemon, and the `claude` in your pane only shows it. With agentd its pane keeps
+reporting it: states, notifications and background shells as usual. The bash
+hooks can't tell where it belongs, so its pane stays as it was when it left.
+
 **Untracked agents (`◇`).** An agent reports its state through hooks, which
 Claude Code and Codex only read when they start. An agent started before the
 hooks were installed shows as `◇` until you restart it (`claude --resume`,

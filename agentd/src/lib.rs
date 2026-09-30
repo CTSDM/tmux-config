@@ -10,5 +10,6 @@ pub mod daemon;
 pub mod debug;
 pub mod hook;
 pub mod identity;
+pub mod parked;
 pub mod procfs;
 pub mod proto;

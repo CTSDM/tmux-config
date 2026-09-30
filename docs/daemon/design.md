@@ -65,6 +65,9 @@ The daemon acks after the pane options are written (so a hook that returned
 is already visible, and events from one pane stay in order), before any
 sound, notification or timer runs. The ownership check (contract §2) runs in
 the daemon with `chain`, since the daemon knows each pane's `pane_pid`.
+A parked session's hook (contract I5) adds
+`"parked":{"agent":pid,"viewer":[[pid,"comm",starttime],...]}`: the pane and
+server come from the viewer, and the ownership check runs on its chain.
 
 ### Inside the daemon
 

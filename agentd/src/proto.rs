@@ -25,6 +25,19 @@ pub struct HookRequest {
     pub env: BTreeMap<String, String>,
     /// Epoch milliseconds when the hook started.
     pub t: u64,
+    /// I5: the event of a parked session, which runs outside the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<Parked>,
+}
+
+/// I5: a session Claude Code runs in the background, shown by the `claude`
+/// in the pane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Parked {
+    /// The background session's process, in the hook's chain.
+    pub agent: u32,
+    /// The process that shows it, and its parents (I4 applies to it).
+    pub viewer: Vec<Link>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

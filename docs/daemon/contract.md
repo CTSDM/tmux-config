@@ -52,6 +52,22 @@ an agent runs inside its own pane.
 only agent it rejects, with another agent among the first 12 it accepts two.
 The rule above counts the 13th like the others. Chains of 12 or fewer are
 the same in both.
+**I5. Parked sessions (CHANGE C11).** Claude Code can send a session to the
+background (a slash command, `claude --bg`): its `claude daemon` then runs it
+in a process of its own, without `TMUX` and `TMUX_PANE`, and the `claude` in
+the pane only shows it. A Claude hook without them, whose
+`CLAUDE_CODE_SESSION_KIND` is `bg`, finds its pane in Claude Code's session
+registry (`$CLAUDE_CONFIG_DIR/sessions/<pid>.json`, `~/.claude` without the
+variable; entries count only while their `pid` has that `procStart`, the
+start time in /proc): the first process of its parent chain with an entry of
+`kind` `bg` is the session, with its `jobId`; the live entry of `kind`
+`interactive` whose `parkedJobId` is that job is the viewer, and its
+environment (`/proc/<pid>/environ`) has the tmux server and the pane. I4
+applies to the viewer's chain instead of the hook's; the session's process is
+then the pane's agent for everything that looks at it (B1, H5b, E2's
+background shells). Nothing found: the event is dropped, as before. Bash
+drops them all (it exits without `TMUX_PANE`). The registry is not
+documented; seen on Claude Code 2.1.285.
 
 ## 2. Pane options (the output)
 

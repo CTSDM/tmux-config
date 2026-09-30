@@ -151,6 +151,25 @@ Bash (an MCP call, an edit) starts no shell and ends the wait with its
 PostToolUse as before. One false positive is possible: a Bash call allowed by
 your rules and run in parallel with the one that asks.
 
+**Parked sessions** (agentd only, contract I5). Claude Code can send a
+session to the background (a slash command, `claude --bg`): its own `claude
+daemon` then runs it in a process of its own, started without `TMUX` and
+`TMUX_PANE`, and the `claude` left in the pane (the one you started) only
+shows it. That process's hooks have no pane, so they used to be dropped and
+the pane stayed as it was when the session left. Claude Code keeps a
+registry, `$CLAUDE_CONFIG_DIR/sessions/<pid>.json`: the background process
+has `kind: "bg"` and a `jobId`, the pane's `claude` `kind: "interactive"` and
+`parkedJobId` set to that job, and its environment still has the pane. The
+hook client (with `CLAUDE_CODE_SESSION_KIND=bg` and no `TMUX_PANE`) walks
+that: the first process up its chain with a `bg` entry, the live
+`interactive` entry that parked the job, its `TMUX` and `TMUX_PANE`. It
+sends the viewer's parent chain along; the daemon applies I4 to it and takes
+the background process as the pane's agent, so background shells (B1), an
+answered permission (H5b) and reconciliation look at it. An entry counts only
+while its pid has the start time it recorded (`procStart`). The registry is
+not documented (seen on 2.1.285): if it changes, those events are dropped
+again, as before. `events.log` marks them `parked`.
+
 **Background shells.** No hook says when a shell started with
 `run_in_background` ends. On `Stop` the hook counts the agent's child
 processes started through Claude's shell snapshot (`shell-snapshots/snapshot-`
