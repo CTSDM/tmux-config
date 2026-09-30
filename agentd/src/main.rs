@@ -16,6 +16,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Daemon) => agentd::daemon::run(),
         Some(Command::Ensure) => agentd::ctl::ensure(),
+        Some(Command::Bridge) => agentd::daemon::bridge(),
         Some(Command::Ctl { command, args }) => agentd::ctl::ctl(&command, &args),
         None => {
             eprintln!("{}", cli::USAGE);

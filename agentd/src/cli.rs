@@ -1,9 +1,11 @@
-//! The command line: one binary, four subcommands (design.md, "Shape").
+//! The command line: one binary, five subcommands (design.md, "Shape").
 
 pub const USAGE: &str = "\
 usage: agentd hook claude|codex     the agent hook: event JSON on stdin
        agentd daemon                one per tmux server, runs until it is gone
        agentd ensure                start the daemon of this tmux server unless it runs
+       agentd bridge                on the desktop: show and play what daemons on other hosts
+                                    send over ssh (RemoteForward to their bridge.sock)
        agentd ctl <command> [args]  a request to the daemon: seen <pane>, reconcile [panes],
                                     blink, blink-demo <session> <window> [secs], bar, status, stop";
 
@@ -16,6 +18,7 @@ pub enum Command {
     Hook(Option<Kind>),
     Daemon,
     Ensure,
+    Bridge,
     Ctl {
         command: String,
         args: Vec<String>,
@@ -28,6 +31,7 @@ impl Command {
             Command::Hook(_) => "hook",
             Command::Daemon => "daemon",
             Command::Ensure => "ensure",
+            Command::Bridge => "bridge",
             Command::Ctl { .. } => "ctl",
         }
     }
@@ -46,6 +50,7 @@ pub fn parse(args: &[String]) -> Option<Command> {
         })),
         "daemon" if rest.is_empty() => Some(Command::Daemon),
         "ensure" if rest.is_empty() => Some(Command::Ensure),
+        "bridge" if rest.is_empty() => Some(Command::Bridge),
         "ctl" => {
             let (command, args) = rest.split_first()?;
             Some(Command::Ctl {

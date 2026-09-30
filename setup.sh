@@ -3,8 +3,8 @@ set -euo pipefail
 
 # =============================================================================
 # Tmux setup script
-# Installs the tmux config, TPM (plugin manager), agentd and the Claude Code /
-# Codex agent hooks.
+# Installs the tmux config, TPM (plugin manager), agentd (and its desktop
+# bridge, a systemd user service) and the Claude Code / Codex agent hooks.
 #
 # Usage:
 #   ./setup.sh
@@ -162,6 +162,36 @@ else
     fi
 fi
 [ -e "$AGENTD_OFF" ] && warn "agentd is switched off ($AGENTD_OFF): the agent hooks stay on bash."
+
+# --- 3a'. The desktop bridge (tmux on servers you reach over ssh) --------------
+# An idle process on a private socket: nothing reaches it unless an ssh
+# connection forwards it (docs/guide.md, "On a remote server").
+
+BRIDGE_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/agentd-bridge.service"
+if [ "$agentd_ok" != true ]; then
+    :
+elif ! systemctl --user show-environment &>/dev/null; then
+    info "No systemd user session: to get notifications from tmux on your servers, run '$AGENTD bridge' when you log in."
+else
+    mkdir -p "$(dirname "$BRIDGE_UNIT")"
+    cat > "$BRIDGE_UNIT" <<'UNIT'
+[Unit]
+Description=agentd bridge: notifications and sounds from tmux servers over ssh
+
+[Service]
+ExecStart=%h/.local/bin/agentd bridge
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+    systemctl --user daemon-reload
+    systemctl --user enable agentd-bridge.service &>/dev/null
+    # A new binary: the running bridge picks it up.
+    systemctl --user restart agentd-bridge.service
+    ok "Desktop bridge running (agentd-bridge.service). For a server, in ~/.ssh/config under its Host:"
+    echo "      RemoteForward /run/user/<uid on the server>/tmux-agents/bridge.sock /run/user/%i/tmux-agents/desktop.sock"
+fi
 
 # --- 3b. Agent hooks (Claude Code, Codex) ------------------------------------
 

@@ -1,7 +1,8 @@
 //! N1-N3 over D-Bus, as agents/bin/agent-notify does, in-process: one
 //! session connection, one match for the notification signals, one open
 //! notification per pane (its id in memory and in the state file, never in
-//! pane options: C3). A click runs `agent-jump <pane>`.
+//! pane options: C3). A click runs `agent-jump <pane>`. With a desktop
+//! bridge (bridge.rs) they go over it instead, and its clicks come back.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
@@ -12,6 +13,7 @@ use std::process::Stdio;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde_json::json;
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use zbus::export::futures_core::Stream;
@@ -19,11 +21,13 @@ use zbus::proxy::{Builder, CacheProperties};
 use zbus::zvariant::Value;
 use zbus::{Connection, Proxy};
 
+use super::bridge::{Link, OnClick};
 use super::sound::append_line;
 use crate::core::Urgency;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
+const APP: &str = "tmux agents";
 /// No session bus yet (a tmux started before the desktop): try again, but
 /// not more often than this.
 const RETRY: Duration = Duration::from_secs(30);
@@ -44,11 +48,34 @@ pub struct Notifier {
     next_fake: RefCell<u32>,
     /// `@agents_bin` and `$TMUX`, for agent-jump on a click.
     jump: Rc<RefCell<(String, String)>>,
+    /// The server shows markup in the body (`body-markup`).
+    markup: Cell<bool>,
+    /// Instead of agent-jump (the desktop bridge's clicks go back).
+    on_click: Option<OnClick>,
+    /// The desktop bridge, tried before D-Bus.
+    link: Option<Rc<Link>>,
     save: Rc<Notify>,
 }
 
 impl Notifier {
-    pub fn new(sink: Option<PathBuf>, ids: BTreeMap<String, u32>, save: Rc<Notify>) -> Notifier {
+    pub fn new(
+        sink: Option<PathBuf>,
+        ids: BTreeMap<String, u32>,
+        save: Rc<Notify>,
+        link: Option<Rc<Link>>,
+    ) -> Notifier {
+        let ids = Rc::new(RefCell::new(ids));
+        let jump = Rc::new(RefCell::new((String::new(), String::new())));
+        if let Some(link) = &link {
+            let (ids, jump, save) = (ids.clone(), jump.clone(), save.clone());
+            link.on_click(Rc::new(move |pane: &str| {
+                if ids.borrow_mut().remove(pane).is_some() {
+                    save.notify_one();
+                    let (bin, tmux) = jump.borrow().clone();
+                    clicked(&bin, &tmux, pane);
+                }
+            }));
+        }
         Notifier {
             sink,
             address: None,
@@ -56,11 +83,28 @@ impl Notifier {
             failed: Cell::new(None),
             retry: RETRY,
             attempts: Cell::new(0),
-            ids: Rc::new(RefCell::new(ids)),
+            ids,
             next_fake: RefCell::new(1),
-            jump: Rc::new(RefCell::new((String::new(), String::new()))),
+            jump,
+            markup: Cell::new(false),
+            on_click: None,
+            link,
             save,
         }
+    }
+
+    /// Clicks go to `f` (with the pane) instead of agent-jump.
+    pub fn on_click(&mut self, f: OnClick) {
+        self.on_click = Some(f);
+    }
+
+    /// A made-up id, as a notification server keeps the one it replaces.
+    fn fake_id(&self, previous: Option<u32>) -> u32 {
+        previous.unwrap_or_else(|| {
+            let mut next = self.next_fake.borrow_mut();
+            *next += 1;
+            *next
+        })
     }
 
     /// For the state file.
@@ -79,6 +123,32 @@ impl Notifier {
         tmux: &str,
     ) {
         *self.jump.borrow_mut() = (bin.to_string(), tmux.to_string());
+        self.notify(pane, urgency, title, body, None).await;
+    }
+
+    /// As `show`, for a pane on another host (the desktop bridge). Where it
+    /// comes from takes the title (`シ SSH · user@host`), what it says the
+    /// body; the host is in the app name too, which a notification server
+    /// can style (mako: `[app-name="tmux agents · <host>"]`).
+    pub async fn show_remote(
+        &self,
+        origin: Origin<'_>,
+        key: &str,
+        urgency: Urgency,
+        title: &str,
+        body: &str,
+    ) {
+        self.notify(key, urgency, title, body, Some(origin)).await;
+    }
+
+    async fn notify(
+        &self,
+        pane: &str,
+        urgency: Urgency,
+        title: &str,
+        body: &str,
+        origin: Option<Origin<'_>>,
+    ) {
         let previous = self.ids.borrow().get(pane).copied();
         let id = match &self.sink {
             Some(sink) => {
@@ -87,24 +157,48 @@ impl Notifier {
                     "urgency": urgency.as_str(), "title": title, "body": body,
                 });
                 append_line(sink, &line.to_string());
-                // A notification server keeps the id of one it replaces.
-                previous.unwrap_or_else(|| {
-                    let mut next = self.next_fake.borrow_mut();
-                    *next += 1;
-                    *next
-                })
+                self.fake_id(previous)
+            }
+            None if self
+                .bridged(json!({"notify": {
+                    "pane": pane, "urgency": urgency.as_str(), "title": title, "body": body,
+                }}))
+                .await =>
+            {
+                self.fake_id(previous)
             }
             None => {
                 let Some(proxy) = self.bus().await else {
                     return;
                 };
                 let hints = HashMap::from([("urgency", Value::U8(level(urgency)))]);
+                // A server that reads markup in the body must get the text escaped.
+                let markup = self.markup.get();
+                let text = |t: &str| if markup { escape(t) } else { t.to_string() };
+                let (app, icon, title, body) = match origin {
+                    None => (
+                        APP.to_string(),
+                        "utilities-terminal",
+                        title.to_string(),
+                        text(body),
+                    ),
+                    Some(o) => (
+                        format!("{APP} · {}", o.host),
+                        "network-server",
+                        format!("シ SSH · {o}"),
+                        if markup {
+                            format!("<b>{}</b>\n{}", escape(title), escape(body))
+                        } else {
+                            format!("{title}\n{body}")
+                        },
+                    ),
+                };
                 let args = (
-                    "tmux agents",
+                    app.as_str(),
                     previous.unwrap_or(0),
-                    "utilities-terminal",
-                    title,
-                    body,
+                    icon,
+                    title.as_str(),
+                    body.as_str(),
                     vec!["default", "Open"],
                     hints,
                     -1i32,
@@ -134,6 +228,7 @@ impl Notifier {
                     serde_json::json!({"t": now_ms(), "effect": "notify-close", "pane": pane});
                 append_line(sink, &line.to_string());
             }
+            None if self.bridged(json!({"close": {"pane": pane}})).await => {}
             None => {
                 if let Some(proxy) = self.bus().await
                     && let Err(e) = proxy.call::<_, _, ()>("CloseNotification", &(id,)).await
@@ -141,6 +236,14 @@ impl Notifier {
                     self.failed_call("close notification", e).await;
                 }
             }
+        }
+    }
+
+    /// Sent over the desktop bridge, if there is one.
+    async fn bridged(&self, message: serde_json::Value) -> bool {
+        match &self.link {
+            Some(link) => link.send(&message).await,
+            None => false,
         }
     }
 
@@ -209,9 +312,12 @@ impl Notifier {
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
+        let caps: Vec<String> = proxy.call("GetCapabilities", &()).await.unwrap_or_default();
+        self.markup.set(caps.iter().any(|c| c == "body-markup"));
         let mut actions = proxy.receive_signal("ActionInvoked").await?;
         let mut closed = proxy.receive_signal("NotificationClosed").await?;
         let (ids, jump, save) = (self.ids.clone(), self.jump.clone(), self.save.clone());
+        let on_click = self.on_click.clone();
         tokio::task::spawn_local(async move {
             loop {
                 tokio::select! {
@@ -220,8 +326,13 @@ impl Notifier {
                         let Some(pane) = forget(&ids, id) else { continue };
                         save.notify_one();
                         if action == "default" {
-                            let (bin, tmux) = jump.borrow().clone();
-                            clicked(&bin, &tmux, &pane);
+                            match &on_click {
+                                Some(f) => f(&pane),
+                                None => {
+                                    let (bin, tmux) = jump.borrow().clone();
+                                    clicked(&bin, &tmux, &pane);
+                                }
+                            }
                         }
                     }
                     Some(msg) = next(&mut closed) => {
@@ -236,6 +347,30 @@ impl Notifier {
         });
         Ok(proxy)
     }
+}
+
+/// Where a notification from another host comes from: `user@host`, or the
+/// host alone.
+#[derive(Debug, Clone, Copy)]
+pub struct Origin<'a> {
+    pub host: &'a str,
+    pub user: Option<&'a str>,
+}
+
+impl std::fmt::Display for Origin<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.user {
+            Some(user) => write!(f, "{user}@{}", self.host),
+            None => f.write_str(self.host),
+        }
+    }
+}
+
+/// Text for a body the server reads as markup (`cd x && make`, `a < b`).
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The pane whose open notification is `id`, forgotten.
@@ -298,7 +433,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("agentd-notify-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let sink = dir.join("sink.jsonl");
-        let n = Notifier::new(Some(sink.clone()), BTreeMap::new(), Rc::new(Notify::new()));
+        let n = Notifier::new(
+            Some(sink.clone()),
+            BTreeMap::new(),
+            Rc::new(Notify::new()),
+            None,
+        );
         n.close("%1").await; // nothing open: no line
         n.show(
             "%1",
@@ -344,7 +484,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn no_bus_is_tried_again_later() {
-        let mut n = Notifier::new(None, BTreeMap::new(), Rc::new(Notify::new()));
+        let mut n = Notifier::new(None, BTreeMap::new(), Rc::new(Notify::new()), None);
         n.address = Some("unix:path=/nonexistent/agentd-test/bus".into());
         let local = tokio::task::LocalSet::new();
         local
@@ -362,6 +502,17 @@ mod tests {
                 assert_eq!(n.attempts.get(), 2);
             })
             .await;
+    }
+
+    #[test]
+    fn origin_and_escape() {
+        let o = Origin {
+            host: "box",
+            user: Some("ana"),
+        };
+        assert_eq!(o.to_string(), "ana@box");
+        assert_eq!(Origin { user: None, ..o }.to_string(), "box");
+        assert_eq!(escape("cd x && a <b>"), "cd x &amp;&amp; a &lt;b&gt;");
     }
 
     #[test]

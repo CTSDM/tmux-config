@@ -17,7 +17,9 @@ runs `agents/install`, which registers the agent hook with every Claude Code
 profile (`~/.claude`, `~/.config/claude/*/`) and with Codex
 (`~/.codex/hooks.json`): `agentd hook`, or the bash `agent-hook` when agentd
 could not be built or is switched off (`agentd.off`, see the guide).
-`agents/install --uninstall` removes it again. It also creates `spaces.conf`
+`agents/install --uninstall` removes it again. With systemd, it also starts
+`agentd bridge` as a user service, which brings notifications and sounds
+from tmux on servers you reach over ssh (see the guide). It also creates `spaces.conf`
 from `spaces.example` (your folders, never committed) and the folder for the
 sounds.
 

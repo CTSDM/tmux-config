@@ -271,6 +271,51 @@ While peeking, the popup is a tmux client of its own on that session: type, run
 commands, answer the agent. `prefix a` again (or `prefix d`) closes it. The
 peeked window takes the popup's size in the meantime.
 
+## On a remote server
+
+tmux and the agents can run on a server you reach over ssh, with no desktop
+there. The bar looks the same: kitty draws it on your side (`kitten ssh`
+brings its terminfo; the server needs a UTF-8 locale). Which pane you are
+looking at comes from kitty's focus events, as on any desktop without
+Hyprland.
+
+Notifications and sounds come to your desktop through a bridge:
+`agentd bridge` runs on your machine and ssh forwards its socket to the
+server, where agentd sends them over it instead of to a notification server
+it doesn't have:
+
+- **On your machine,** `setup.sh` leaves the bridge running as a systemd
+  user service, `agentd-bridge` (without systemd, start `agentd bridge` when
+  you log in). It sits idle on a private socket until an ssh forwards it.
+- **For each server,** forward it in `~/.ssh/config`, and `kitten ssh
+  <server>` (or plain ssh) does the rest:
+
+  ```
+  Host <server>
+      RemoteForward /run/user/<uid on the server>/tmux-agents/bridge.sock /run/user/%i/tmux-agents/desktop.sock
+  ```
+
+- **On the server,** agentd, the config and the hooks as usual (tmux 3.7,
+  see Install), plus the two settings below.
+
+- **You can tell where it comes from:** the title is `シ SSH · user@host`,
+  the body the usual title in bold and the text. The app name is
+  `tmux agents · <host>`, so mako can style them apart:
+  `[app-name="tmux agents · <host>"]` with its own `border-color`, `font`...
+- **Sounds** play from your own sounds folder, and share the debounce with
+  your local tmux.
+- **A click** selects the pane on the server and raises the kitty window the
+  ssh runs in (Hyprland).
+- **Without the bridge** (no forward, ssh gone) agentd on the server works as
+  on a desktop: the bar and borders are all you get.
+- **"remote port forwarding failed"** on reconnecting: sshd keeps the socket
+  of the previous connection unless the server has `StreamLocalBindUnlink
+  yes` in `sshd_config`. agentd removes a dead one the next time it has
+  something to send.
+- **After logging out**, `/run/user/<uid>` goes away with agentd's socket
+  unless the user lingers (`loginctl enable-linger <user>`); tmux itself
+  keeps running.
+
 ## Install, uninstall
 
 ```sh
