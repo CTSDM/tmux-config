@@ -12,6 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use agentd_common::event::fingerprint;
+
 use super::text::line;
 use super::{Event, Op, Pane, State};
 
@@ -764,104 +766,6 @@ pub fn keep_watching(
         *finished_since = None;
     }
     !(after.state == "ready" || (over && after.bg.is_empty()))
-}
-
-/// X2: the fingerprint of a call, `sha256(json.dumps([tool, input]))` as
-/// agent-codex computes it (sorted keys, no spaces, ASCII escapes), with the
-/// input's `description` left out.
-pub fn fingerprint(tool: &Value, input: &Value) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write;
-    let input = match input {
-        Value::Object(o) => Value::Object(
-            o.iter()
-                .filter(|(k, _)| *k != "description")
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        ),
-        other => other.clone(),
-    };
-    let mut json = String::new();
-    python_json(&Value::Array(vec![tool.clone(), input]), &mut json);
-    let mut hex = String::with_capacity(64);
-    for b in Sha256::digest(json.as_bytes()) {
-        let _ = write!(hex, "{b:02x}");
-    }
-    hex
-}
-
-/// `json.dumps(v, sort_keys=True, separators=(",", ":"))`.
-fn python_json(v: &Value, out: &mut String) {
-    match v {
-        Value::Null => out.push_str("null"),
-        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        Value::Number(n) => out.push_str(&python_number(&n.to_string())),
-        Value::String(s) => python_string(s, out),
-        Value::Array(a) => {
-            out.push('[');
-            for (i, x) in a.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                python_json(x, out);
-            }
-            out.push(']');
-        }
-        Value::Object(o) => {
-            let mut keys: Vec<&String> = o.keys().collect();
-            keys.sort();
-            out.push('{');
-            for (i, k) in keys.iter().enumerate() {
-                if i > 0 {
-                    out.push(',');
-                }
-                python_string(k, out);
-                out.push(':');
-                python_json(&o[*k], out);
-            }
-            out.push('}');
-        }
-    }
-}
-
-/// Python writes exponents with a sign and two digits at least (`1e+100`).
-fn python_number(n: &str) -> String {
-    match n.split_once('e') {
-        Some((mantissa, exp)) => {
-            let (sign, digits) = match exp.strip_prefix('-') {
-                Some(d) => ('-', d),
-                None => ('+', exp.strip_prefix('+').unwrap_or(exp)),
-            };
-            format!("{mantissa}e{sign}{digits:0>2}")
-        }
-        None => n.to_string(),
-    }
-}
-
-/// A JSON string with everything outside printable ASCII escaped, as Python's
-/// `ensure_ascii` does (UTF-16 surrogate pairs above U+FFFF).
-fn python_string(s: &str, out: &mut String) {
-    use std::fmt::Write;
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            ' '..='~' => out.push(c),
-            _ => {
-                let mut units = [0u16; 2];
-                for u in c.encode_utf16(&mut units) {
-                    let _ = write!(out, "\\u{u:04x}");
-                }
-            }
-        }
-    }
-    out.push('"');
 }
 
 #[cfg(test)]

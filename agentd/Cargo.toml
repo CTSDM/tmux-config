@@ -1,3 +1,11 @@
+# The desktop's agentd (this package), what both it and a server's small
+# binary share (common/), and that binary (server/): design.md, "Remote panes".
+[workspace]
+members = ["common", "server"]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
 [package]
 name = "agentd"
 version = "0.1.0"
@@ -7,6 +15,7 @@ publish = false
 
 # New crates need the architect's OK (design.md, Rules 7).
 [dependencies]
+agentd-common = { path = "common", version = "0.1.0" }
 regex = "1.13.1"
 # Already in the tree through zbus; safe wrappers for flock, kill, setsid,
 # and for remote panes the pty, the terminal and poll.
@@ -17,8 +26,8 @@ sha2 = "0.11.0"
 tokio = { version = "1.53.1", features = ["rt", "net", "io-util", "time", "macros", "signal", "process", "sync"] }
 zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }
 
-[lints.rust]
-unsafe_code = "deny"
+[lints]
+workspace = true
 
 [profile.release]
 lto = true

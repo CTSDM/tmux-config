@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{Event, Kind};
+use crate::event::{Event, Kind};
 
 pub const VERSION: u32 = 1;
 

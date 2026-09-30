@@ -343,9 +343,11 @@ tmux new-session -s api 'agentd remote <server> api ~/src/api'
   <server>` lists them. It ends when you exit it.
 - A dropped connection retries by itself: the pane turns reddish until it
   is back. ctrl-c in it stops trying; the shell stays held.
-- The server needs agentd in its PATH or in `~/.local/bin`, its hooks
-  installed as usual (`agents/install --agentd`), and ssh without a password
-  prompt is best (a key, or `ControlMaster` to share one connection).
+- The server needs `agentd-server` (the small build of agentd for servers,
+  see docs/daemon/design.md "Remote panes"; a full agentd works too) in its
+  PATH or in `~/.local/bin`, and its agents' hooks pointing at it
+  (`<path>/agentd-server hook claude`). ssh without a password prompt is
+  best (a key, or `ControlMaster` to share one connection).
   `-` as the server holds the shell on this machine (to try it out).
 - In a new pane (another window, after a reboot) it comes back with its
   screen and its agent's state, without sounding again. Taking it in one

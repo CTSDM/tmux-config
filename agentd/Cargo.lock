@@ -6,6 +6,7 @@ version = 4
 name = "agentd"
 version = "0.1.0"
 dependencies = [
+ "agentd-common",
  "regex",
  "rustix",
  "serde",
@@ -13,6 +14,24 @@ dependencies = [
  "sha2",
  "tokio",
  "zbus",
+]
+
+[[package]]
+name = "agentd-common"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "agentd-server"
+version = "0.1.0"
+dependencies = [
+ "agentd-common",
+ "serde_json",
 ]
 
 [[package]]

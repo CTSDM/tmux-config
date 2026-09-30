@@ -1,0 +1,15 @@
+[package]
+name = "agentd-server"
+version = "0.1.0"
+edition = "2024"
+description = "The server's end of remote panes: holds shells and takes their agents' hooks (design.md, \"Remote panes\")"
+publish = false
+
+[dependencies]
+agentd-common = { path = "../common", version = "0.1.0" }
+
+[dev-dependencies]
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+
+[lints]
+workspace = true

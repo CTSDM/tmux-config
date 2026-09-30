@@ -169,8 +169,20 @@ delete it, run `setup.sh`, reload tmux.
 ## Remote panes (issue #4, option B)
 
 Sessions on a server reached over ssh, shown as local sessions: one tmux (the
-local one), no second bar or prefix. The server runs no tmux, only `agentd`
-(one executable, #2), which keeps each remote shell alive as dtach would.
+local one), no second bar or prefix. The server runs no tmux, only
+`agentd-server` (one executable, #2), which keeps each remote shell alive as
+dtach would.
+
+**Crates** (a Cargo workspace in `agentd/`): `agentd-common` (`common/`) has
+what both ends need and no async runtime or D-Bus: hook events as I3 reads
+them, the ownership rules (I4, I6), the protocol types, /proc, runtime
+paths, the holder and the hook's side of a held shell. `agentd` (the
+desktop's, the root package) re-exports those modules under its old paths
+and adds the daemon, the bar, notifications and `agentd remote`.
+`agentd-server` (`server/`) is only `hold` and `hook`: 1.6 MB static
+against 5.5 MB. Built static like setup.sh builds agentd:
+`cargo build --release -p agentd-server --target x86_64-unknown-linux-gnu
+--config "target.x86_64-unknown-linux-gnu.rustflags=['-C','target-feature=+crt-static','-C','relocation-model=static']"`.
 
 ```
 local tmux pane                               server
@@ -188,7 +200,10 @@ local agentd daemon                             └── agentd hook claude (AG
   puts the terminal in raw mode only once the holder answers, so ssh can ask
   for a password or a host key first. Host `-` runs `agentd hold` here,
   without ssh (tests, trying it out).
-- **`agentd hold <name>`** on the server connects its stdio to the holder of
+- **`agentd-server hold <name>`** (or a full agentd's `hold`) on the server,
+  the first of `AGENTD_REMOTE_AGENTD`, `agentd-server`, `agentd` found in
+  `~/.local/bin` or PATH (none: exit 127 and a line that says so), connects
+  its stdio to the holder of
   `<name>`, starting it if there is none. **The holder** (`hold --serve`,
   its own session, a lock per name) owns a pty and the program in it (the
   login shell, started on the first attach with that client's `TERM` and
