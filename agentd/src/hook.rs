@@ -15,8 +15,9 @@ use crate::client;
 use crate::core::codex::fingerprint;
 use crate::core::{Event, Kind};
 use crate::identity;
+use crate::parked;
 use crate::procfs;
-use crate::proto::{HookRequest, Request, VERSION};
+use crate::proto::{HookRequest, Link, Parked, Request, VERSION};
 
 /// A bigger payload is cut here; the fields we keep are short anyway.
 const MAX_PAYLOAD: u64 = 64 << 20;
@@ -42,16 +43,30 @@ pub fn run(kind: Option<Kind>) {
         .lock()
         .take(MAX_PAYLOAD)
         .read_to_end(&mut payload);
-    // I1: exactly claude or codex, inside tmux.
-    let (Some(kind), Some(tmux), Some(pane)) = (
-        kind,
-        env::var_os("TMUX").filter(|v| !v.is_empty()),
-        env::var("TMUX_PANE").ok().filter(|v| !v.is_empty()),
-    ) else {
+    // I1: exactly claude or codex, inside tmux; I5: or a parked Claude session.
+    let Some(kind) = kind else {
         return;
     };
+    let (tmux, pane, parked) = match (
+        env::var_os("TMUX").filter(|v| !v.is_empty()),
+        env::var("TMUX_PANE").ok().filter(|v| !v.is_empty()),
+    ) {
+        (Some(tmux), Some(pane)) => (tmux, pane, None),
+        _ if kind == Kind::Claude
+            && env::var("CLAUDE_CODE_SESSION_KIND").as_deref() == Ok("bg") =>
+        {
+            let Some((viewer, parked)) = parked() else {
+                return;
+            };
+            (viewer.tmux.into(), viewer.pane, Some(parked))
+        }
+        _ => return,
+    };
     if identity::off() {
-        bash(kind, &payload);
+        // Bash's hook has no I5: it would drop the event anyway.
+        if parked.is_none() {
+            bash(kind, &payload);
+        }
         return;
     }
     // jq reads invalid UTF-8 as U+FFFD; so do we.
@@ -61,10 +76,7 @@ pub fn run(kind: Option<Kind>) {
     let Some(event) = event_from_json(&json) else {
         return;
     };
-    let chain = procfs::chain(std::os::unix::process::parent_id(), MAX_CHAIN)
-        .into_iter()
-        .map(|s| (s.pid, s.comm, s.starttime))
-        .collect();
+    let chain = links(std::os::unix::process::parent_id());
     let mut agent_env = BTreeMap::new();
     if let Ok(dir) = env::var("CLAUDE_CONFIG_DIR") {
         agent_env.insert("CLAUDE_CONFIG_DIR".to_string(), dir);
@@ -79,6 +91,7 @@ pub fn run(kind: Option<Kind>) {
         t: started
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as u64),
+        parked,
     }));
     let Some(paths) = client::paths(&tmux) else {
         return;
@@ -87,6 +100,30 @@ pub fn run(kind: Option<Kind>) {
     if let Some(stream) = client::connect_or_start(&paths, START_BUDGET) {
         let _ = client::call(stream, &request, REPLY_TIMEOUT);
     }
+}
+
+/// `pid` and its parents, as I4 reads them.
+fn links(pid: u32) -> Vec<Link> {
+    procfs::chain(pid, MAX_CHAIN)
+        .into_iter()
+        .map(|s| (s.pid, s.comm, s.starttime))
+        .collect()
+}
+
+/// I5: the pane that shows this parked session, from Claude Code's registry.
+fn parked() -> Option<(parked::Viewer, Parked)> {
+    let config = parked::config_dir(env::var("CLAUDE_CONFIG_DIR").ok())?;
+    let chain: Vec<u32> = procfs::chain(std::os::unix::process::parent_id(), MAX_CHAIN)
+        .iter()
+        .map(|s| s.pid)
+        .collect();
+    let (agent, job) = parked::background(&config, &chain)?;
+    let viewer = parked::viewer(&config, &job)?;
+    let parked = Parked {
+        agent,
+        viewer: links(viewer.pid),
+    };
+    Some((viewer, parked))
 }
 
 /// The rollback switch: the event goes to bash's `agent-hook`, as it came.

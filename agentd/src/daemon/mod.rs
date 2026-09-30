@@ -49,6 +49,7 @@ use crate::core::codex::{self, After, CodexFacts, Procs};
 use crate::core::{self, Effect, Event, Facts, Input, Kind};
 use crate::debug::log;
 use crate::identity::{self, Paths};
+use crate::parked;
 use crate::procfs;
 use crate::proto::{CtlRequest, HookRequest, Reply, Request};
 use procs::ProcView;
@@ -64,6 +65,14 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 const SAVE_DELAY: Duration = Duration::from_millis(200);
 /// B1's marker of shells started by Claude's Bash tool.
 const SNAPSHOT_SHELL: &str = "shell-snapshots/snapshot-";
+
+/// A parent chain as I4 reads it: pid and comm.
+fn links(chain: &[crate::proto::Link]) -> Vec<(u32, &str)> {
+    chain
+        .iter()
+        .map(|(pid, comm, _)| (*pid, comm.as_str()))
+        .collect()
+}
 /// Closing notifications on the way out must not hold the exit up.
 const CLOSE_BUDGET: Duration = Duration::from_secs(1);
 /// X5: Codex panes are observed about this often.
@@ -680,11 +689,14 @@ impl Daemon {
         if want_panes {
             self.sweep(&read.others);
         }
-        let chain = request
-            .chain
-            .iter()
-            .map(|(pid, comm, _)| (*pid, comm.as_str()));
-        let Some(agent_pid) = core::owner(chain, read.pane_pid) else {
+        let owner = match &request.parked {
+            None => core::owner(links(&request.chain), read.pane_pid),
+            // I5: the pane's agent shows the session, which sent the hook.
+            Some(p) => core::owner(links(&p.viewer), read.pane_pid)
+                .filter(|_| request.chain.iter().any(|(pid, _, _)| *pid == p.agent))
+                .map(|_| p.agent),
+        };
+        let Some(agent_pid) = owner else {
             // I4
             let what = format!("{} ignored:not-its-agent", eventlog::hook(&request.event));
             self.events.line(&request.pane, kind.as_str(), &what);
@@ -728,8 +740,13 @@ impl Daemon {
         };
         let (batch, ops) = self.run_core(&input, &facts, &read).await;
         let what = format!(
-            "{} {}",
+            "{}{} {}",
             eventlog::hook(&request.event),
+            if request.parked.is_some() {
+                " parked"
+            } else {
+                ""
+            },
             eventlog::transition(&read.pane, &ops)
         );
         self.events.line(&request.pane, kind.as_str(), &what);
@@ -1231,6 +1248,12 @@ impl Daemon {
             return Ok(Some((batch, after.session.is_empty())));
         }
         let ctx = self.ctx(pane, &read);
+        // I5: a parked session runs in its own process, the one to look at.
+        let apid = apid.map(|viewer| {
+            parked::config_dir_of(viewer)
+                .and_then(|config| parked::shown_by(&config, viewer))
+                .unwrap_or(viewer)
+        });
         let Some(apid) = apid else {
             // The agent is gone: as H11, notification and internal options too (C6).
             let input = Input {
