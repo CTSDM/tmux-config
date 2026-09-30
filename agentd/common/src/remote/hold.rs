@@ -20,7 +20,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,19 +40,22 @@ use crate::proto::{HookRequest, Remote};
 
 /// What a new pane gets back of the program's screen.
 const KEEP_OUTPUT: usize = 1 << 20;
-/// Events kept while nobody is attached, and events of the agent's session
-/// for a new pane; the oldest go first.
-const KEEP_EVENTS: usize = 1000;
-const KEEP_HISTORY: usize = 2000;
+/// Events kept, numbered: what a reconnecting client missed, and the agent's
+/// session for a new pane. The oldest go first.
+const KEEP_EVENTS: usize = 2000;
+/// Frames waiting for a client; one that falls further behind is dropped
+/// (it comes back and gets what it missed).
+const MAX_QUEUED: usize = 4 << 20;
+/// How long the program's last output may take to drain after its end.
+const DRAIN: Duration = Duration::from_secs(1);
 /// A program that exited waits this long for a client to hear it.
 const KEEP_EXITED: Duration = Duration::from_secs(24 * 3600);
 /// Connections at once (a thread each): a client, hooks, listings.
 const MAX_CONNECTIONS: usize = 64;
 /// Parent chain read for I4 (which looks at 13).
 const MAX_CHAIN: usize = 16;
-/// A client that takes longer to read a frame is dropped: it comes back and
-/// gets what it missed from the buffer.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// A client whose socket takes this long to take one frame is gone.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long `agentd hold <name>` waits for a holder it started.
 const START_BUDGET: Duration = Duration::from_secs(3);
 /// The first frame of a connection.
@@ -252,11 +255,13 @@ pub fn serve(name: &str) -> ExitCode {
         socket,
         next: AtomicU64::new(0),
         connections: AtomicUsize::new(0),
+        drained: (Mutex::new(false), Condvar::new()),
         shared: Mutex::new(Shared {
             client: None,
             ring: Ring::new(KEEP_OUTPUT),
-            events: VecDeque::new(),
-            history: VecDeque::new(),
+            log: VecDeque::new(),
+            seq: 0,
+            session: 1,
             program: None,
             alive: false,
             exit: None,
@@ -284,6 +289,9 @@ struct Hello {
     rows: u16,
     cols: u16,
     have: Option<u64>,
+    /// The number of the last event it got; absent: a new pane.
+    #[serde(default)]
+    events: Option<u64>,
     /// Where the program starts: `~` is this host's home.
     #[serde(default)]
     dir: Option<String>,
@@ -295,22 +303,70 @@ struct Holder {
     next: AtomicU64,
     connections: AtomicUsize,
     shared: Mutex<Shared>,
+    /// Set when the pty has nothing more to read.
+    drained: (Mutex<bool>, Condvar),
 }
 
 struct Shared {
-    /// The attached client, with its number.
-    client: Option<(u64, UnixStream)>,
+    client: Option<Client>,
     ring: Ring,
-    /// Events for the next client.
-    events: VecDeque<HookRequest>,
-    /// The events a client got since the agent's session started: a new
-    /// pane gets them again, to show its state.
-    history: VecDeque<HookRequest>,
+    /// The last events, numbered from 1.
+    log: VecDeque<HookRequest>,
+    /// The number of the last event.
+    seq: u64,
+    /// Where the agent's session began in `log` (its SessionStart).
+    session: u64,
     /// The pty's master and the program's pid, once started.
     program: Option<(File, u32)>,
     /// Not reaped yet: its pid is still its own.
     alive: bool,
     exit: Option<i32>,
+}
+
+/// The attached client. Frames go through its writer thread, so nothing
+/// waits on its socket while holding `Shared`.
+struct Client {
+    id: u64,
+    out: mpsc::Sender<Out>,
+    queued: Arc<AtomicUsize>,
+    stream: UnixStream,
+}
+
+enum Out {
+    Frame(Vec<u8>),
+    /// The program's end: once written, the holder's too.
+    Exit(Vec<u8>),
+}
+
+impl Client {
+    /// Queues a frame; `false` when the client is too far behind.
+    fn send(&self, kind: u8, payload: &[u8]) -> bool {
+        let Some(frame) = frame::encode(kind, payload) else {
+            return false;
+        };
+        let n = frame.len();
+        if self.queued.fetch_add(n, Ordering::Relaxed) + n > MAX_QUEUED {
+            return false;
+        }
+        self.out.send(Out::Frame(frame)).is_ok()
+    }
+
+    fn event(&self, event: &HookRequest, replay: bool) -> bool {
+        let mut event = event.clone();
+        if let Some(remote) = event.remote.as_mut() {
+            remote.replay = replay;
+        }
+        serde_json::to_vec(&event).is_ok_and(|e| self.send(EVENT, &e))
+    }
+}
+
+impl Shared {
+    /// The client goes now: its socket closes under its writer.
+    fn drop_client(&mut self) {
+        if let Some(client) = self.client.take() {
+            let _ = client.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
 }
 
 impl Holder {
@@ -327,12 +383,17 @@ impl Holder {
         let _ = stream.set_read_timeout(Some(FIRST_FRAME));
         let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
         match frame::read_max(&mut stream, frame::SMALL) {
-            Ok(Some((HELLO, p))) => {
-                if let Ok(hello) = serde_json::from_slice::<Hello>(&p) {
+            Ok(Some((HELLO, p))) => match serde_json::from_slice::<Hello>(&p) {
+                Ok(hello) => {
                     let _ = stream.set_read_timeout(None);
                     self.attach(stream, hello);
                 }
-            }
+                Err(_) => {
+                    // Say why, or the client takes it for a dropped line.
+                    let why = json!({"why": "the holder can't read this client's hello (agentd versions differ?)"});
+                    let _ = frame::write(&mut stream, DETACHED, why.to_string().as_bytes());
+                }
+            },
             Ok(Some((HOOK, p))) => self.hook(stream, &p),
             Ok(Some((QUERY, _))) => {
                 let status = {
@@ -349,7 +410,7 @@ impl Holder {
     /// to the program, until it goes or another one comes.
     fn attach(self: &Arc<Self>, stream: UnixStream, hello: Hello) {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let Ok(mut reader) = stream.try_clone() else {
+        let (Ok(mut reader), Ok(writer)) = (stream.try_clone(), stream.try_clone()) else {
             return;
         };
         let size = Winsize {
@@ -383,52 +444,52 @@ impl Holder {
                     }
                 }
             }
-            if let Some((_, mut old)) = s.client.take() {
+            // The one attached before: told, and let go once its writer has
+            // sent that.
+            if let Some(old) = s.client.take() {
                 let why = json!({"why": "attached somewhere else"});
-                let _ = frame::write(&mut old, DETACHED, why.to_string().as_bytes());
-                let _ = old.shutdown(std::net::Shutdown::Both);
+                old.send(DETACHED, why.to_string().as_bytes());
             }
+            let (out, frames) = mpsc::channel();
+            let queued = Arc::new(AtomicUsize::new(0));
+            let holder = self.clone();
+            let counted = queued.clone();
+            thread::spawn(move || holder.writer(writer, frames, counted));
+            let client = Client {
+                id,
+                out,
+                queued,
+                stream,
+            };
             let (at, missed) = s.ring.since(if new { None } else { hello.have });
             // A new pane, or one we wrote "connection lost" on: a TUI has to
             // draw itself again.
             let redraw = !new;
-            let mut stream = stream;
-            let attached = json!({"new": new, "at": at});
-            let replay: Vec<&HookRequest> = if hello.have.is_none() {
-                s.history.iter().collect()
-            } else {
-                Vec::new()
-            };
-            let sent = frame::write(&mut stream, ATTACHED, attached.to_string().as_bytes())
-                .and_then(|()| {
-                    replay
-                        .into_iter()
-                        .try_for_each(|e| send_event(&mut stream, e, true))
-                })
-                .and_then(|()| {
-                    s.events
-                        .iter()
-                        .try_for_each(|e| send_event(&mut stream, e, false))
-                })
-                .and_then(|()| {
-                    missed
-                        .chunks(64 << 10)
-                        .try_for_each(|c| frame::write(&mut stream, OUTPUT, c))
-                });
-            if sent.is_err() {
-                return;
+            // And the number of the last event: what it has from now on.
+            let attached = json!({"new": new, "at": at, "events": s.seq});
+            let mut sent = client.send(ATTACHED, attached.to_string().as_bytes());
+            match hello.events {
+                // A new pane: the agent's session again, to show its state.
+                None => {
+                    for e in s.log.iter().filter(|e| seq_of(e) >= s.session) {
+                        sent = sent && client.event(e, true);
+                    }
+                }
+                // The same pane again: what it missed, as it happened.
+                Some(have) => {
+                    for e in s.log.iter().filter(|e| seq_of(e) > have) {
+                        sent = sent && client.event(e, false);
+                    }
+                }
             }
-            let delivered: Vec<HookRequest> = s.events.drain(..).collect();
-            for e in delivered {
-                remember(&mut s, e);
+            for chunk in missed.chunks(64 << 10) {
+                sent = sent && client.send(OUTPUT, chunk);
             }
             if let Some(code) = s.exit {
-                let _ = frame::write(
-                    &mut stream,
-                    EXIT,
-                    json!({"code": code}).to_string().as_bytes(),
-                );
-                self.finish();
+                let exit = frame::encode(EXIT, json!({"code": code}).to_string().as_bytes());
+                if let Some(exit) = exit {
+                    let _ = client.out.send(Out::Exit(exit));
+                }
             }
             let master = s.program.as_ref().and_then(|(m, _)| m.try_clone().ok());
             if let Some(m) = &master {
@@ -438,7 +499,11 @@ impl Holder {
                     let _ = tcsetwinsize(m, size);
                 }
             }
-            s.client = Some((id, stream));
+            s.client = Some(client);
+            if !sent {
+                s.drop_client();
+                return;
+            }
             master
         };
         let Some(mut input) = input else {
@@ -468,9 +533,43 @@ impl Holder {
             }
         }
         let mut s = self.shared();
-        if s.client.as_ref().is_some_and(|(c, _)| *c == id) {
-            s.client = None;
+        if s.client.as_ref().is_some_and(|c| c.id == id) {
+            s.drop_client();
         }
+    }
+
+    /// A client's frames, in order, until its queue closes or it can't take
+    /// one. After the program's end frame, the holder ends.
+    fn writer(
+        &self,
+        mut stream: UnixStream,
+        frames: mpsc::Receiver<Out>,
+        queued: Arc<AtomicUsize>,
+    ) {
+        for out in frames {
+            match out {
+                Out::Frame(frame) => {
+                    if stream.write_all(&frame).is_err() {
+                        break;
+                    }
+                    queued.fetch_sub(frame.len(), Ordering::Relaxed);
+                }
+                Out::Exit(frame) => {
+                    if stream
+                        .write_all(&frame)
+                        .and_then(|()| stream.flush())
+                        .is_ok()
+                    {
+                        // Heard: nothing is left to hold. Taken so no other
+                        // thread writes half a frame meanwhile.
+                        let _s = self.shared();
+                        self.finish();
+                    }
+                    break;
+                }
+            }
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 
     /// The program, in a new pty of the client's size, with the client's
@@ -518,21 +617,24 @@ impl Holder {
         let mut buf = vec![0u8; 64 << 10];
         loop {
             let n = match master.read(&mut buf) {
-                Ok(0) => return,
+                Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 // EIO: nothing has the terminal open any more.
-                Err(_) => return,
+                Err(_) => break,
             };
             let mut s = self.shared();
             s.ring.push(&buf[..n]);
-            if let Some((_, client)) = s.client.as_mut()
-                && frame::write(client, OUTPUT, &buf[..n]).is_err()
+            if s.client
+                .as_ref()
+                .is_some_and(|c| !c.send(OUTPUT, &buf[..n]))
             {
-                let _ = client.shutdown(std::net::Shutdown::Both);
-                s.client = None;
+                s.drop_client();
             }
         }
+        let (done, drained) = &self.drained;
+        *done.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        drained.notify_all();
     }
 
     /// The program's end: its status to the client, now or when one comes.
@@ -546,30 +648,34 @@ impl Holder {
         // Reaped: its pid may be another process's from now on, which a
         // hook's chain must not match.
         self.shared().alive = false;
-        // Its last output, still on its way through the pty.
-        thread::sleep(Duration::from_millis(100));
+        // Its last output, still in the pty (a process it left behind may
+        // keep the terminal open: not forever).
+        {
+            let (done, drained) = &self.drained;
+            let done = done.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = drained.wait_timeout_while(done, DRAIN, |d| !*d);
+        }
         let mut s = self.shared();
         s.exit = Some(code);
         s.program = None;
-        if let Some((_, mut client)) = s.client.take() {
-            let _ = frame::write(
-                &mut client,
-                EXIT,
-                json!({"code": code}).to_string().as_bytes(),
-            );
-            self.finish();
+        let exit = frame::encode(EXIT, json!({"code": code}).to_string().as_bytes());
+        if let (Some(client), Some(exit)) = (s.client.as_ref(), exit) {
+            // The writer ends the holder once it is written; if it can't be,
+            // the next client hears it.
+            let _ = client.out.send(Out::Exit(exit));
         }
         drop(s);
         let holder = self.clone();
         thread::spawn(move || {
             thread::sleep(KEEP_EXITED);
+            let _s = holder.shared();
             holder.finish();
         });
     }
 
     /// A hook of the held program (hook.rs): I4 against the program, on the
     /// chain of the process that connected as /proc has it (never the one it
-    /// sends), then down to the client, or kept for the next one.
+    /// sends), then numbered, kept, and down to the client if there is one.
     fn hook(&self, mut stream: UnixStream, payload: &[u8]) {
         let reply = |stream: &mut UnixStream, v: serde_json::Value| {
             let _ = frame::write(stream, HOOK, v.to_string().as_bytes());
@@ -595,27 +701,28 @@ impl Holder {
         let Some(agent) = ownership::owner(chain, pid) else {
             return reply(&mut stream, json!({"ok": false, "error": "not-its-agent"}));
         };
+        s.seq += 1;
+        let seq = s.seq;
         request.remote = Some(Remote {
             host: String::new(),
             name: self.name.clone(),
             agent,
             replay: false,
+            seq,
         });
-        let sent = match s.client.as_mut() {
-            Some((_, client)) => send_event(client, &request, false).is_ok(),
-            None => false,
-        };
-        if sent {
-            remember(&mut s, request);
-        } else {
-            if let Some((_, client)) = s.client.take() {
-                let _ = client.shutdown(std::net::Shutdown::Both);
-            }
-            if s.events.len() >= KEEP_EVENTS {
-                s.events.pop_front();
-            }
-            s.events.push_back(request);
+        // A new session of the agent (not a compaction's SessionStart, which
+        // goes on with the same one) is what a new pane shows from.
+        let e = &request.event;
+        if e.ev == "SessionStart" && e.agent_id.is_empty() && e.source != "compact" {
+            s.session = seq;
         }
+        if s.client.as_ref().is_some_and(|c| !c.event(&request, false)) {
+            s.drop_client();
+        }
+        if s.log.len() >= KEEP_EVENTS {
+            s.log.pop_front();
+        }
+        s.log.push_back(request);
         drop(s);
         reply(&mut stream, json!({"ok": true}));
     }
@@ -628,25 +735,8 @@ impl Holder {
     }
 }
 
-fn send_event(stream: &mut UnixStream, event: &HookRequest, replay: bool) -> io::Result<()> {
-    let mut event = event.clone();
-    if let Some(remote) = event.remote.as_mut() {
-        remote.replay = replay;
-    }
-    frame::write(stream, EVENT, &serde_json::to_vec(&event)?)
-}
-
-/// A delivered event, for the next new pane. The agent's (not a
-/// subagent's) SessionStart begins them again: what came before it no
-/// longer shows.
-fn remember(s: &mut Shared, event: HookRequest) {
-    if event.event.ev == "SessionStart" && event.event.agent_id.is_empty() {
-        s.history.clear();
-    }
-    if s.history.len() >= KEEP_HISTORY {
-        s.history.pop_front();
-    }
-    s.history.push_back(event);
+fn seq_of(event: &HookRequest) -> u64 {
+    event.remote.as_ref().map_or(0, |r| r.seq)
 }
 
 /// Resizes the pty one column narrower and back: two SIGWINCH, and a TUI

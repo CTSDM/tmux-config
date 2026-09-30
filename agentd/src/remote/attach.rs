@@ -3,6 +3,7 @@
 //! the holder of `<name>` on `<host>`; the held agents' events to the local
 //! daemon as this pane's own (I6). It reconnects when ssh drops.
 
+use std::cell::Cell;
 use std::env;
 use std::fs::File;
 use std::io::{self, Write};
@@ -34,6 +35,8 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// I4 looks at 13; the chain starts at this process.
 const MAX_CHAIN: usize = 16;
+/// How long the events still queued at the end may take to reach the daemon.
+const FLUSH_EVENTS: Duration = Duration::from_secs(2);
 /// Events waiting for the local daemon; more are dropped.
 const EVENTS_QUEUED: usize = 256;
 const KEYS_POLL: Duration = Duration::from_millis(100);
@@ -160,6 +163,9 @@ fn tmux(args: &[&str]) {
 struct Attached {
     new: bool,
     at: u64,
+    /// The number of the holder's last event.
+    #[serde(default)]
+    events: u64,
 }
 
 /// How a connection ended.
@@ -180,6 +186,8 @@ struct Session {
     up: Arc<Mutex<Option<ChildStdin>>>,
     mode: Arc<AtomicU8>,
     quit: Arc<AtomicBool>,
+    /// The number of the last event the holder sent us (`None`: a new pane).
+    events_have: Cell<Option<u64>>,
     /// The transport while it runs, for a quit to end it: killed through
     /// its handle, never a pid that may have been reaped and reused.
     transport: Arc<Mutex<Option<Child>>>,
@@ -197,10 +205,21 @@ impl Session {
             mode: Arc::default(),
             quit: Arc::default(),
             transport: Arc::default(),
+            events_have: Cell::new(None),
         }
     }
 
     fn run(self) -> ExitCode {
+        let (events, sent) = self.events();
+        let code = self.session(&events);
+        // What the holder sent reaches the daemon before the pane's last
+        // reconcile (unmark): a late event would set its state again.
+        drop(events);
+        let _ = sent.recv_timeout(FLUSH_EVENTS);
+        code
+    }
+
+    fn session(&self, events: &SyncSender<Vec<u8>>) -> ExitCode {
         let Ok(cooked) = tcgetattr(&self.stdin) else {
             return ExitCode::FAILURE;
         };
@@ -211,7 +230,6 @@ impl Session {
         let (wake, woken) = mpsc::channel::<()>();
         self.keys(wake.clone());
         self.signals(wake);
-        let events = self.events();
         let mut have: Option<u64> = None;
         let mut attached_before = false;
         let mut offline = false;
@@ -220,12 +238,14 @@ impl Session {
             let _ = tcsetattr(&self.stdin, OptionalActions::Now, &cooked);
         };
         loop {
-            let end = match self.transport() {
+            // After the first attach nothing may ask on the terminal: its keys
+            // are read for ctrl-c, and would be taken from ssh's prompt.
+            let end = match self.transport(attached_before) {
                 Ok(child) => self.connection(
                     child,
                     &cooked,
                     &mut out,
-                    &events,
+                    events,
                     &mut have,
                     &mut attached_before,
                     &mut retry,
@@ -278,12 +298,27 @@ impl Session {
         }
     }
 
-    fn transport(&self) -> io::Result<Child> {
-        hold_command(&self.host, Some(&self.name))?
+    fn transport(&self, batch: bool) -> io::Result<Child> {
+        let mut child = hold_command(&self.host, Some(&self.name), batch)?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // ssh's complaints: in the pane before the first attach (why it
+        // can't connect), logged after it (the screen is a program's then).
+        if let Some(stderr) = child.stderr.take() {
+            let (mode, host) = (self.mode.clone(), self.host.clone());
+            thread::spawn(move || {
+                for line in io::BufRead::lines(io::BufReader::new(stderr)).map_while(Result::ok) {
+                    if mode.load(Ordering::Relaxed) == CONNECTING {
+                        eprint!("{line}\r\n");
+                    } else {
+                        crate::debug::log(&format!("agentd remote {host}: {line}"));
+                    }
+                }
+            });
+        }
+        Ok(child)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -305,14 +340,17 @@ impl Session {
         };
         *lock(&self.transport) = Some(child);
         let (rows, cols) = self.size();
+        // A quit that came while it was starting found nothing to stop.
+        let quit = self.quit.load(Ordering::Relaxed);
         let hello = json!({
             "term": env::var("TERM").unwrap_or_default(),
             "rows": rows,
             "cols": cols,
             "have": *have,
+            "events": self.events_have.get(),
             "dir": self.dir,
         });
-        let end = if frame::write(&mut up, HELLO, hello.to_string().as_bytes()).is_err() {
+        let end = if quit || frame::write(&mut up, HELLO, hello.to_string().as_bytes()).is_err() {
             End::Lost
         } else {
             *self.lock_up() = Some(up);
@@ -320,7 +358,10 @@ impl Session {
                 match frame::read(&mut down) {
                     Ok(Some((ATTACHED, p))) => {
                         let Ok(a) = serde_json::from_slice::<Attached>(&p) else {
-                            break End::Lost;
+                            // Not a dropped line: trying again won't help.
+                            break End::Detached(
+                                "can't read the holder's answer (agentd versions differ?)".into(),
+                            );
                         };
                         let mut raw = cooked.clone();
                         raw.make_raw();
@@ -337,6 +378,12 @@ impl Session {
                             );
                         }
                         *have = Some(a.at);
+                        // A new pane counts from here (it got the agent's
+                        // session as replay); a pane back counts on from
+                        // the events it gets, in case the line drops again.
+                        if self.events_have.get().is_none() {
+                            self.events_have.set(Some(a.events));
+                        }
                         *attached_before = true;
                         *retry = RETRY_FIRST;
                         if *offline {
@@ -354,6 +401,13 @@ impl Session {
                         *have = have.map(|h| h.saturating_add(p.len() as u64));
                     }
                     Ok(Some((EVENT, p))) => {
+                        let seq = serde_json::from_slice::<serde_json::Value>(&p)
+                            .ok()
+                            .and_then(|v| v["remote"]["seq"].as_u64());
+                        if let Some(seq) = seq {
+                            let seen = self.events_have.get().unwrap_or(0);
+                            self.events_have.set(Some(seen.max(seq)));
+                        }
                         // Full: the daemon is behind (or the holder floods).
                         let _ = events.try_send(p);
                     }
@@ -506,15 +560,18 @@ impl Session {
 
     /// The held agents' events to the local daemon, in order, as the pane's
     /// own (I6).
-    fn events(&self) -> SyncSender<Vec<u8>> {
+    /// The second: closed once they are all sent.
+    fn events(&self) -> (SyncSender<Vec<u8>>, Receiver<()>) {
         // Bounded: a holder that floods events can't grow it (they are
         // dropped, and the pane catches up at the agent's next one).
         let (tx, rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::sync_channel(EVENTS_QUEUED);
+        let (done, sent) = mpsc::channel::<()>();
         let Some((tmux, pane)) = self.pane.tmux.clone() else {
-            return tx;
+            return (tx, sent);
         };
         let host = self.host.clone();
         thread::spawn(move || {
+            let _done = done;
             let chain: Vec<Link> = procfs::chain(std::process::id(), MAX_CHAIN)
                 .into_iter()
                 .map(|s| (s.pid, s.comm, s.starttime))
@@ -546,7 +603,7 @@ impl Session {
                 }
             }
         });
-        tx
+        (tx, sent)
     }
 }
 
@@ -556,7 +613,7 @@ pub fn list(host: &str) -> ExitCode {
         eprintln!("agentd remote: {host:?} is not a host");
         return ExitCode::from(2);
     }
-    match hold_command(host, None).and_then(|mut c| c.status()) {
+    match hold_command(host, None, true).and_then(|mut c| c.status()) {
         Ok(s) if s.success() => ExitCode::SUCCESS,
         Ok(_) => ExitCode::FAILURE,
         Err(e) => {
@@ -567,7 +624,7 @@ pub fn list(host: &str) -> ExitCode {
 }
 
 /// `agentd hold [name]` on the host, over ssh; `-` runs it here.
-fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
+fn hold_command(host: &str, name: Option<&str>, batch: bool) -> io::Result<Command> {
     if host == "-" {
         let mut c = Command::new(env::current_exe()?);
         c.arg("hold").args(name);
@@ -576,9 +633,9 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
     let var = |n| env::var_os(n).filter(|v| !v.is_empty());
     let agentd = var("AGENTD_REMOTE_AGENTD").map(|v| v.to_string_lossy().into_owned());
     let mut c = Command::new(var("AGENTD_SSH").unwrap_or_else(|| "ssh".into()));
-    if name.is_none() {
-        // The listing runs unattended (the prefix N form asks it): a prompt
-        // would stop it, and the form, for good.
+    if batch {
+        // Unattended (the prefix N form's listing, a reconnect): a prompt
+        // would stop it for good, or fight us for the terminal's keys.
         c.args(["-o", "BatchMode=yes"]);
     }
     // No forwards: the desktop bridge's RemoteForward belongs to the
