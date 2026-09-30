@@ -34,7 +34,7 @@ use super::frame::{
     self, ATTACHED, DETACHED, EVENT, EXIT, HELLO, HOOK, INPUT, OUTPUT, QUERY, RESIZE,
 };
 use super::{HOLD_VAR, Ring};
-use crate::core;
+use crate::ownership;
 use crate::proto::{HookRequest, Remote};
 
 /// What a new pane gets back of the program's screen.
@@ -552,7 +552,7 @@ impl Holder {
             return reply(&mut stream, json!({"ok": false, "error": "no program"}));
         };
         let chain = request.chain.iter().map(|(p, c, _)| (*p, c.as_str()));
-        let Some(agent) = core::owner(chain, pid) else {
+        let Some(agent) = ownership::owner(chain, pid) else {
             return reply(&mut stream, json!({"ok": false, "error": "not-its-agent"}));
         };
         request.remote = Some(Remote {

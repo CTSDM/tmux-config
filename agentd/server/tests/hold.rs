@@ -1,5 +1,5 @@
-//! Remote panes, the server's end (design.md, "Remote panes"): `agentd hold`
-//! spoken to in frames, as `agentd remote` does over ssh. No tmux: the held
+//! Remote panes, the server's end (design.md, "Remote panes"): `agentd-server
+//! hold` spoken to in frames, as `agentd remote` does over ssh. No tmux: the held
 //! program is a `/bin/sh`, and its agent a copy of it named `claude`.
 
 use std::os::unix::net::UnixStream;
@@ -11,7 +11,9 @@ use std::thread::{self, sleep};
 use std::time::{Duration, Instant};
 use std::{env, fs};
 
-use agentd::remote::frame::{self, ATTACHED, DETACHED, EVENT, EXIT, HELLO, HOOK, INPUT, OUTPUT};
+use agentd_common::remote::frame::{
+    self, ATTACHED, DETACHED, EVENT, EXIT, HELLO, HOOK, INPUT, OUTPUT,
+};
 use serde_json::{Value, json};
 
 static DIRS: AtomicUsize = AtomicUsize::new(0);
@@ -36,7 +38,7 @@ impl Lab {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_agentd"));
+        let mut c = Command::new(env!("CARGO_BIN_EXE_agentd-server"));
         c.args(args)
             .env("AGENTD_HOLD_DIR", self.hold())
             .env("SHELL", "/bin/sh")
@@ -163,7 +165,7 @@ fn attached(client: &mut Client) -> Value {
 
 /// Keys that make the held shell's `claude` run a hook after `delay`.
 fn hook_keys(event: &str, delay: &str) -> String {
-    let agentd = env!("CARGO_BIN_EXE_agentd");
+    let agentd = env!("CARGO_BIN_EXE_agentd-server");
     format!(
         "claude -c 'sleep {delay}; printf %s \"{{\\\"hook_event_name\\\":\\\"{event}\\\",\\\"session_id\\\":\\\"s1\\\"}}\" | {agentd} hook claude' &\n"
     )

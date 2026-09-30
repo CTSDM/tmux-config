@@ -12,61 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+pub use agentd_common::event::{Event, Kind, line};
+pub use agentd_common::ownership::{owner, remote_owner};
 pub use codex::CodexFacts;
-pub use text::{escape_hashes, line, notify_title, subtypes};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Kind {
-    Claude,
-    Codex,
-}
-
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Claude => "claude",
-            Kind::Codex => "codex",
-        }
-    }
-}
-
-/// The fields of a hook event that the contract uses (I3), already converted
-/// to strings, whitespace collapsed and cut. Missing means empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Event {
-    #[serde(rename = "hook_event_name")]
-    pub ev: String,
-    #[serde(rename = "session_id")]
-    pub sid: String,
-    pub agent_id: String,
-    pub agent_type: String,
-    #[serde(rename = "tool_name")]
-    pub tool: String,
-    #[serde(rename = "tool_use_id")]
-    pub tool_id: String,
-    pub detail: String,
-    #[serde(rename = "notification_type")]
-    pub ntype: String,
-    #[serde(rename = "last_assistant_message")]
-    pub last: String,
-    pub error: String,
-    #[serde(rename = "permission_mode")]
-    pub mode: String,
-    pub source: String,
-    pub model: String,
-    #[serde(rename = "transcript_path")]
-    pub transcript: String,
-    /// Codex: `turn_id`.
-    #[serde(rename = "turn_id")]
-    pub turn: String,
-    /// Codex: the call's fingerprint (X2), computed by the hook so no tool
-    /// input leaves it (X8).
-    pub fingerprint: String,
-    /// Codex: `tool_response.accepted` is true (X4).
-    pub accepted: bool,
-}
+pub use text::{escape_hashes, notify_title, subtypes};
 
 /// One hook call that passed ownership (I4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,42 +208,6 @@ pub fn may_need_procs(kind: Kind, ev: &str) -> bool {
 /// Whether handling `ev` may need the agent's background shells (B1).
 pub fn may_need_bg_shells(kind: Kind, ev: &str) -> bool {
     kind == Kind::Claude && ev == "Stop"
-}
-
-/// I4 with C4: the pane's own agent, from the hook's parent chain (pid and
-/// comm, parent first). The walk must reach `pane_pid` within 13 processes,
-/// and exactly one of them, `pane_pid` included, is `claude` or `codex`.
-pub fn owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32) -> Option<u32> {
-    let mut agent = None;
-    let mut agents = 0;
-    for (pid, comm) in chain.into_iter().take(13) {
-        if comm == "claude" || comm == "codex" {
-            agents += 1;
-            agent = Some(pid);
-        }
-        if agents > 1 {
-            return None;
-        }
-        if pid == pane_pid {
-            return if agents == 1 { agent } else { None };
-        }
-    }
-    None
-}
-
-/// I6: an event a remote pane's `agentd remote` passes on, from its own chain.
-/// The walk must reach `pane_pid` within 13 processes, none of them an agent
-/// (the agent runs on the other host).
-pub fn remote_owner<'a>(chain: impl IntoIterator<Item = (u32, &'a str)>, pane_pid: u32) -> bool {
-    for (pid, comm) in chain.into_iter().take(13) {
-        if comm == "claude" || comm == "codex" {
-            return false;
-        }
-        if pid == pane_pid {
-            return true;
-        }
-    }
-    false
 }
 
 /// Handles one hook event (or Codex observation).

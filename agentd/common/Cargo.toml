@@ -1,0 +1,17 @@
+[package]
+name = "agentd-common"
+version = "0.1.0"
+edition = "2024"
+description = "What the desktop's agentd and a server's agentd-server share: events, ownership, the holder of remote panes"
+publish = false
+
+# New crates need the architect's OK (design.md, Rules 7). No async runtime,
+# no D-Bus: this is all a server runs.
+[dependencies]
+rustix = { version = "1.1.5", features = ["event", "fs", "process", "pty", "stdio", "termios"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["preserve_order"] }
+sha2 = "0.11.0"
+
+[lints]
+workspace = true

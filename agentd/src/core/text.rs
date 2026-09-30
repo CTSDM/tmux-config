@@ -2,33 +2,7 @@
 
 use std::collections::BTreeMap;
 
-/// I3: every field is cut to this many characters.
-pub const MAX_CHARS: usize = 300;
-
-/// I3's `gsub("\\s+"; " ") | .[0:300]`: whitespace runs (Unicode, as jq's
-/// `\s`) collapsed to one space, then cut to 300 characters.
-pub fn line(text: &str) -> String {
-    let mut out = String::new();
-    let mut chars = 0;
-    let mut in_space = false;
-    for c in text.chars() {
-        if c.is_whitespace() {
-            if in_space {
-                continue;
-            }
-            in_space = true;
-            out.push(' ');
-        } else {
-            in_space = false;
-            out.push(c);
-        }
-        chars += 1;
-        if chars == MAX_CHARS {
-            break;
-        }
-    }
-    out
-}
+pub use agentd_common::event::line;
 
 /// tmux expands `#` in the formats that show these options: store `##`.
 pub fn escape_hashes(s: &str) -> String {

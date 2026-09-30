@@ -552,10 +552,7 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
         return Ok(c);
     }
     let var = |n| env::var_os(n).filter(|v| !v.is_empty());
-    let agentd = var("AGENTD_REMOTE_AGENTD").map_or_else(
-        || "agentd".to_string(),
-        |v| v.to_string_lossy().into_owned(),
-    );
+    let agentd = var("AGENTD_REMOTE_AGENTD").map(|v| v.to_string_lossy().into_owned());
     let mut c = Command::new(var("AGENTD_SSH").unwrap_or_else(|| "ssh".into()));
     // No forwards: the desktop bridge's RemoteForward belongs to the
     // interactive ssh, and a second one would only fail to bind.
@@ -571,12 +568,25 @@ fn hold_command(host: &str, name: Option<&str>) -> io::Result<Command> {
         "ServerAliveCountMax=3",
         host,
     ]);
-    // A non-login shell runs it: setup.sh's place may not be in its PATH.
-    c.arg(format!(
-        "PATH=\"$HOME/.local/bin:$PATH\" exec {agentd} hold {}",
-        name.unwrap_or("")
-    ));
+    c.arg(remote_script(agentd.as_deref(), name));
     Ok(c)
+}
+
+/// What ssh runs on the host: `AGENTD_REMOTE_AGENTD` if set, else the small
+/// agentd-server, else a full agentd. A non-login shell runs it, so
+/// ~/.local/bin (setup.sh's place) may not be in its PATH. Neither there:
+/// exit 127 with a line that says so.
+fn remote_script(agentd: Option<&str>, name: Option<&str>) -> String {
+    let name = name.unwrap_or("");
+    let path = "PATH=\"$HOME/.local/bin:$PATH\"";
+    match agentd {
+        Some(agentd) => format!("{path} exec {agentd} hold {name}"),
+        None => format!(
+            "{path}; a=$(command -v agentd-server || command -v agentd) || \
+             {{ echo \"no agentd-server (or agentd) on $(hostname)\" >&2; exit 127; }}; \
+             exec \"$a\" hold {name}"
+        ),
+    }
 }
 
 /// Stops trying: the transport, if one is connecting, and the wait.
@@ -595,5 +605,55 @@ fn send(up: &Mutex<Option<ChildStdin>>, kind: u8, payload: &[u8]) {
         && frame::write(w, kind, payload).is_err()
     {
         *up = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Runs the script in `sh` with a home whose ~/.local/bin has `bins`,
+    /// each printing its own name: what it would exec.
+    fn run(bins: &[&str], agentd: Option<&str>) -> (i32, String, String) {
+        let home = std::env::temp_dir().join(format!(
+            "agentd-script-{}-{}",
+            std::process::id(),
+            bins.join("-")
+        ));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        for b in bins {
+            let f = bin.join(b);
+            std::fs::write(&f, format!("#!/bin/sh\necho {b} \"$@\"\n")).unwrap();
+            Command::new("chmod").arg("755").arg(&f).status().unwrap();
+        }
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(remote_script(agentd, Some("api")))
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        )
+    }
+
+    #[test]
+    fn the_host_runs_the_small_binary_else_the_full_one() {
+        assert_eq!(
+            run(&["agentd-server", "agentd"], None).1,
+            "agentd-server hold api"
+        );
+        assert_eq!(run(&["agentd"], None).1, "agentd hold api");
+        let (code, out, err) = run(&[], None);
+        assert_eq!((code, out.as_str()), (127, ""));
+        assert!(err.starts_with("no agentd-server (or agentd) on "), "{err}");
+        // Named: that one, found in ~/.local/bin too.
+        assert_eq!(run(&["mine"], Some("mine")).1, "mine hold api");
     }
 }
