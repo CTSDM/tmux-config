@@ -61,13 +61,15 @@ pub struct Event {
 pub const MAX_CHARS: usize = 300;
 
 /// I3's `gsub("\\s+"; " ") | .[0:300]`: whitespace runs (Unicode, as jq's
-/// `\s`) collapsed to one space, then cut to 300 characters.
+/// `\s`) collapsed to one space, then cut to 300 characters. Control
+/// characters count as whitespace too (CHANGE C12): tmux reads options back
+/// with \x1e/\x1f as separators, and an escape would reach terminals.
 pub fn line(text: &str) -> String {
     let mut out = String::new();
     let mut chars = 0;
     let mut in_space = false;
     for c in text.chars() {
-        if c.is_whitespace() {
+        if c.is_whitespace() || c.is_control() {
             if in_space {
                 continue;
             }
@@ -169,6 +171,38 @@ fn value_line(v: Option<&Value>) -> String {
         None => String::new(),
         Some(Value::String(s)) => line(s),
         Some(other) => line(&other.to_string()),
+    }
+}
+
+impl Event {
+    /// I6: an event from another host, cleaned again here: its text as I3
+    /// cuts it (the other end may not have), a fingerprint only if it is one,
+    /// and no transcript, a path on that host that nothing here may read.
+    pub fn from_remote(mut self) -> Event {
+        for field in [
+            &mut self.ev,
+            &mut self.sid,
+            &mut self.agent_id,
+            &mut self.agent_type,
+            &mut self.tool,
+            &mut self.tool_id,
+            &mut self.detail,
+            &mut self.ntype,
+            &mut self.last,
+            &mut self.error,
+            &mut self.mode,
+            &mut self.source,
+            &mut self.model,
+            &mut self.turn,
+        ] {
+            *field = line(field);
+        }
+        let hex = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex(&self.fingerprint) {
+            self.fingerprint.clear();
+        }
+        self.transcript.clear();
+        self
     }
 }
 
@@ -429,5 +463,37 @@ mod tests {
         assert!(event_from_json(&json!("x")).is_none());
         assert!(event_from_json(&json!(3)).is_none());
         assert_eq!(event_from_json(&json!(null)), Some(Event::default()));
+    }
+
+    #[test]
+    fn c12_control_characters_are_whitespace() {
+        let e =
+            event(json!({"tool_input": {"command": "a\u{1f}b\u{1e}\u{1b}[31mc\u{7f}d\u{9b}e"}}));
+        assert_eq!(e.detail, "a b [31mc d e");
+    }
+
+    #[test]
+    fn i6_a_remote_event_is_cleaned_again() {
+        let raw = Event {
+            ev: "Stop".into(),
+            tool: format!("Bash\u{1f}{}", "x".repeat(400)),
+            last: "done\n\n\u{1e}ok".into(),
+            transcript: "/etc/shadow".into(),
+            fingerprint: "not hex".into(),
+            ..Event::default()
+        };
+        let e = raw.from_remote();
+        assert_eq!(e.ev, "Stop");
+        assert!(e.tool.starts_with("Bash x"));
+        assert_eq!(e.tool.chars().count(), MAX_CHARS);
+        assert_eq!(e.last, "done ok");
+        assert_eq!(e.transcript, "");
+        assert_eq!(e.fingerprint, "");
+        let fp = "a".repeat(64);
+        let kept = Event {
+            fingerprint: fp.clone(),
+            ..Event::default()
+        };
+        assert_eq!(kept.from_remote().fingerprint, fp);
     }
 }

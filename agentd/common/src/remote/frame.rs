@@ -25,25 +25,40 @@ pub const HOOK: u8 = b'K';
 /// `agentd hold` listing: the question, and `attached`, `running` (JSON).
 pub const QUERY: u8 = b'Q';
 
-/// Nothing we send comes near it; more is a broken stream.
-const MAX: usize = 8 << 20;
+/// The biggest frame is a 64 KiB chunk of output; a hook's request is a few
+/// KiB. More is a broken or hostile stream, refused before it is read.
+const MAX: usize = 256 << 10;
 
-pub fn encode(kind: u8, payload: &[u8]) -> Vec<u8> {
+/// `None` for a payload the other end would refuse.
+pub fn encode(kind: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() > MAX {
+        return None;
+    }
     let mut buf = Vec::with_capacity(5 + payload.len());
     buf.push(kind);
-    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(&u32::try_from(payload.len()).ok()?.to_be_bytes());
     buf.extend_from_slice(payload);
-    buf
+    Some(buf)
 }
 
 /// One frame, in one write: frames from several threads never interleave.
 pub fn write(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
-    w.write_all(&encode(kind, payload))?;
+    let frame = encode(kind, payload)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame too big"))?;
+    w.write_all(&frame)?;
     w.flush()
 }
 
+/// Keys, sizes, a hello, a hook's request, a question: all small.
+pub const SMALL: usize = 64 << 10;
+
 /// One frame; `None` when the stream ends cleanly before it.
 pub fn read(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
+    read_max(r, MAX)
+}
+
+/// One frame of at most `max` bytes, refused before it is read.
+pub fn read_max(r: &mut impl Read, max: usize) -> io::Result<Option<(u8, Vec<u8>)>> {
     let mut head = [0u8; 5];
     loop {
         match r.read(&mut head[..1]) {
@@ -55,7 +70,7 @@ pub fn read(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
     }
     r.read_exact(&mut head[1..])?;
     let len = u32::from_be_bytes([head[1], head[2], head[3], head[4]]) as usize;
-    if len > MAX {
+    if len > max.min(MAX) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too big"));
     }
     let mut payload = vec![0u8; len];
@@ -80,10 +95,13 @@ mod tests {
 
     #[test]
     fn cut_or_huge_frames_are_errors() {
-        let buf = encode(OUTPUT, b"hello");
+        let buf = encode(OUTPUT, b"hello").unwrap();
         assert!(read(&mut &buf[..3]).is_err());
         assert!(read(&mut &buf[..7]).is_err());
         let huge = [OUTPUT, 0xff, 0xff, 0xff, 0xff];
         assert!(read(&mut &huge[..]).is_err());
+        // Nor sent.
+        assert!(encode(OUTPUT, &vec![0; MAX + 1]).is_none());
+        assert!(write(&mut Vec::new(), OUTPUT, &vec![0; MAX + 1]).is_err());
     }
 }

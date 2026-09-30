@@ -1643,6 +1643,13 @@ fn i6_remote_events_are_the_panes_own_and_reconcile_leaves_them() {
     let state = |server: &Server| server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]);
     // agentd remote is the pane's process: no agent on the way.
     let chain = json!([[pane_pid, "agentd", 0]]);
+    // Not a pane agentd remote marked (for that host and shell): refused.
+    remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
+    assert_eq!(state(&server), "");
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:other"]);
+    remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
+    assert_eq!(state(&server), "");
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
     remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
     remote_hook(
         &server,
@@ -1660,7 +1667,6 @@ fn i6_remote_events_are_the_panes_own_and_reconcile_leaves_them() {
     remote_hook(&server, &pane, "codex", chain, ev("Stop"));
     assert_eq!(state(&server), "working");
     // Reconcile finds no local agent, and leaves a remote pane alone...
-    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
     assert!(server.ctl(&["reconcile", &pane]).status.success());
     assert_eq!(state(&server), "working");
     // ...until agentd remote has left it.
@@ -1687,6 +1693,7 @@ fn i6_a_replayed_event_writes_the_state_and_nothing_else() {
         .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
         .parse()
         .unwrap();
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
     let chain = json!([[pane_pid, "agentd", 0]]);
     let sink = server.runtime.join("sink.jsonl");
     for name in ["SessionStart", "UserPromptSubmit", "Stop"] {
@@ -1712,4 +1719,39 @@ fn i6_a_replayed_event_writes_the_state_and_nothing_else() {
     wait_for("the notification", || {
         fs::read_to_string(&sink).is_ok_and(|s| s.contains("\"notify\""))
     });
+}
+
+#[test]
+fn i6_a_remote_event_cannot_shift_the_panes_fields_or_name_a_local_file() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let pane = server.new_pane();
+    let pane_pid: u64 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    server.tmux(&["set", "-p", "-t", &pane, "@agent_remote", "box:api"]);
+    let chain = json!([[pane_pid, "agentd", 0]]);
+    let hostile = json!({
+        "hook_event_name": "PreToolUse", "session_id": "s1", "tool_name": "Bash",
+        "detail": "ls\u{1f}x\u{1f}\u{1f}\u{1e}evil\u{1b}[2J",
+        "transcript_path": "/etc/passwd",
+    });
+    remote_hook(&server, &pane, "claude", chain.clone(), ev("SessionStart"));
+    remote_hook(&server, &pane, "claude", chain, hostile);
+    let tool = server.tmux(&["show", "-pqv", "-t", &pane, "@agent_tool"]);
+    assert!(!tool.chars().any(|c| c.is_control()), "{tool:?}");
+    assert_eq!(tool, "Bash: ls x evil [2J");
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_transcript"]),
+        ""
+    );
+    // The daemon still reads the pane as remote: its fields are where they were.
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(
+        server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]),
+        "working"
+    );
 }

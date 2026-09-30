@@ -411,7 +411,15 @@ impl Daemon {
         }
     }
 
-    async fn hook(self: &Rc<Self>, request: Box<HookRequest>) -> Reply {
+    async fn hook(self: &Rc<Self>, mut request: Box<HookRequest>) -> Reply {
+        if request.remote.is_some() {
+            // I6: from another host; nothing it sent is taken as it came.
+            request.event = std::mem::take(&mut request.event).from_remote();
+            request.env.retain(|k, _| k == "CLAUDE_CONFIG_DIR");
+            for v in request.env.values_mut() {
+                *v = core::line(v);
+            }
+        }
         let (ack, acked) = oneshot::channel();
         let pane = request.pane.clone();
         self.queue(&pane, Job::Hook(request, ack));
@@ -727,8 +735,16 @@ impl Daemon {
             return Ok(None);
         }
         let owner = match (&request.parked, remote) {
-            // I6: no local agent process, so nothing local looks at one.
-            (_, true) => core::remote_owner(links(&request.chain), read.pane_pid).then_some(0),
+            // I6: no local agent process, so nothing local looks at one; and
+            // only a pane its `agentd remote` marked for that host and shell.
+            (_, true) => core::remote_owner(links(&request.chain), read.pane_pid)
+                .then_some(0)
+                .filter(|_| {
+                    request
+                        .remote
+                        .as_ref()
+                        .is_some_and(|r| read.remote == format!("{}:{}", r.host, r.name))
+                }),
             (None, false) => core::owner(links(&request.chain), read.pane_pid),
             // I5: the pane's agent shows the session, which sent the hook.
             (Some(p), false) => core::owner(links(&p.viewer), read.pane_pid)
@@ -776,6 +792,7 @@ impl Daemon {
             config_dir: request.env.get("CLAUDE_CONFIG_DIR").cloned(),
             agent_pid,
             observing: false,
+            replay,
         };
         let (batch, ops) = self.run_core(&input, &facts, &read, replay).await;
         let what = format!(
@@ -815,7 +832,9 @@ impl Daemon {
             );
             let mut effects = core::handle(&mut state, input, facts);
             if quiet {
-                effects.retain(|e| matches!(e, Effect::Options(_)));
+                // The state, and its turn signal; no sound, notification or
+                // timer a second time.
+                effects.retain(|e| matches!(e, Effect::Options(_) | Effect::Blink));
             }
             if (
                 &state.subagents,
@@ -1222,6 +1241,7 @@ impl Daemon {
             config_dir: None,
             agent_pid: agent,
             observing: true,
+            replay: false,
         };
         let (batch, ops) = self.run_core(&input, &facts, read, false).await;
         if via != "observe" || eventlog::changes(&read.pane, &ops) {
@@ -1318,6 +1338,7 @@ impl Daemon {
                 config_dir: None,
                 agent_pid: 0,
                 observing: false,
+                replay: false,
             };
             let facts = self.facts(&read, None, 0, None);
             let (batch, ops) = self.run_core(&input, &facts, &read, false).await;

@@ -216,8 +216,11 @@ local agentd daemon                             └── agentd hook claude (AG
 - **Hooks on the server:** the held program has `AGENTD_HOLD` (the holder's
   socket) instead of `TMUX`/`TMUX_PANE`. `agentd hook` sends it the event
   with its parent chain; the holder checks I4 against its own child (the
-  held shell plays `pane_pid`), acks, and passes the event down, or keeps it
-  (up to 1000) while no client is attached.
+  held shell plays `pane_pid`), on the chain it reads itself, numbers the
+  event, keeps it (the last 2000), acks, and queues it for the client.
+  Nothing waits on a client's socket under the holder's lock: each client
+  has a writer thread and a queue of at most 4 MiB, and one that falls
+  further behind is dropped (it comes back and gets what it missed).
 - **In the local daemon** an event from `agentd remote` is the pane's own:
   I6 (the chain of `agentd remote` reaches `pane_pid` with no agent on it)
   replaces I4, and the agent pid is 0, so everything that reads the agent's
@@ -232,23 +235,42 @@ local agentd daemon                             └── agentd hook claude (AG
   stays raw (no echo): a TUI keeps track of its screen by the cursor, and
   a line of ours would scramble its next redraw. The pane is tinted
   (`window-style`) and the status line says it once; ctrl-c or ctrl-d
-  gives up, the shell stays held. On attach it sends that count, and the holder replays what the
-  pane missed, if it still has it; a new pane (count absent) gets the whole
-  buffer from its first full line, and before it the events of the agent's
-  session (since its SessionStart) again, marked `replay`: the daemon only
-  writes their options, so the pane shows the agent's state without a
-  second sound or notification. Either way the holder then resizes the
-  pty one column narrower and back, so a TUI draws its screen again (over
-  the "connection lost" line). Events kept while nobody was attached go
-  down before the output.
-- **Ends:** the held program exits → the holder sends its status, the
-  client exits with it (the pane closes). Killing the local pane only
+  gives up, the shell stays held; reconnecting never prompts (BatchMode:
+  its keys are ours then). On attach it sends that count and the number
+  of the last event it got: the holder resends the events after it, as
+  they happened (an event written into a line that had died is not lost),
+  then the output the pane missed, if it still has it. A new pane (no
+  counts) gets the events of the agent's session (since its SessionStart,
+  not a compaction's) again, marked `replay`: the daemon writes their
+  options and the blink only, so the pane shows the agent's state without
+  a second sound or notification, and they join no round (R); then the
+  whole buffer from its first full line. Either way the holder then
+  resizes the pty one column narrower and back, so a TUI draws its screen
+  again (over the "connection lost" line).
+- **Ends:** the held program exits → once its output has drained (a
+  second at most), the holder sends its status and exits when it is
+  written; if it can't be, the next client gets it. The client exits with
+  it (the pane closes), after the events it still had reached the daemon. Killing the local pane only
   detaches: the program keeps running on the server.
+- **Trust.** The holders' folder is private (0700, ours, never a link)
+  and every socket there answers only this user (`SO_PEERCRED`, checked on
+  both ends). Within the user nothing is hidden, as with tmux's socket: any
+  process of theirs can attach to a held shell and type into it, and every
+  program in it has `AGENTD_HOLD`. A hook is checked on its own chain,
+  read from /proc from the process that connected, never on the chain it
+  sends; the hook talks only to a socket in that folder. The server is
+  less trusted than the desktop: nothing of its events is taken as it came
+  (contract I6), frames are at most 256 KiB, and a host is never an ssh
+  option.
 - **Frames:** one type byte, a 4-byte big-endian length, the payload.
-  Up: `H` hello (JSON: `term`, `rows`, `cols`, `have`, `dir`), `I` input, `R`
-  resize (JSON). Down: `A` attached (JSON: `new`), `O` output, `E` event
-  (the hook's request, plus `agent`, the pid I4 found), `X` exit (JSON:
-  `code`), `D` detached (JSON: `why`). The hook's connection to the holder
+  Up: `H` hello (JSON: `term`, `rows`, `cols`, `have`, `events`, `dir`),
+  `I` input, `R` resize (JSON). Down: `A` attached (JSON: `new`, `at`,
+  `events`), `O` output, `E` event (the hook's request, plus in `remote`
+  `agent`, the pid I4 found, `seq`, its number, and `replay`), `X` exit
+  (JSON: `code`), `D` detached (JSON: `why`; also when the other end can't
+  read a hello or an answer: agentd versions that differ, not a line to
+  try again). JSON fields only ever get added, and a missing one has a
+  default, so an older holder and a newer client still talk. The hook's connection to the holder
   is one `K` frame (its request) and one `K` back (the reply); the listing's,
   one `Q` and one `Q` back (`attached`, `running`).
 

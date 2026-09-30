@@ -180,6 +180,7 @@ impl Sim {
             config_dir: None,
             agent_pid: AGENT,
             observing,
+            replay: false,
         };
         let run = Run(core::handle(&mut self.state, &input, &facts));
         for op in run.ops() {

@@ -299,7 +299,7 @@ pub fn handle(state: &mut State, input: &Input, facts: &Facts) -> Vec<Effect> {
 
     match e.ev.as_str() {
         // R: the pane joins its space's round.
-        "UserPromptSubmit" => {
+        "UserPromptSubmit" if !input.replay => {
             state
                 .rounds
                 .entry(pane.space.clone())

@@ -47,8 +47,8 @@ own_daemon() {
         if [[ $exe == "$bin" ]]; then
             return 0
         fi
-        [[ -n $pid ]] && t run-shell "$bin ctl stop" || true
-        t run-shell "$bin ensure" || true
+        [[ -n $pid ]] && t run-shell "$(printf '%q' "$bin") ctl stop" || true
+        t run-shell "$(printf '%q' "$bin") ensure" || true
         sleep 0.3
     done
     echo "remote-lab: the daemon is not this build's ($exe)" >&2
@@ -77,7 +77,8 @@ case "${1:-attach}" in
 attach)
     start
     if [[ -n ${TMUX:-} ]] && command -v kitty >/dev/null; then
-        kitty --detach env -u TMUX -u TMUX_PANE tmux -L "$lab" attach -t lab
+        kitty --detach env -u TMUX -u TMUX_PANE tmux -L "$lab" attach -t lab ||
+            echo "remote-lab: no kitty window; attach with: tmux -L $lab attach -t lab" >&2
     else
         t attach -t lab
     fi
@@ -89,7 +90,7 @@ new)
     for var in AGENTD_REMOTE_AGENTD AGENTD_SSH; do
         [[ -n ${!var:-} ]] && pass+=(-e "$var=${!var}")
     done
-    t new-session -d -s "$name" -c "$HOME" "${pass[@]}" "$bin remote ${3:--} $name"
+    t new-session -d -s "$name" -c "$HOME" "${pass[@]}" "$bin" remote "${3:--}" "$name"
     echo "remote-lab: session $name (prefix e in the lab to go there)"
     ;;
 holds) "$bin" hold ;;

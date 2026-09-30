@@ -30,6 +30,9 @@ pub struct Input {
     pub agent_pid: u32,
     /// A Codex observation made by the daemon, not a hook (X5).
     pub observing: bool,
+    /// I6: an event sent again for a new pane, already lived through: it
+    /// joins no round.
+    pub replay: bool,
 }
 
 /// The pane as tmux has it when the event is handled (P2), plus what

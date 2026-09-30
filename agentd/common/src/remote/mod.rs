@@ -15,6 +15,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 /// The environment variable of a held program: its holder's socket. A hook
@@ -53,14 +54,47 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(e),
     }
-    let meta = fs::metadata(dir)?;
-    if meta.uid() != rustix::process::getuid().as_raw() || meta.mode() & 0o077 != 0 {
+    // Not followed: a link to a private folder of ours would pass, and could
+    // be swapped for someone else's between the check and the use.
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir()
+        || meta.uid() != rustix::process::getuid().as_raw()
+        || meta.mode() & 0o077 != 0
+    {
         return Err(io::Error::other(format!(
             "{} is not private to this user",
             dir.display()
         )));
     }
     Ok(())
+}
+
+/// Connects to a holder's socket, only if a process of this user answers:
+/// whatever the folder looks like, a socket someone else put there gets no
+/// keys and no events.
+pub fn connect(socket: &Path) -> io::Result<UnixStream> {
+    let stream = UnixStream::connect(socket)?;
+    same_user(&stream)?;
+    Ok(stream)
+}
+
+/// The other end of `stream` runs as this user.
+pub fn same_user(stream: &UnixStream) -> io::Result<()> {
+    let peer = rustix::net::sockopt::socket_peercred(stream)?;
+    if peer.uid == rustix::process::getuid() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "a socket of another user",
+        ))
+    }
+}
+
+/// The pid of the process at the other end of `stream`.
+pub fn peer_pid(stream: &UnixStream) -> Option<u32> {
+    let peer = rustix::net::sockopt::socket_peercred(stream).ok()?;
+    u32::try_from(peer.pid.as_raw_nonzero().get()).ok()
 }
 
 /// A Unix socket path must fit in `sun_path` (108 bytes with its NUL).
@@ -124,6 +158,24 @@ impl Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_folder_is_ours_private_and_no_link() {
+        let base = std::env::temp_dir().join(format!("agentd-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let real = base.join("real");
+        ensure_dir(&real).unwrap();
+        ensure_dir(&real).unwrap();
+        // A link to it passes every other check, and is refused.
+        std::os::unix::fs::symlink(&real, base.join("link")).unwrap();
+        assert!(ensure_dir(&base.join("link")).is_err());
+        // Not private.
+        let open = base.join("open");
+        fs::create_dir(&open).unwrap();
+        fs::set_permissions(&open, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        assert!(ensure_dir(&open).is_err());
+        fs::remove_dir_all(&base).unwrap();
+    }
 
     #[test]
     fn names() {

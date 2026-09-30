@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Read};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -77,7 +76,12 @@ pub fn held(kind: Kind, payload: &[u8], started: SystemTime, hold: &Path) {
     let Ok(body) = serde_json::to_vec(&request(kind, String::new(), event, started)) else {
         return;
     };
-    let Ok(mut stream) = UnixStream::connect(hold) else {
+    // Only a holder of ours, in our holders' folder: AGENTD_HOLD pointed
+    // anywhere else gets nothing of the agent's.
+    if hold.parent() != Some(remote::dir().as_path()) {
+        return;
+    }
+    let Ok(mut stream) = remote::connect(hold) else {
         return;
     };
     let _ = stream.set_write_timeout(Some(REPLY_TIMEOUT));

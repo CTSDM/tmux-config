@@ -46,6 +46,10 @@ pub struct Remote {
     /// shows the agent's state: its option writes only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay: bool,
+    /// Its number at the holder, from 1: a client that reconnects says the
+    /// last it got, and gets the ones after it.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 /// I5: a session Claude Code runs in the background, shown by the `claude`

@@ -39,6 +39,10 @@ detail; any other non-object is the detail itself (as JSON text if not a
 string). Tool label: `tool` alone when detail is empty, else `tool: detail`.
 How a number is spelled in that JSON text is not part of the contract (jq
 keeps the literal `1.50`, serde writes `1.5`).
+**CHANGE C12.** Control characters (C0, DEL, C1) count as whitespace too:
+jq's `\s` keeps them, and tmux reads options back with `\x1e`/`\x1f` as
+separators (one inside a field shifts every field after it) while an escape
+would reach the terminal that shows it. Bash keeps them.
 
 **I4. Ownership.** Only the pane's own agent counts. Walk from the hook's
 parent process up through its ancestors until reaching the pane's
@@ -75,7 +79,10 @@ Here, instead of I4: the walk from `agentd remote` (the request's chain)
 reaches `pane_pid` within 13 processes, none of them named `claude` or
 `codex`. The event then counts as the pane agent's, with no local agent
 process: B1, B2, H5b and E2's transcript check see nothing, and E2 leaves a
-pane whose `@agent_remote` is set alone. An event marked `replay` (sent
+pane whose `@agent_remote` is set alone. Nothing such an event carries is
+taken as it came: its fields are cut again as I3 says, its transcript (a path
+on the other host) is dropped, a fingerprint counts only if it is one, and of
+its environment only `CLAUDE_CONFIG_DIR` is kept. An event marked `replay` (sent
 again for a new pane) only writes its options: no sound, notification,
 reminder or blink. Codex events from a remote pane are dropped. Bash has no remote panes.
 
