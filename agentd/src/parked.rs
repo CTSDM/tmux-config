@@ -100,6 +100,19 @@ pub fn shown_by(config: &Path, viewer: u32) -> Option<u32> {
     })
 }
 
+/// E2 (CHANGE C13): Claude Code's own word that `pid`'s session runs no
+/// turn: its registry entry says `idle`, since `statusUpdatedAt` (epoch ms).
+/// `busy` (a turn) and `waiting` (a dialog or a question open) are not.
+/// A prompt cancelled with ctrl-c before its answer sends no hook and marks
+/// nothing in the transcript: this is how its end is known.
+pub fn idle_since(config: &Path, pid: u32) -> Option<u64> {
+    let v = entry(&config.join("sessions"), pid)?;
+    if str_of(&v, "status")? != "idle" {
+        return None;
+    }
+    v.get("statusUpdatedAt")?.as_u64()
+}
+
 /// The `CLAUDE_CONFIG_DIR` a process started with.
 pub fn config_dir_of(pid: u32) -> Option<PathBuf> {
     let env = procfs::entries(pid, "environ")?;
@@ -137,6 +150,26 @@ mod tests {
 
     fn start(pid: u32) -> String {
         procfs::stat(pid).unwrap().starttime.to_string()
+    }
+
+    #[test]
+    fn c13_the_registry_says_when_a_session_is_idle() {
+        let me = id();
+        let at = |status: &str| {
+            let dir = registry(&[json!({"pid": me, "procStart": start(me),
+                "kind": "interactive", "status": status, "statusUpdatedAt": 1790843255974_u64})]);
+            let got = idle_since(&dir, me);
+            fs::remove_dir_all(&dir).unwrap();
+            got
+        };
+        assert_eq!(at("idle"), Some(1790843255974));
+        assert_eq!(at("busy"), None);
+        assert_eq!(at("waiting"), None);
+        // An entry another process with the same pid wrote: not this one's.
+        let dir = registry(&[json!({"pid": me, "procStart": "1", "status": "idle",
+            "statusUpdatedAt": 5})]);
+        assert_eq!(idle_since(&dir, me), None);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

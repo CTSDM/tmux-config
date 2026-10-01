@@ -386,6 +386,14 @@ a pane in `working`, `needs` or `compacting`; mission control opens;
   entry of type `user`, `assistant` or `system` with subtype `turn_duration`
   is that system entry, or a user message whose text starts with
   `[Request interrupted by user`. Unreadable transcript: not over.
+- **CHANGE C13.** Claude in `working`, `needs` or `compacting` whose session
+  Claude Code's registry (I5's, the entry of the pane's agent, or of the
+  background session it shows) says is `idle`, set at least a second after
+  `@agent_since` → as the transcript case above. A prompt cancelled with
+  ctrl-c before its answer sends no hook and leaves nothing in the
+  transcript (no `[Request interrupted by user`), so the pane stayed
+  `working`. `busy` and `waiting` (a dialog or a question open) are not
+  idle. Bash has no such check.
 - Claude background shells: B2.
 - Codex: one observation now (X5), and observation resumes if needed.
 

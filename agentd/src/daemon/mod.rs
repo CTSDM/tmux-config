@@ -1308,16 +1308,24 @@ impl Daemon {
             return Ok(Some((batch, true)));
         };
         let mut ops = Vec::new();
+        let mut why = "";
         if core::reconcile::busy(&p.state) {
             let lines = procfs::tail_lines(&p.transcript, core::reconcile::TRANSCRIPT_LINES);
             if lines.is_some_and(|l| core::reconcile::turn_over(l.iter().map(String::as_str))) {
+                why = " turn-over";
+            } else if registry_idle(apid, &p.since) {
+                // C13: e.g. a prompt cancelled with ctrl-c before its answer.
+                why = " claude-idle";
+            }
+            if !why.is_empty() {
                 ops = core::reconcile::idle((now_ms() / 1000) as i64);
                 let _ = self.tmux.write(pane, &ops).await;
                 self.left_wait(pane, &ops);
             }
         }
         let t = eventlog::transition(p, &ops);
-        self.events.line(pane, "claude", &format!("reconcile {t}"));
+        self.events
+            .line(pane, "claude", &format!("reconcile{why} {t}"));
         // B2: background shells nobody watches.
         if !self.background.borrow().contains_key(pane) {
             let n = procfs::count_children_matching(apid, SNAPSHOT_SHELL);
@@ -1540,6 +1548,18 @@ impl Daemon {
 /// What was missing at this sweep and the last one: gone for good. A single
 /// miss is not enough, since a sweep's list may predate a pane or a session
 /// whose first event is handled while the list is on its way.
+/// C13: Claude Code's registry says the agent's session runs no turn, and
+/// said so after the pane went busy (`since`, epoch seconds): the second
+/// after it, since an `idle` from just before the prompt is not its end.
+fn registry_idle(agent: u32, since: &str) -> bool {
+    let Ok(since) = since.parse::<u64>() else {
+        return false;
+    };
+    parked::config_dir_of(agent)
+        .and_then(|config| parked::idle_since(&config, agent))
+        .is_some_and(|at| at >= (since + 1) * 1000)
+}
+
 fn second_miss<'a>(
     missing: &mut HashSet<String>,
     now: impl Iterator<Item = &'a String>,

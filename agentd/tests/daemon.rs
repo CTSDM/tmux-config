@@ -419,21 +419,23 @@ impl Server {
     /// A pane whose process is named `claude`: a copy of dash (sleep may be
     /// a multicall binary that goes by its name), kept alive by `; :`.
     fn claude_pane(&self) -> String {
+        self.claude_pane_with(&[])
+    }
+
+    /// The same, with these variables in the fake claude's environment.
+    fn claude_pane_with(&self, env: &[(&str, &str)]) -> String {
         let fake = self.runtime.join("claude");
         if !fake.exists() {
             fs::copy(fs::canonicalize("/bin/sh").unwrap(), &fake).unwrap();
         }
         let command = format!("{} -c 'sleep 600; :'", fake.display());
-        let pane = self.tmux(&[
-            "new-window",
-            "-d",
-            "-P",
-            "-F",
-            "#{pane_id}",
-            "-t",
-            "main:",
-            &command,
-        ]);
+        let vars: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "main:"];
+        for v in &vars {
+            args.extend(["-e", v.as_str()]);
+        }
+        args.push(&command);
+        let pane = self.tmux(&args);
         let pid: u32 = self
             .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
             .parse()
@@ -1608,4 +1610,65 @@ fn l1_the_top_rows_values_follow_the_panes() {
     assert_eq!(get("main:", "@s-other-untracked"), "");
     // Ours has none of them.
     assert_eq!(get("_peek-agentd:", "@s-other-untracked"), "");
+}
+
+#[test]
+fn c13_reconcile_idles_a_pane_claude_says_is_idle() {
+    let Some(mut server) = Server::start() else {
+        return;
+    };
+    server.start_daemon();
+    let config = server.runtime.join("claude-config");
+    fs::create_dir_all(config.join("sessions")).unwrap();
+    let pane = server.claude_pane_with(&[("CLAUDE_CONFIG_DIR", config.to_str().unwrap())]);
+    let pane_pid: u32 = server
+        .tmux(&["display", "-p", "-t", &pane, "#{pane_pid}"])
+        .parse()
+        .unwrap();
+    // The transcript can't tell: a prompt with no answer, as ctrl-c leaves it.
+    let transcript = server.runtime.join("t.jsonl");
+    fs::write(
+        &transcript,
+        "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n",
+    )
+    .unwrap();
+    let since = 1_790_843_253_u64;
+    let registry = |status: &str, at: u64| {
+        let entry = json!({"pid": pane_pid, "kind": "interactive", "status": status,
+            "statusUpdatedAt": at,
+            "procStart": agentd::procfs::stat(pane_pid).unwrap().starttime.to_string()});
+        fs::write(
+            config.join(format!("sessions/{pane_pid}.json")),
+            entry.to_string(),
+        )
+        .unwrap();
+    };
+    let state = |server: &Server| server.tmux(&["show", "-pqv", "-t", &pane, "@agent_state"]);
+    let busy = |server: &Server| {
+        for (name, value) in [
+            ("@agent", "claude"),
+            ("@agent_state", "working"),
+            ("@agent_since", &since.to_string()),
+            ("@agent_transcript", transcript.to_str().unwrap()),
+        ] {
+            server.tmux(&["set", "-p", "-t", &pane, name, value]);
+        }
+    };
+    // Busy, or waiting on a dialog: as it is.
+    for status in ["busy", "waiting"] {
+        busy(&server);
+        registry(status, since * 1000 + 2_974);
+        assert!(server.ctl(&["reconcile", &pane]).status.success());
+        assert_eq!(state(&server), "working", "{status}");
+    }
+    // Idle from before the prompt (the same second): not its end.
+    registry("idle", since * 1000 + 500);
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(state(&server), "working");
+    // Idle after it: the turn is over (the prompt was cancelled).
+    registry("idle", since * 1000 + 2_974);
+    assert!(server.ctl(&["reconcile", &pane]).status.success());
+    assert_eq!(state(&server), "idle");
+    let log = fs::read_to_string(server.runtime.join("state/tmux-agents/events.log")).unwrap();
+    assert!(log.contains("reconcile claude-idle working->idle"), "{log}");
 }
