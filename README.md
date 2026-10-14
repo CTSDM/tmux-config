@@ -4,6 +4,32 @@ Personal tmux setup (prefix `Alt+a`) that keeps track of the Claude Code and
 Codex sessions running in its panes, inspired by
 [cmux](https://github.com/manaflow-ai/cmux) but built on plain tmux.
 
+<p align="center">
+  <img src="docs/demo.gif" alt="The bar showing agents working, one needing attention and blinking, prefix u jumping to it, and mission control listing every agent" width="100%">
+</p>
+
+- **A glyph per agent** on a two-row bar (your space's sessions, then this
+  session's windows): `●` working, `▲` needs you, `✓` done and not seen yet,
+  `○` idle; `◐` subagents and `○゙` shells still running after its turn.
+- **It tells you when it needs you:** the session and its tab blink amber, a
+  desktop notification and a sound go off, and clicking the notification
+  brings you to the pane. Finished work stays green until you look at it.
+- **Get anywhere in two keys:** the agent that needs you, mission control
+  with a live preview of every pane, sessions by number or by search.
+- **Spaces:** personal and work sessions never mix on the bar, in the
+  searches or in the jumps.
+- **agentd**, a small Rust daemon, does the bookkeeping: a hook costs the
+  agent about a millisecond, and nothing runs while nothing happens.
+
+| keys | |
+| --- | --- |
+| `prefix u` | the agent that needs you most |
+| `prefix a` | mission control: every agent, a live preview, `ctrl-o` to work in it right there |
+| `prefix e` | search the sessions of your space |
+| `prefix g` `1`-`9`, `prefix (` `)` | a session by number, the previous / next one |
+| `prefix N` | a new session: name and path, with Tab completion |
+| `prefix S`, `prefix Q` | this session's space; mute a space, sounds on/off |
+
 ## Install
 
 ```sh
@@ -58,12 +84,6 @@ as rofi is involved, and `setup.sh` says what your desktop will be missing.
 - [docs/daemon/](docs/daemon/): agentd's design, the behavior contract both
   implementations keep, and its task log.
 
-At a glance: a two-row bar (your space's sessions, then this session's
-windows) with a glyph per agent (`●` working, `▲` needs you, `✓` done, `○`
-idle), desktop notifications and sounds when an agent needs you, personal and
-work spaces that never mix, and `prefix a` / `prefix u` / `prefix e` to get
-anywhere.
-
 ## Development
 
 agentd's checks (format, lints, unit and integration tests against isolated
@@ -79,6 +99,14 @@ implementation (`tests/README.md`):
 ```sh
 cd tests && uv run pytest                                  # bash
 AGENT_IMPL=rust AGENTD=../agentd/target/release/agentd uv run pytest
+```
+
+The demo above is recorded the same way, on an isolated server with fake
+agents (asciinema 3 and [agg](https://github.com/asciinema/agg)):
+
+```sh
+cd tests && uv run python demo/record.py /tmp/demo.cast
+python3 demo/render.py /tmp/demo.cast ../docs/demo.gif
 ```
 
 Codex integration tests (isolated tmux server, no API calls):
